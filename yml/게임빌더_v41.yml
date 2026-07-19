@@ -2998,7 +2998,7 @@ workflow:
           - id: worker_body
             key: ''
             type: text
-            value: '{"text": "{{#c_code_voice_lookup.tts_text#}}", "voice_id": "{{#c_code_voice_lookup.voice_id#}}"}'
+            value: '{"text": "{{#c_code_voice_lookup_auto.tts_text#}}", "voice_id": "{{#c_code_voice_lookup_auto.voice_id#}}"}'
           type: json
         desc: auto_tts 경로용 Fish Audio TTS 호출
         headers: Content-Type:application/json

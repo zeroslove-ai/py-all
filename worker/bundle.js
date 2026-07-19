@@ -308,7 +308,7 @@ var worker_default = {
         region: "auto"
       });
       const signUrl = new URL(`https://98efff3e9faacb9e57a14177682143a8.r2.cloudflarestorage.com/tts/${objectKey}`);
-      signUrl.searchParams.set("X-Amz-Expires", "3600");
+      signUrl.searchParams.set("X-Amz-Expires", "604800");
       const signed = await r2.sign(signUrl, { method: "GET", aws: { signQuery: true } });
       return Response.json({ ok: true, url: signed.url, key: objectKey });
     } catch (e) {

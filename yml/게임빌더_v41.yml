@@ -48,6 +48,11 @@ workflow:
     - current_mode
     value: build
     value_type: string
+  - id: auto_tts
+    name: auto_tts
+    value: true
+    value_type: boolean
+    description: 자동 TTS 활성화 여부
   environment_variables:
   - description: ''
     id: 28c27356-cf6b-4ef5-902c-206b09fe5337

@@ -827,12 +827,6 @@ workflow:
       target: va_auto_tts
       targetHandle: target
       type: custom
-    - id: e_va_auto_tts_source_c_code_strip_catalog
-      source: va_auto_tts
-      sourceHandle: source
-      target: c_code_strip_catalog
-      targetHandle: target
-      type: custom
     - id: e_c_answer_stream_source_c_code_check_autotts
       source: c_answer_stream
       sourceHandle: source

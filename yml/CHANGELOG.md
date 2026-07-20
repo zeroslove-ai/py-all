@@ -4,6 +4,18 @@
 
 ---
 
+## v44 (2026-07-20 10:18 KST)
+
+**사용자 지시**: 마이너 수정 — 오디오-이미지 출력 순서 교체 (음성 먼저, 이미지 나중)
+
+**주요 변경**:
+- `c_code_parser → c_http_image` 직접 엣지 제거
+- `if_auto_tts false → c_http_image`, `if_has_tts false → c_http_image`, `c_answer_audio_auto → c_http_image` 엣지 추가
+- 음성 브랜치 완료 후 이미지 브랜치로 직렬화 — 출력 순서 보장: 서사 → 오디오 → 이미지
+- 노드 72개 / 엣지 75개 (v43에서 +0노드 +2엣지)
+
+---
+
 ## v43 (2026-07-20 10:10 KST)
 
 **사용자 지시**: v40 기반 Claude rebuild. auto_tts 기본 ON, 서사 스트리밍 직후 자동 음성 생성, 코드파서 뒤에 음성 브랜치 배치.

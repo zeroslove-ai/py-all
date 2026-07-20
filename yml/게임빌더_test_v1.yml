@@ -22,7 +22,7 @@ workflow:
     selector:
     - conversation
     - active_game_id
-    value: ''
+    value: 86e35e0a-18b7-4fd7-bfd0-dc2fc7d47074
     value_type: string
   - description: 플레이 턴 카운터
     id: 1ba768b7-4e6f-4f34-9061-068e8d3bd6bd
@@ -780,11 +780,9 @@ workflow:
     - data:
         desc: ''
         items:
-        - input_type: variable
+        - input_type: constant
           operation: over-write
-          value:
-          - g_code_active
-          - game_id
+          value: 86e35e0a-18b7-4fd7-bfd0-dc2fc7d47074
           variable_selector:
           - conversation
           - active_game_id

@@ -1066,7 +1066,7 @@ workflow:
         body:
           data:
           - type: text
-            value: '{"p_game_id": "{{#conversation.active_game_id#}}", "p_character_id": "{{#c_code_parser.character_id#}}", "p_emotion_id": "{{#c_code_parser.emotion_id#}}", "p_image_id": "{{#c_code_parser.image_id#}}"}'
+            value: '{"p_game_id": "29809a8f-b8f1-4fa4-bce1-083e5a7eadac", "p_character_id": "{{#c_code_parser.character_id#}}", "p_emotion_id": "{{#c_code_parser.emotion_id#}}", "p_image_id": "{{#c_code_parser.image_id#}}"}'
           type: json
         desc: ''
         headers: 'apikey:{{#env.SUPABASE_SERVICE_KEY#}}

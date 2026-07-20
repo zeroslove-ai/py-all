@@ -4,6 +4,23 @@
 
 ---
 
+## v43 (2026-07-20 10:10 KST)
+
+**사용자 지시**: v40 기반 Claude rebuild. auto_tts 기본 ON, 서사 스트리밍 직후 자동 음성 생성, 코드파서 뒤에 음성 브랜치 배치.
+
+**주요 변경**:
+- `/음성자동 켜기`/`끄기` 명령어 — `va_turn` 직후 바로 분기, 턴 소모 절대 없음
+- `auto_tts: true` 기본 ON (conversation variable + game_save.data fallback)
+- 음성 브랜치: `c_code_parser` → `c_code_check_autotts` → `if_auto_tts` → `c_code_voice_lookup_auto` → `if_has_tts` → TTS Worker
+- 화자: `c_code_parser.character_id` 사용 — npcs_present 검증 + 서사 실명 매칭 완료된 값
+- Worker 실패 시 저장/이미지 흐름과 완전 분리 (병렬, 서로 영향 없음)
+- 노드 72개 / 엣지 73개 (v40 기반 + 11개 신규)
+- Dangling edges: 0 / 중복 edges: 0
+
+**사용자 피드백**: "코드파서 뒤에 두는 거 염두하라고 했잖아. 쓸데없는 기능 쳐넣으니..ㅉㅉ" → v41/v42 폐기, v40에서 처음부터 rebuild
+
+---
+
 ## v41 (2026-07-20 08:55 KST)
 
 **사용자 지시**: auto_tts 기본 ON, 서사 스트리밍 직후 자동 음성 생성, 마인드모니터 위 출력

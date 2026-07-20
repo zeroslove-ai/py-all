@@ -167,17 +167,6 @@ workflow:
       targetHandle: target
       type: custom
     - data:
-        isInLoop: false
-        sourceType: start
-        targetType: code
-      id: start-source-cmd_parse-target
-      source: start
-      sourceHandle: source
-      target: g_http_active
-      targetHandle: target
-      type: custom
-      zIndex: 0
-    - data:
         isInIteration: false
         isInLoop: false
         sourceType: code
@@ -213,55 +202,11 @@ workflow:
     - data:
         isInIteration: false
         isInLoop: false
-        sourceType: http-request
-        targetType: code
-      id: e_g_http_active_g_code_active
-      source: g_http_active
-      sourceHandle: source
-      target: g_code_active
-      targetHandle: target
-      type: custom
-    - data:
-        isInIteration: false
-        isInLoop: false
-        sourceType: code
-        targetType: if-else
-      id: e_g_code_active_g_if_active
-      source: g_code_active
-      sourceHandle: source
-      target: g_if_active
-      targetHandle: target
-      type: custom
-    - data:
-        isInIteration: false
-        isInLoop: false
-        sourceType: if-else
-        targetType: assigner
-      id: e_g_if_active_true_g_va_active
-      source: g_if_active
-      sourceHandle: 'true'
-      target: g_va_active
-      targetHandle: target
-      type: custom
-    - data:
-        isInIteration: false
-        isInLoop: false
         sourceType: assigner
         targetType: http-request
       id: e_g_va_active_ctx_load
       source: g_va_active
       sourceHandle: source
-      target: ctx_load
-      targetHandle: target
-      type: custom
-    - data:
-        isInIteration: false
-        isInLoop: false
-        sourceType: if-else
-        targetType: http-request
-      id: e_g_if_active_false_ctx_load
-      source: g_if_active
-      sourceHandle: 'false'
       target: ctx_load
       targetHandle: target
       type: custom
@@ -450,6 +395,9 @@ workflow:
     - id: edge_c_http_setsave_c_http_image_c7849ccb
       source: c_http_setsave
       target: c_http_image
+    - id: edge_start_g_va_active_b5674448
+      source: start
+      target: g_va_active
     nodes:
     - id: c_code_check_autotts
       data:
@@ -827,107 +775,6 @@ workflow:
         x: 2030
         y: 831.8833333333334
       selected: false
-      type: custom
-      width: 242
-    - data:
-        authorization:
-          type: no-auth
-        body:
-          data: []
-          type: none
-        desc: 새 대화(conversation)마다 active_game_id가 초기화되는 문제를 막기 위해, 매 턴 Supabase의 is_active=true 게임으로 재동기화한다
-        headers: 'apikey:{{#env.SUPABASE_SERVICE_KEY#}}
-
-          Authorization:Bearer {{#env.SUPABASE_SERVICE_KEY#}}'
-        method: get
-        params: 'select:id
-
-          is_active:eq.true
-
-          limit:1'
-        retry_config:
-          max_retries: 3
-          retry_enabled: true
-          retry_interval: 100
-        selected: false
-        ssl_verify: true
-        timeout:
-          connect: 10
-          max_connect_timeout: 10
-          max_read_timeout: 600
-          max_write_timeout: 600
-          read: 600
-          write: 600
-        title: 활성게임 조회
-        type: http-request
-        url: '{{#env.SUPABASE_URL#}}/rest/v1/games'
-      height: 217
-      id: g_http_active
-      position:
-        x: 480
-        y: 700
-      positionAbsolute:
-        x: 480
-        y: 700
-      selected: false
-      type: custom
-      width: 242
-    - data:
-        code: "function main({body}) {\n  let id = '';\n  try {\n    const arr = JSON.parse(body);\n    if (Array.isArray(arr) && arr.length > 0 && arr[0] && arr[0].id) {\n      id = arr[0].id;\n    }\n  } catch (e) {}\n  return { game_id: id, has_id: id ? 'true' : 'false' };\n}"
-        code_language: javascript
-        desc: ''
-        outputs:
-          game_id:
-            type: string
-          has_id:
-            type: string
-        selected: false
-        title: 활성게임ID 파싱
-        type: code
-        variables:
-        - value_selector:
-          - g_http_active
-          - body
-          variable: body
-      height: 52
-      id: g_code_active
-      position:
-        x: 822
-        y: 700
-      positionAbsolute:
-        x: 822
-        y: 700
-      selected: false
-      type: custom
-      width: 242
-    - data:
-        cases:
-        - case_id: 'true'
-          conditions:
-          - comparison_operator: is
-            id: g_if_active_c
-            value: 'true'
-            varType: string
-            variable_selector:
-            - g_code_active
-            - has_id
-          id: 'true'
-          logical_operator: and
-        desc: ''
-        selected: false
-        title: IF 활성게임 있음
-        type: if-else
-      height: 124
-      id: g_if_active
-      position:
-        x: 1164
-        y: 700
-      positionAbsolute:
-        x: 1164
-        y: 700
-      selected: false
-      sourcePosition: right
-      targetPosition: left
       type: custom
       width: 242
     - data:

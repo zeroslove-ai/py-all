@@ -219,7 +219,7 @@ workflow:
       id: e_va_turn_g_http_active
       source: cmd_parse
       sourceHandle: source
-      target: va_turn
+      target: if_play
       targetHandle: target
       type: custom
     - data:
@@ -472,9 +472,22 @@ workflow:
       target: c_answer_audio_auto
       targetHandle: target
       type: custom
-    - id: edge_audio_auto_image_f321a450
+    - id: edge_audio_auto_image_e393d057
       source: c_answer_audio_auto
       target: c_http_image
+      type: custom
+    - id: edge_va_turn_strip_3c60b420
+      source: va_turn
+      target: c_code_strip_catalog
+      type: custom
+    - id: edge_setsave_image_37bb3249
+      source: c_http_setsave
+      target: c_http_image
+      type: custom
+    - id: e_cmd_parse_va_turn
+      source: cmd_parse
+      target: va_turn
+      type: custom
     nodes:
     - id: c_code_check_autotts
       data:

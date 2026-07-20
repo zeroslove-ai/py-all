@@ -4,7 +4,7 @@ app:
   icon_background: '#FFEAD5'
   icon_type: emoji
   mode: advanced-chat
-  name: 게임빌더_v1
+  name: 게임빌더_v41
   use_icon_as_answer_icon: false
 dependencies:
 - current_identifier: null

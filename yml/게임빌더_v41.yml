@@ -2924,7 +2924,7 @@ workflow:
             variable_selector:
             - c_code_check_autotts
             - auto_tts
-          id: case-01
+          id: 'true'
           logical_operator: and
         desc: auto_tts ON일 때만 음성 생성 경로로 분기
         selected: false
@@ -2986,7 +2986,7 @@ workflow:
             variable_selector:
             - c_code_voice_lookup_auto
             - skip_tts
-          id: case-01
+          id: 'true'
           logical_operator: and
         desc: 대사가 있을 때만 음성 생성 (skip_tts=false)
         selected: false

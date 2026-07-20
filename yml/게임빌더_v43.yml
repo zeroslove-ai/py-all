@@ -615,17 +615,6 @@ workflow:
     - data:
         isInIteration: false
         isInLoop: false
-        sourceType: code
-        targetType: http-request
-      id: e_c_code_parser_source_c_http_image
-      source: c_code_parser
-      sourceHandle: source
-      target: c_http_image
-      targetHandle: target
-      type: custom
-    - data:
-        isInIteration: false
-        isInLoop: false
         sourceType: if-else
         targetType: code
       id: e_if_play_true_c_code_strip_catalog
@@ -967,6 +956,42 @@ workflow:
       target: h_http_tts_debuglog
       targetHandle: target
       type: custom
+    - data:
+        isInIteration: false
+        isInLoop: false
+        sourceType: if-else
+        targetType: http-request
+      id: e_if_auto_tts_false_c_http_image
+      selected: false
+      source: if_auto_tts
+      sourceHandle: 'false'
+      target: c_http_image
+      targetHandle: target
+      type: custom
+    - data:
+        isInIteration: false
+        isInLoop: false
+        sourceType: if-else
+        targetType: http-request
+      id: e_if_has_tts_false_c_http_image
+      selected: false
+      source: if_has_tts
+      sourceHandle: 'false'
+      target: c_http_image
+      targetHandle: target
+      type: custom
+    - data:
+        isInIteration: false
+        isInLoop: false
+        sourceType: answer
+        targetType: http-request
+      id: e_c_answer_audio_auto_c_http_image
+      selected: false
+      source: c_answer_audio_auto
+      sourceHandle: source
+      target: c_http_image
+      targetHandle: target
+      type: custom
     nodes:
     - id: if_tts_toggle
       data:
@@ -982,7 +1007,7 @@ workflow:
             - route
           id: 'true'
           logical_operator: and
-        desc: '/음성자동 켜기|끄기 명령을 여기서 조기 종료. play LLM/턴 소모 없이 안내만 하고 끝냄'
+        desc: /음성자동 켜기|끄기 명령을 여기서 조기 종료. play LLM/턴 소모 없이 안내만 하고 끝냄
         selected: false
         title: IF 음성토글 명령
         type: if-else

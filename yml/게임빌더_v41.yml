@@ -2858,12 +2858,19 @@ workflow:
       width: 242
     - id: va_auto_tts
       data:
-        type: assigner
-        variables:
-        - variable: auto_tts
-          value_selector:
+        items:
+        - input_type: variable
+          operation: over-write
+          value:
           - cmd_parse
           - auto_tts
+          variable_selector:
+          - conversation
+          - auto_tts
+        selected: false
+        title: auto_tts 동기화
+        type: assigner
+        version: '2'
       height: 96
       position:
         x: 640.5714285714286

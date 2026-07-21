@@ -1,3 +1,21 @@
+## v60 (2026-07-21)
+
+**사용자 지시**: 최신 YML 임포트, GitHub 업데이트, Supabase 저장 중단
+
+**주요 변경**:
+- `/초기화` 명령어 시스템 완전 재설계
+  - 기존: 빌드 모드 내 LLM 판단으로 실행 (b_http_reset, b_answer_reset)
+  - 변경: 명령어 전용 경로 분리, 2단계 확인 (요청→확인질문→예/아니오)
+  - 빌드 모드에서 `/초기화` 시도 시 리다이렉트 안내 (b_answer_reset_redirect)
+  - 안전성: '네/예/진행' 등만 긍정으로 인정, 애매하면 취소 처리
+- 플레이 LLM (c_llm) 프롬프트 보강: 상식개변 출력 규칙, 어플 정보 보기, 마인드모니터 대화체, 호칭 규칙
+- 빌드 저장 LLM (b_llm_extract) 프롬프트 보강: rulebook_action_resolution, game_difficulty, 데이터 구조 규칙(중첩 객체) 강화
+- 노드: 76→89개, 엣지: 73→90개
+
+**보관 정책 변경**: Supabase yml_versions 저장 중단 → GitHub 단독 보관
+
+---
+
 ## v53 (2026-07-20)
 - 상식개변 출력 강제 명시 (c_llm 프롬프트)
 - rulebook_verification에 상식개변 체크리스트 추가

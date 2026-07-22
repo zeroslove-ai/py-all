@@ -1,6 +1,6 @@
 // api.js — Worker API 호출 함수들
 
-const API_BASE = ''; // 같은 도메인 (Cloudflare Pages + Worker)
+const API_BASE = 'https://game-proxy-v2.zeroslove.workers.dev';
 
 class ApiError extends Error {
   constructor(message, status, details = {}) {

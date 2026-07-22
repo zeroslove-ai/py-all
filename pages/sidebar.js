@@ -53,7 +53,7 @@ const sidebar = {
     const relationshipRoot = document.getElementById('npc-relationship');
     relationshipRoot.replaceChildren();
     relationshipRoot.append('💦 사정 ', this.emphasis(`${playerEjaculationCount}회`), ' · ✨ 오르가즘 ', this.emphasis(`${npcOrgasmCount}회`));
-    this.renderStats(context?.save?.npc_stats?.[characterId] || {}, characterId);
+    this.renderStats(context?.save?.npc_stats?.[characterId] || {}, characterId, context?.save?.npc_stat_changes?.[characterId]);
   },
 
   updateMind(emotion = {}) {
@@ -62,7 +62,7 @@ const sidebar = {
     document.getElementById('mind-physical').textContent = emotion.physical_reaction || '-';
   },
 
-  renderStats(stats = {}, characterId = this.activeCharacterId) {
+  renderStats(stats = {}, characterId = this.activeCharacterId, storedChanges = null) {
     const root = document.getElementById('npc-status');
     const previous = this.previousStats[characterId] || {};
     const next = {};
@@ -76,8 +76,9 @@ const sidebar = {
       valueNode.textContent = `${stat.label} ${Number.isFinite(value) ? value : '-'}`;
       if (Number.isFinite(value)) {
         valueNode.classList.add(this.signal(value));
+        const storedDelta = Number(storedChanges?.[stat.key]?.delta);
         const previousValue = Number(previous[stat.key]);
-        const delta = Number.isFinite(previousValue) ? value - previousValue : null;
+        const delta = Number.isFinite(storedDelta) ? storedDelta : (Number.isFinite(previousValue) ? value - previousValue : null);
         if (delta) {
           const change = document.createElement('small');
           change.className = delta > 0 ? 'delta-up' : 'delta-down';

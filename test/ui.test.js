@@ -13,6 +13,8 @@ test('NPC status is rendered as one inline status sentence, not five rows', () =
   assert.doesNotMatch(renderStats, /this\.row\(/);
   assert.doesNotMatch(renderStats, /stat-row/);
   assert.match(pageSource, /max-height: 2\.6em/);
+  assert.match(sidebarSource, /storedChanges/);
+  assert.match(sidebarSource, /storedDelta/);
 });
 
 test('sidebar resume button and slash command share resumeGame without turn APIs', () => {

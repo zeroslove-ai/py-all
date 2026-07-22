@@ -434,7 +434,7 @@
         const activeCharacterId = state.context?.save?.last_character_id;
         if (activeCharacterId && activeCharacterId !== 'narrator') {
           sidebar.updateMind(state.context?.save?.npc_emotion?.[activeCharacterId]);
-          sidebar.renderStats(state.context?.save?.npc_stats?.[activeCharacterId], activeCharacterId);
+          sidebar.renderStats(state.context?.save?.npc_stats?.[activeCharacterId], activeCharacterId, state.context?.save?.npc_stat_changes?.[activeCharacterId]);
           api.image(state.gameId, activeCharacterId, state.context?.save?.last_image_id)
             .then(res => { if (res.image_url) ui.showImage(res.image_url); })
             .catch(() => {});
@@ -537,8 +537,10 @@
       try {
         const saved = await api.commitTurn(state.gameId, pending.nextTurn, pending.narrative, pending.extract, pending.mode === 'opening' ? { opening_started: true } : {}, pending.input);
         state.turnCount = saved.turn_count; ui.updateMeta(null, state.turnCount);
+        if (saved.npc_stats) pending.extract.npc_stats = saved.npc_stats;
+        if (saved.npc_stat_changes) pending.extract.npc_stat_changes = saved.npc_stat_changes;
         saveFeedback([]);
-        sidebar.updateCharacter(pending.extract.character_id); sidebar.updateMind(pending.extract.npc_emotion); sidebar.renderStats(pending.extract.npc_stats, pending.extract.character_id);
+        sidebar.updateCharacter(pending.extract.character_id); sidebar.updateMind(pending.extract.npc_emotion); sidebar.renderStats(pending.extract.npc_stats, pending.extract.character_id, pending.extract.npc_stat_changes);
         ui.renderGameplayChoices(pending.extract.choices, submitChoice, { setup: pending.mode === 'player_setup' });
         prepareMedia(pending.extract);
       } catch (error) {

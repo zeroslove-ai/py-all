@@ -10,7 +10,7 @@ import {
   normalizeExtract,
   normalizeImageCatalog,
   selectImageId,
-  sanitizeNpcStats,
+  applyNpcStatChanges,
   getCsaLimits,
   applyCsaAction,
   isCsaApplicable,
@@ -145,11 +145,35 @@ test('Worker owns experience and level progression', () => {
   assert.deepEqual(calculateProgress({ level: 10, exp: 8 }, 'major'), { level: 10, exp: 13, leveled_up: false, next_level_exp: 0 });
 });
 
-test('NPC stats are bounded, limited per turn, and keep hypnosis resistance fixed', () => {
-  const stats = sanitizeNpcStats({ 호감도: 50, 신뢰도: 2, 최면저항력: 77 }, { 호감도: 99, 신뢰도: -50, 최면저항력: 0 });
-  assert.equal(stats.호감도, 55);
-  assert.equal(stats.신뢰도, 0);
-  assert.equal(stats.최면저항력, 77);
+test('NPC stat deltas are Worker-calculated, bounded, and preserve hypnosis resistance', () => {
+  const update = applyNpcStatChanges(
+    { 호감도: 50, 신뢰도: 2, 최면깊이: 10, 순응도: 20, 최면저항력: 77 },
+    {
+      호감도: { delta: 3, reason: '친절한 도움' },
+      신뢰도: { delta: -8, reason: '거짓말 발각' },
+      최면깊이: { delta: 2, reason: '명확한 최면 성공' },
+      순응도: { delta: 4, reason: '최면 후 자연스럽게 따름' },
+      최면저항력: { delta: 2, reason: '무시되어야 함' }
+    }
+  );
+  assert.equal(update.stats.호감도, 53);
+  assert.equal(update.stats.신뢰도, 2);
+  assert.equal(update.stats.최면깊이, 12);
+  assert.equal(update.stats.순응도, 24);
+  assert.equal(update.stats.최면저항력, 77);
+  assert.equal(update.changes.호감도.delta, 3);
+  assert.equal(update.changes.신뢰도.delta, 0);
+  assert.match(update.errors.join('\n'), /신뢰도: delta -8 exceeds allowed ±5/);
+  assert.match(update.errors.join('\n'), /최면저항력: non-zero delta ignored/);
+});
+
+test('NPC obedience is capped at three without a hypnosis-depth event', () => {
+  const update = applyNpcStatChanges({ 순응도: 20 }, {
+    순응도: { delta: 4, reason: '평범한 대화' },
+    최면깊이: { delta: 0, reason: '일반 대화' }
+  });
+  assert.equal(update.stats.순응도, 20);
+  assert.match(update.errors.join('\n'), /순응도: delta 4 exceeds allowed ±3/);
 });
 
 test('CSA uses level limits, stores spatial scope, and filters current scene only', () => {
@@ -173,6 +197,9 @@ test('extract prompt receives raw player input separately from the narrative', (
 
   assert.match(prompt, /\[플레이어의 이번 원본 입력\]\n민준 \/ 의사/);
   assert.match(prompt, /서사에 다시 적혀 있지 않아도 반드시 player_patch/);
+  assert.match(prompt, /NPC STAT DELTA CONTRACT/);
+  assert.match(prompt, /npc_stat_changes만 반환한다/);
+  assert.doesNotMatch(prompt, /절대값으로 환산/);
   assert.match(prompt, /\[방금 생성된 서사\]\n진행자가 플레이어의 답을 되묻는다/);
 });
 
@@ -180,16 +207,17 @@ test('save patch nests NPC state under character ID', () => {
   const patch = buildSavePatch({
     character_id: 'heroine3',
     image_id: 9,
-    npc_stats: { 호감도: 20 },
+    npc_stat_changes: { 호감도: { delta: 2, reason: '도움에 안도함' } },
     npc_emotion: { surface: '침착', inner: '긴장' },
     player_patch: { name: '테스터' },
     story_summary_overall: '전체',
     story_summary_recent100: '최근',
     choices: ['계속한다']
-  }, { opening_started: true });
+  }, { opening_started: true }, null, { npc_stats: { heroine3: { 호감도: 20, 최면저항력: 65 } } });
 
-  assert.equal(patch.npc_stats.heroine3.호감도, 5);
-  assert.equal(patch.npc_stats.heroine3.최면저항력, 0);
+  assert.equal(patch.npc_stats.heroine3.호감도, 22);
+  assert.equal(patch.npc_stats.heroine3.최면저항력, 65);
+  assert.deepEqual(patch.npc_stat_changes.heroine3.호감도, { delta: 2, reason: '도움에 안도함' });
   assert.deepEqual(patch.npc_emotion, {
     heroine3: { surface: '침착', inner: '긴장' }
   });
@@ -241,6 +269,17 @@ test('story prompt uses the V1-style player status panel contract and excludes m
   assert.match(prompt.messages[0].content, /FINAL OUTPUT CONTRACT/);
   assert.match(prompt.messages[0].content, /exactly four in-world action choices/);
   assert.match(prompt.messages[0].content, /Never include a mind monitor/);
+});
+
+test('Story and Extract prompt lengths are logged and NPC delta rules stay Extract-only', () => {
+  const ctx = { master: { characters: {} }, save: { player: {} }, recent_memories: [] };
+  const story = buildStoryPrompt(ctx, '테스트 행동', 1);
+  const extract = buildExtractPrompt('테스트 서사', '테스트 행동', ctx, [], 2);
+  console.log(`[prompt-length] story=${story.messages[0].content.length} extract=${extract.length}`);
+  assert.doesNotMatch(story.messages[0].content, /NPC STAT DELTA CONTRACT|npc_stat_changes/);
+  assert.match(extract, /NPC STAT DELTA CONTRACT/);
+  assert.equal(story.messages[0].content.length > 0, true);
+  assert.equal(extract.length > 0, true);
 });
 
 test('opening mode remains explicit until opening is committed', () => {

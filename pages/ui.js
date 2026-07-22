@@ -98,6 +98,18 @@ const ui = {
     this.scrollToBottom();
   },
 
+  restoreNarrative(text) {
+    this.els.storyStream.querySelectorAll('.narrative, .divider').forEach(node => node.remove());
+    if (!text) return;
+    const div = document.createElement('div');
+    div.className = 'narrative';
+    div.textContent = text;
+    this.els.storyStream.appendChild(div);
+    const hr = document.createElement('hr'); hr.className = 'divider';
+    this.els.storyStream.appendChild(hr);
+    this.scrollToBottom();
+  },
+
   showRetryNotice(text, actionLabel, onRetry, blocking = true) {
     const div = document.createElement('div');
     div.className = 'narrative';

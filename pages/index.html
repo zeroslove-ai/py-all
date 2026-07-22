@@ -477,6 +477,13 @@
       }
     }
 
+    function restoreLastTurn() {
+      const memories = state.context?.recent_memories || [];
+      const last = memories[memories.length - 1];
+      const narrative = typeof last === 'string' ? last : last?.content || '';
+      ui.restoreNarrative(narrative);
+    }
+
     function feedbackKey() { return `gameFeedback:${state.gameId}`; }
     function getFeedback() { try { return JSON.parse(localStorage.getItem(feedbackKey()) || '[]'); } catch { return []; } }
     function saveFeedback(items) { localStorage.setItem(feedbackKey(), JSON.stringify(items)); }
@@ -488,6 +495,7 @@
         ui.showSystemMessage('사용 가능한 명령어\n/플레이 — 현재 상태 새로고침\n/리셋 — 진행 기록 초기화\n/피드백 내용 — 다음 서사에 한 번 반영\n/음성 켜기 · /음성 끄기');
       } else if (command === '/플레이') {
         await loadGameContext();
+        restoreLastTurn();
         const choices = state.context?.save?.active_suggestions || [];
         ui.renderChoices(choices.map((text, i) => ({ marker: ['①','②','③','④'][i] || '•', text, isExplicit: false })), submitChoice);
         ui.showSystemMessage('현재 게임을 이어서 진행합니다.');

@@ -305,8 +305,7 @@ function handleVersion(env) {
   return jsonResponse({
     worker: 'game-proxy-v2',
     version_id: metadata.id || null,
-    tag: metadata.tag || null,
-    message: metadata.message || null
+    tag: metadata.tag || null
   });
 }
 

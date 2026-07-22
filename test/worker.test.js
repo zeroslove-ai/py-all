@@ -119,6 +119,6 @@ test('version endpoint exposes Cloudflare version metadata', async () => {
     VERSION_METADATA: { id: 'version-id', tag: 'git-tag', message: 'git:commit' }
   });
   assert.deepEqual(await response.json(), {
-    worker: 'game-proxy-v2', version_id: 'version-id', tag: 'git-tag', message: 'git:commit'
+    worker: 'game-proxy-v2', version_id: 'version-id', tag: 'git-tag'
   });
 });

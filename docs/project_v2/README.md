@@ -13,17 +13,18 @@
 | **플랫폼** | Cloudflare Workers + Pages (Web) |
 | **기존 Dify** | 완전 분리, 계속 운영 유지 |
 | **기존 Supabase** | ckzwlmoojtmcpwlqsqzv (Dify용 유지) |
-| **새 Supabase** | rlyjxt5snrvkmg6gbw (v2용) |
+| **새 Supabase** | ovltkzwddxsekcfeskds (v2용) |
 | **Ren'Py** | 백업안으로 보류 |
 
 ## 2. 새 Supabase 정보
 
 | 항목 | 값 |
 |---|---|
-| URL | https://rlyjxt5snrvkmg6gbw.supabase.co |
+| URL | https://ovltkzwddxsekcfeskds.supabase.co |
 | Publishable Key | sb_publishable_ltzbklyjxt5SNrvKMG6gbw_51ugNhZP |
 | Service Key | sb_secret_9b37UcA8EsLrjKuhEQ9dTw_2YddI-T4 |
 | RLS | 비활성화 (사용자 지시) |
+| 현재 상태 | 테이블/RPC 미생성 — 스키마 설정 필요 |
 
 ## 3. 보안 구조
 
@@ -100,4 +101,4 @@
 
 | 날짜 | 내용 |
 |---|---|
-| 2026-07-22 | 초기 작성 |
+| 2026-07-22 | 초기 작성, URL 정정 (ovltkzwddxsekcfeskds) |

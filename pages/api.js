@@ -36,13 +36,14 @@ const api = {
   // story()는 stream.js의 streamStory()가 담당
 
   // ─── 3. 상태 추출 ───
-  async extract(gameId, narrativeText, turnCount) {
+  async extract(gameId, narrativeText, turnCount, playerInput = '') {
     const res = await fetch(`${API_BASE}/api/extract`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         game_id: gameId,
         narrative_text: narrativeText,
+        player_input: playerInput,
         turn_count: turnCount
       })
     });

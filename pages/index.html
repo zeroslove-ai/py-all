@@ -382,7 +382,8 @@
         }
 
         // ② 상태 추출
-        const extract = await api.extract(state.gameId, narrative, nextTurn);
+        // 원본 입력을 별도 필드로 보내 이름·직업 등이 서사에서 생략돼도 저장한다.
+        const extract = await api.extract(state.gameId, narrative, nextTurn, input);
         state.lastExtract = extract;
 
         // ③ 이미지/TTS는 선택 작업으로 병렬 실행

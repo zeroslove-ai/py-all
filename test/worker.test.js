@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 
 import {
   buildSavePatch,
+  buildExtractPrompt,
   buildStoryPrompt,
   normalizeExtract,
   normalizeImageCatalog
@@ -20,6 +21,20 @@ test('extract normalization converts numeric image IDs', () => {
   assert.equal(extract.image_id, 42);
   assert.deepEqual(extract.choices, []);
   assert.deepEqual(extract.player_patch, {});
+});
+
+test('extract prompt receives raw player input separately from the narrative', () => {
+  const prompt = buildExtractPrompt(
+    '진행자가 플레이어의 답을 되묻는다.',
+    '민준 / 의사',
+    { master: {}, save: {} },
+    [],
+    1
+  );
+
+  assert.match(prompt, /\[플레이어의 이번 원본 입력\]\n민준 \/ 의사/);
+  assert.match(prompt, /서사에 다시 적혀 있지 않아도 반드시 player_patch/);
+  assert.match(prompt, /\[방금 생성된 서사\]\n진행자가 플레이어의 답을 되묻는다/);
 });
 
 test('save patch nests NPC state under character ID', () => {

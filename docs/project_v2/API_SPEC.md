@@ -89,12 +89,13 @@ data: [DONE]
 
 ## 3. `POST /api/extract`
 
-완성된 서사와 최신 컨텍스트를 바탕으로 저장·이미지·TTS에 필요한 구조화 값을 추출한다. 다음 턴 번호는 Worker가 DB의 현재 턴 수에서 계산한다.
+완성된 서사, 플레이어가 이번 턴에 실제로 보낸 원본 입력, 최신 컨텍스트를 바탕으로 저장·이미지·TTS에 필요한 구조화 값을 추출한다. 다음 턴 번호는 Worker가 DB의 현재 턴 수에서 계산한다. `player_input`은 이름·직업처럼 서사에 다시 쓰이지 않을 수 있는 플레이어 설정값을 확실히 저장하기 위한 필드다.
 
 ```json
 {
   "game_id": "uuid-or-supported-game-id",
-  "narrative_text": "완성된 서사 전체"
+  "narrative_text": "완성된 서사 전체",
+  "player_input": "민준 / 의사"
 }
 ```
 

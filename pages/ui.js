@@ -11,12 +11,16 @@ const ui = {
       playerStatus: document.getElementById('player-status'),
       audioPlayer: document.getElementById('audio-player'),
       choiceButtons: document.getElementById('choice-buttons'),
+      bottomBar: document.querySelector('.bottom-bar'),
+      sidePanel: document.querySelector('.side-panel'),
       chatInput: document.getElementById('chat-input'),
       chatSend: document.getElementById('chat-send'),
       loading: document.getElementById('loading'),
       gameTitle: document.getElementById('game-title'),
       turnCount: document.getElementById('turn-count')
     };
+    this.arrangeMobileLayout();
+    window.addEventListener('resize', () => this.arrangeMobileLayout());
   },
 
   // ─── 메타 정보 ───
@@ -110,6 +114,44 @@ const ui = {
     this.scrollToBottom();
   },
 
+  arrangeMobileLayout() {
+    const mobile = window.matchMedia('(max-width: 768px)').matches;
+    const main = document.querySelector('.main');
+    if (mobile && this.els.bottomBar.parentElement !== main) main.insertBefore(this.els.bottomBar, this.els.sidePanel);
+    if (!mobile && this.els.bottomBar.parentElement === main) document.body.appendChild(this.els.bottomBar);
+  },
+
+  normalizeChoice(value) {
+    return String(value || '').replace(/^\s*(?:[①②③④⑤⑥⑦⑧⑨⑩]|\d+[.)]|[-*•])\s*/, '').trim();
+  },
+
+  removeTrailingChoiceBlock(choices) {
+    const normalized = (Array.isArray(choices) ? choices : []).map(choice => this.normalizeChoice(choice)).filter(Boolean);
+    if (!normalized.length) return false;
+    const narratives = [...this.els.storyStream.querySelectorAll('.narrative')];
+    const target = narratives[narratives.length - 1];
+    if (!target) return false;
+    const lines = target.textContent.split('\n');
+    const nonEmpty = [];
+    for (let index = lines.length - 1; index >= 0 && nonEmpty.length < normalized.length; index--) {
+      if (lines[index].trim()) nonEmpty.unshift({ index, value: this.normalizeChoice(lines[index]) });
+    }
+    if (nonEmpty.length !== normalized.length || nonEmpty.some((line, index) => line.value !== normalized[index])) return false;
+    let start = nonEmpty[0].index;
+    if (start > 0 && /선택지|choices/i.test(lines[start - 1])) start--;
+    target.textContent = lines.slice(0, start).join('\n').trimEnd();
+    const divider = target.nextElementSibling;
+    if (!target.textContent && divider?.classList.contains('divider')) { target.remove(); divider.remove(); }
+    return true;
+  },
+
+  setChoicesEnabled(enabled) {
+    this.els.choiceButtons.querySelectorAll('button').forEach(button => {
+      button.disabled = !enabled;
+      if (enabled) button.classList.remove('selected');
+    });
+  },
+
   showRetryNotice(text, actionLabel, onRetry, blocking = true) {
     const div = document.createElement('div');
     div.className = 'narrative';
@@ -200,12 +242,21 @@ const ui = {
   // ─── 선택지 렌더링 ───
   renderChoices(choices, onClick) {
     this.els.choiceButtons.innerHTML = '';
-
-    for (const choice of choices) {
+    const markers = ['①', '②', '③', '④', '⑤', '⑥'];
+    for (const [index, rawChoice] of (choices || []).entries()) {
+      const text = this.normalizeChoice(typeof rawChoice === 'string' ? rawChoice : rawChoice?.text);
+      if (!text) continue;
+      const isExplicit = text.startsWith('❗');
+      const isAppInfo = /(?:어플|앱)\s*정보|📱/i.test(text);
       const btn = document.createElement('button');
-      btn.className = `choice-btn ${choice.isExplicit ? 'explicit' : ''}`;
-      btn.innerHTML = `<span class="marker">${choice.marker}</span>${choice.text}`;
-      btn.addEventListener('click', () => onClick(choice.text));
+      btn.className = `choice-btn ${isExplicit ? 'explicit' : ''} ${isAppInfo ? 'app-info' : ''}`;
+      const marker = document.createElement('span'); marker.className = 'marker'; marker.textContent = markers[index] || `${index + 1}.`;
+      btn.append(marker, document.createTextNode(isExplicit ? ` ❗ ${text.slice(1).trim()}` : ` ${text}`));
+      btn.addEventListener('click', () => {
+        this.els.choiceButtons.querySelectorAll('button').forEach(button => { button.disabled = true; button.classList.remove('selected'); });
+        btn.classList.add('selected');
+        onClick(text);
+      }, { once: true });
       this.els.choiceButtons.appendChild(btn);
     }
   },

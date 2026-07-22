@@ -1,0 +1,176 @@
+// ui.js — UI 렌더링 함수들
+
+const ui = {
+  // ─── DOM 참조 (캐싱) ───
+  els: {},
+  init() {
+    this.els = {
+      storyStream: document.getElementById('story-stream'),
+      characterImg: document.getElementById('character-img'),
+      mindMonitor: document.getElementById('mind-monitor'),
+      playerStatus: document.getElementById('player-status'),
+      audioPlayer: document.getElementById('audio-player'),
+      choiceButtons: document.getElementById('choice-buttons'),
+      chatInput: document.getElementById('chat-input'),
+      chatSend: document.getElementById('chat-send'),
+      loading: document.getElementById('loading'),
+      gameTitle: document.getElementById('game-title'),
+      turnCount: document.getElementById('turn-count')
+    };
+  },
+
+  // ─── 메타 정보 ───
+  updateMeta(title, turnCount) {
+    if (title !== null && title !== undefined) {
+      this.els.gameTitle.textContent = title;
+    }
+    if (turnCount !== null && turnCount !== undefined) {
+      this.els.turnCount.textContent = `턴: ${turnCount}`;
+    }
+  },
+
+  // ─── 로딩 ───
+  setLoading(active) {
+    this.els.loading.classList.toggle('active', active);
+    this.els.chatSend.disabled = active;
+    this.els.chatInput.disabled = active;
+  },
+
+  // ─── 사용자 메시지 ───
+  addUserMessage(text) {
+    const div = document.createElement('div');
+    div.className = 'narrative';
+    div.style.color = 'var(--accent)';
+    div.style.fontWeight = 'bold';
+    div.textContent = `> ${text}`;
+    this.els.storyStream.appendChild(div);
+    this.scrollToBottom();
+  },
+
+  // ─── 서사 스트리밍 (한 글자씩) ───
+  appendNarrative(chunk) {
+    let cursor = this.els.storyStream.querySelector('.typing-cursor');
+
+    if (!cursor) {
+      // 새 narrative 컨테이너 생성
+      const div = document.createElement('div');
+      div.className = 'narrative';
+      div.id = 'current-narrative';
+      this.els.storyStream.appendChild(div);
+
+      cursor = document.createElement('span');
+      cursor.className = 'typing-cursor';
+      div.appendChild(cursor);
+    }
+
+    // 커서 앞에 텍스트 삽입
+    const textNode = document.createTextNode(chunk);
+    cursor.parentNode.insertBefore(textNode, cursor);
+
+    this.scrollToBottom();
+  },
+
+  // ─── 서사 스트리밍 종료 ───
+  finalizeNarrative() {
+    const cursor = this.els.storyStream.querySelector('.typing-cursor');
+    if (cursor) cursor.remove();
+
+    const current = document.getElementById('current-narrative');
+    if (current) current.removeAttribute('id');
+
+    // 구분선 추가
+    const hr = document.createElement('hr');
+    hr.className = 'divider';
+    this.els.storyStream.appendChild(hr);
+
+    this.scrollToBottom();
+  },
+
+  // ─── 시스템 메시지 ───
+  showSystemMessage(text) {
+    const div = document.createElement('div');
+    div.className = 'narrative';
+    div.style.color = 'var(--warning)';
+    div.style.fontStyle = 'italic';
+    div.textContent = `[시스템] ${text}`;
+    this.els.storyStream.appendChild(div);
+    this.scrollToBottom();
+  },
+
+  // ─── 이미지 ───
+  showImage(url) {
+    this.els.characterImg.src = url;
+    this.els.characterImg.classList.remove('hidden');
+  },
+
+  // ─── 오디오 ───
+  playAudio(url) {
+    this.els.audioPlayer.src = url;
+    this.els.audioPlayer.classList.add('active');
+    this.els.audioPlayer.play().catch(() => {
+      // 자동 재생 차단 — 사용자가 수동 클릭 필요
+    });
+  },
+
+  // ─── 마인드 모니터 ───
+  updateMindMonitor(surface, inner) {
+    let text = '';
+    if (surface) text += `[표면의식]\n${surface}\n\n`;
+    if (inner) text += `[잠재의식]\n${inner}`;
+    this.els.mindMonitor.textContent = text || '(대기 중)';
+  },
+
+  // ─── 플레이어 상황 ───
+  updatePlayerStatus(stats) {
+    if (stats.location !== undefined) {
+      document.getElementById('stat-location').textContent = stats.location || '-';
+    }
+    if (stats['순응도'] !== undefined) {
+      document.getElementById('stat-순응도').textContent = stats['순응도'];
+    }
+    if (stats['호감도'] !== undefined) {
+      document.getElementById('stat-호감도').textContent = stats['호감도'];
+    }
+    if (stats['최면깊이'] !== undefined) {
+      document.getElementById('stat-최면깊이').textContent = stats['최면깊이'];
+    }
+    if (stats.csa_active !== undefined) {
+      const csa = stats.csa_active;
+      document.getElementById('stat-csa').textContent = 
+        Array.isArray(csa) && csa.length > 0 ? csa.join(', ') : '없음';
+    }
+  },
+
+  // ─── 선택지 파싱 ───
+  parseChoices(text) {
+    // ①②③④⑤⑥ 패턴 매칭
+    const matches = text.match(/^[①②③④⑤⑥]\s*.+$/gm) || [];
+    return matches.map(line => {
+      const marker = line[0];
+      const rest = line.slice(1).trim();
+      const isExplicit = rest.includes('❗');
+      return { marker, text: rest, isExplicit };
+    });
+  },
+
+  // ─── 선택지 렌더링 ───
+  renderChoices(choices, onClick) {
+    this.els.choiceButtons.innerHTML = '';
+
+    for (const choice of choices) {
+      const btn = document.createElement('button');
+      btn.className = `choice-btn ${choice.isExplicit ? 'explicit' : ''}`;
+      btn.innerHTML = `<span class="marker">${choice.marker}</span>${choice.text}`;
+      btn.addEventListener('click', () => onClick(choice.text));
+      this.els.choiceButtons.appendChild(btn);
+    }
+  },
+
+  // ─── 스크롤 ───
+  scrollToBottom() {
+    this.els.storyStream.scrollTop = this.els.storyStream.scrollHeight;
+  }
+};
+
+// 초기화
+ui.init();

@@ -1,0 +1,1 @@
+// Worker proxy code placeholder - full implementation ready

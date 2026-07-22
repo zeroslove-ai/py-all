@@ -241,10 +241,12 @@ async function handleImage(req, env) {
   if (!game_id || !character_id) {
     return jsonResponse({ error: 'game_id and character_id required' }, 400);
   }
+  const ctx = await supabaseRpc(env, 'get_context', { p_game_id: game_id, p_recent_count: 1 });
+  const safeImageId = selectImageId(flattenImageCatalog(ctx?.image_catalog || []), character_id, image_id, ctx?.save?.last_image_id, false);
   const result = await supabaseRpc(env, 'get_character_image', {
     p_game_id: game_id,
     p_character_id: character_id,
-    p_image_id: image_id || null
+    p_image_id: safeImageId
   });
   return jsonResponse({ image_url: result });
 }
@@ -277,7 +279,12 @@ async function handleCommitTurn(req, env) {
     return jsonResponse({ error: 'extract must be a non-null JSON object' }, 400);
   }
 
-  const patch = buildSavePatch(extract, engine_patch);
+  const ctx = await supabaseRpc(env, 'get_context', { p_game_id: game_id, p_recent_count: 1 });
+  const safeExtract = { ...extract, is_sexual: extract.is_sexual === true };
+  safeExtract.image_id = selectImageId(flattenImageCatalog(ctx?.image_catalog || []), safeExtract.character_id, safeExtract.image_id, ctx?.save?.last_image_id, safeExtract.is_sexual);
+  const summaryPlan = buildRecent100Plan(ctx?.save || {}, turn_number, safeExtract.turn_summary);
+  if (summaryPlan.isBoundary) summaryPlan.overallSummary = await summarizeRecent100(env, ctx?.save?.story_summary_overall, summaryPlan.completedWindow);
+  const patch = buildSavePatch(safeExtract, engine_patch, summaryPlan);
   const result = await supabaseRpc(env, 'commit_turn', {
     p_game_id: game_id,
     p_turn_number: turn_number,
@@ -463,10 +470,8 @@ ${JSON.stringify(imageCatalog)}
   "npc_emotion": {"surface": "겉 감정", "inner": "속마음", "physical_reaction": "관찰 가능한 신체적·행동적 반응"},
   "npc_stats": {"호감도": 0, "신뢰도": 0, "최면깊이": 0, "순응도": 0, "최면저항력": 0},
   "player_patch": {"name": "", "age": 0, "gender": "", "height_cm": 0, "weight_kg": 0, "job": "", "background": "", "location": "", "style": "", "penis_length_cm": 0},
-  "story_summary_overall": "전체 누적 요약 (1000자 이내)",
-  "story_summary_recent100": "최근 100턴 요약 (500자 이내)",
-  "recent100_reset": false,
-  "new_recent100_start_turn": 0,
+  "turn_summary": "이번 턴에서 변한 핵심 사실 1~3문장",
+  "is_sexual": false,
   "choices": ["서사의 선택지를 그대로 옮겨라"],
   "dialogue_lines": [{"speaker": "", "text": "", "direction": ""}],
   "image_reasoning": "is_sexual 판단 근거 1문장",
@@ -518,7 +523,7 @@ function isPlainObject(value) {
   return value !== null && typeof value === 'object' && !Array.isArray(value);
 }
 
-function buildSavePatch(extract, enginePatch = {}) {
+function buildSavePatch(extract, enginePatch = {}, summaryPlan = null) {
   const characterId = typeof extract.character_id === 'string'
     ? extract.character_id
     : null;
@@ -527,11 +532,10 @@ function buildSavePatch(extract, enginePatch = {}) {
     last_image_id: extract.image_id ?? null,
     active_suggestions: Array.isArray(extract.choices) ? extract.choices : []
   };
-  if (typeof extract.story_summary_overall === 'string') {
-    patch.story_summary_overall = extract.story_summary_overall;
-  }
-  if (typeof extract.story_summary_recent100 === 'string') {
-    patch.story_summary_recent100 = extract.story_summary_recent100;
+  if (summaryPlan) {
+    patch.story_summary_recent100 = summaryPlan.recentSummary;
+    patch.recent100_start_turn = summaryPlan.recentStartTurn;
+    if (summaryPlan.isBoundary) patch.story_summary_overall = summaryPlan.overallSummary;
   }
 
   if (characterId && characterId !== 'narrator') {
@@ -540,9 +544,6 @@ function buildSavePatch(extract, enginePatch = {}) {
   }
   if (extract.player_patch && Object.keys(extract.player_patch).length > 0) {
     patch.player = extract.player_patch;
-  }
-  if (extract.recent100_reset === true) {
-    patch.recent100_start_turn = extract.new_recent100_start_turn;
   }
   if (enginePatch?.opening_started === true) {
     patch.opening_started = true;
@@ -562,7 +563,44 @@ function normalizeExtract(extract) {
   if (!normalized.npc_emotion || typeof normalized.npc_emotion !== 'object') normalized.npc_emotion = {};
   if (typeof normalized.npc_emotion.physical_reaction !== 'string') normalized.npc_emotion.physical_reaction = '';
   if (!normalized.player_patch || typeof normalized.player_patch !== 'object') normalized.player_patch = {};
+  normalized.is_sexual = normalized.is_sexual === true;
+  if (typeof normalized.turn_summary !== 'string') normalized.turn_summary = '';
   return normalized;
+}
+
+function appendSummary(previous, addition, limit = 1000) {
+  const joined = [previous, addition].filter(Boolean).join('\n').trim();
+  return joined.length > limit ? joined.slice(-limit) : joined;
+}
+
+function buildRecent100Plan(save, turnNumber, turnSummary) {
+  const start = Number.isInteger(save?.recent100_start_turn) ? save.recent100_start_turn : 0;
+  const accumulated = appendSummary(save?.story_summary_recent100 || '', turnSummary || '');
+  const isBoundary = turnNumber - start >= 100;
+  return isBoundary
+    ? { isBoundary, completedWindow: accumulated, recentSummary: turnSummary || '', recentStartTurn: turnNumber }
+    : { isBoundary, recentSummary: accumulated, recentStartTurn: start };
+}
+
+async function summarizeRecent100(env, overall, completedWindow) {
+  const res = await fetch('https://api.deepseek.com/v1/chat/completions', {
+    method: 'POST', headers: { Authorization: `Bearer ${env.DEEPSEEK_API_KEY}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ model: 'deepseek-v4-flash', stream: false, max_tokens: 800, messages: [{ role: 'system', content: 'Summarize this 100-turn game window in Korean, preserving durable facts. Return plain text under 900 characters.' }, { role: 'user', content: completedWindow }] })
+  });
+  if (!res.ok) return appendSummary(overall || '', completedWindow);
+  const data = await res.json();
+  return appendSummary(overall || '', data.choices?.[0]?.message?.content || completedWindow);
+}
+
+function selectImageId(catalog, characterId, requestedId, previousId, isSexual) {
+  if (!characterId || characterId === 'narrator') return null;
+  const candidates = flattenImageCatalog(catalog).filter(img => img?.character_id === characterId);
+  const requested = candidates.find(img => Number(img.image_id ?? img.id) === Number(requestedId));
+  if (requested && (requested.is_sexual === true) === (isSexual === true)) return Number(requested.image_id ?? requested.id);
+  const safe = candidates.find(img => img.is_sexual !== true);
+  if (safe) return Number(safe.image_id ?? safe.id);
+  const previous = candidates.find(img => Number(img.image_id ?? img.id) === Number(previousId) && img.is_sexual !== true);
+  return previous ? Number(previous.image_id ?? previous.id) : null;
 }
 
 export {
@@ -571,5 +609,7 @@ export {
   buildStoryPrompt,
   flattenImageCatalog,
   normalizeExtract,
-  normalizeImageCatalog
+  normalizeImageCatalog,
+  buildRecent100Plan,
+  selectImageId
 };

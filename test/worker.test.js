@@ -5,8 +5,10 @@ import {
   buildSavePatch,
   buildExtractPrompt,
   buildStoryPrompt,
+  buildRecent100Plan,
   normalizeExtract,
-  normalizeImageCatalog
+  normalizeImageCatalog,
+  selectImageId
 } from '../worker/game-proxy-v2.js';
 import worker from '../worker/game-proxy-v2.js';
 
@@ -31,6 +33,33 @@ test('extract normalization converts numeric image IDs', () => {
   assert.deepEqual(extract.choices, []);
   assert.deepEqual(extract.player_patch, {});
   assert.equal(extract.npc_emotion.physical_reaction, '');
+  assert.equal(extract.is_sexual, false);
+  assert.equal(extract.turn_summary, '');
+});
+
+test('recent100 boundary is Worker-owned at turns 99, 100 and 101', () => {
+  const save = { recent100_start_turn: 0, story_summary_recent100: 'earlier' };
+  const at99 = buildRecent100Plan(save, 99, 't99');
+  const at100 = buildRecent100Plan(save, 100, 't100');
+  const at101 = buildRecent100Plan({ recent100_start_turn: 100, story_summary_recent100: 't100' }, 101, 't101');
+  assert.equal(at99.isBoundary, false);
+  assert.equal(at100.isBoundary, true);
+  assert.equal(at100.recentStartTurn, 100);
+  assert.equal(at100.recentSummary, 't100');
+  assert.equal(at101.isBoundary, false);
+  assert.equal(at101.recentSummary, 't100\nt101');
+});
+
+test('image selection accepts only matching character and sexuality, then falls back safely', () => {
+  const catalog = [
+    { id: 1, character_id: 'heroine1', is_sexual: false },
+    { id: 2, character_id: 'heroine1', is_sexual: true },
+    { id: 3, character_id: 'heroine2', is_sexual: false }
+  ];
+  assert.equal(selectImageId(catalog, 'heroine1', 2, 1, true), 2);
+  assert.equal(selectImageId(catalog, 'heroine1', 2, 1, false), 1);
+  assert.equal(selectImageId(catalog, 'heroine1', 3, 1, false), 1);
+  assert.equal(selectImageId([], 'heroine1', 99, null, false), null);
 });
 
 test('extract prompt receives raw player input separately from the narrative', () => {
@@ -67,6 +96,15 @@ test('save patch nests NPC state under character ID', () => {
   assert.equal(patch.opening_started, true);
   assert.equal('player_patch' in patch, false);
   assert.equal('dialogue_lines' in patch, false);
+});
+
+test('save patch preserves player data and does not let extract control recent100 fields', () => {
+  const patch = buildSavePatch({ character_id: 'heroine1', player_patch: { name: 'player', job: 'doctor' } }, {}, {
+    isBoundary: false, recentSummary: 'turn summary', recentStartTurn: 0
+  });
+  assert.deepEqual(patch.player, { name: 'player', job: 'doctor' });
+  assert.equal(patch.story_summary_recent100, 'turn summary');
+  assert.equal(patch.recent100_start_turn, 0);
 });
 
 test('first generated turn receives rulebook while normal turn omits it', () => {

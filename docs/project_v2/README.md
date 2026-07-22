@@ -2,6 +2,7 @@
 
 **프로젝트명**: 게임빌더_v2 (Web/Cloudflare)
 **결정일**: 2026-07-22
+**재설계일**: 2026-07-22
 **작성자**: Kimi
 
 ---
@@ -24,9 +25,32 @@
 | Publishable Key | sb_publishable_ltzbklyjxt5SNrvKMG6gbw_51ugNhZP |
 | Service Key | sb_secret_9b37UcA8EsLrjKuhEQ9dTw_2YddI-T4 |
 | RLS | 비활성화 (사용자 지시) |
-| 현재 상태 | 테이블/RPC 미생성 — 스키마 설정 필요 |
+| 현재 상태 | 테이블 생성 완료, image_library 586개 이관 완료 |
 
-## 3. 보안 구조
+## 3. 재설계 핵심 (v2)
+
+### 삭제/변경 8개 항목
+
+| 항목 | 처리 | 이유 |
+|---|---|---|
+| `games.is_active` | **삭제** | URL 라우팅(`/play/{game_id}`)으로 명확화 |
+| `game_master.player` | **`game_save`로 이동** | "이번 플레이스루가 누구인지" |
+| `game_master.npc_stats` (최상위) | **`characters.initial_stats` 병합** | 중복 제거 |
+| `game_save.turn_count` (jsonb) | **컬럼 단일화** | 이원화 버그 원천 차단 |
+| `relationship_bars` | **삭제 → `player_progress` + `active_suggestions`** | 죽은 필드 교체 |
+| `debug_*` 필드들 | **전부 삭제** | Cloudflare Worker 로그로 대체 |
+| `emotion_id` 기반 폴백 | **제거** | `image_id` 직접 선택 방식으로 대체됨 |
+| `game_sessions` (IP/UA) | **미생성** | 개인정보 이슈 + 필요성 불명확 |
+
+### 마이그레이션
+
+| 데이터 | 방법 | 상태 |
+|---|---|---|
+| `image_library` 586개 | 행만 복사, URL 기존 Storage 그대로 참조 | ✅ 완료 |
+| `game_master` 세계관 | 새 스키마 형태로 변환 이전 | 필요 |
+| `game_save`, `game_memories` | 이전 안 함 — 새 플레이스루 | ✅ |
+
+## 4. 보안 구조
 
 ```
 [브라우저] → [Cloudflare Pages] → [Cloudflare Worker (프록시)] → [Supabase v2]
@@ -35,25 +59,6 @@
 - API 키는 Worker 환경변수에만 저장
 - 프론트엔드에 키 노출 없음
 - 기존 TTS Worker(fancy-dust-7f8c)와 신규 Worker 분리
-
-## 4. 스키마 개선 (v2에서 적용)
-
-### 4-1. turn_count 단일 소스
-- `game_save.turn_count` 컬럼 제거
-- `game_save.data.turn_count`만 사용
-
-### 4-2. npc_stats read-only 규칙
-- `game_master.npc_stats` = 초기값 저장소 (절대 수정 금지)
-- 플레이 중 변동은 `game_save.npc_stats`에만 기록
-
-### 4-3. 필드 초기화 통일
-- 키 삭제(`-`) 금지
-- 빈 값(`{}`, `""`)으로 명시적 초기화
-
-### 4-4. reset_game_progress 개선
-- `player` 필드 빈 객체로 초기화 (삭제 아님)
-- `npc_emotion` 빈 객체로 초기화
-- `recent_memories` 빈 배열로 초기화
 
 ## 5. API 인터페이스 (Worker 프록시)
 
@@ -79,12 +84,7 @@
 }
 ```
 
-## 7. 이미지 이전
-
-- 이미지 파일(Storage) 이전: 불필요 (기존 URL 그대로 참조)
-- `image_library` 테이블 데이터만 이전 필요
-
-## 8. Phase 1 개발 일정
+## 7. Phase 1 개발 일정
 
 | 단계 | 기간 | 산출물 |
 |---|---|---|
@@ -97,8 +97,20 @@
 
 ---
 
+## 문서 목록
+
+| 문서 | 설명 |
+|---|---|
+| [README.md](README.md) | 이 문서 — 설계 현황 전체 요약 |
+| [API_SPEC.md](API_SPEC.md) | Worker 프록시 API 명세 |
+| [SCHEMA.md](SCHEMA.md) | Supabase 스키마 설계 (재설계 v2) |
+| [FRONTEND.md](FRONTEND.md) | 프론트엔드 구조 |
+
+---
+
 ## 변경 이력
 
 | 날짜 | 내용 |
 |---|---|
-| 2026-07-22 | 초기 작성, URL 정정 (ovltkzwddxsekcfeskds) |
+| 2026-07-22 | 초기 작성, URL 정정 |
+| 2026-07-22 | 재설계 — 삭제/변경 8개 항목 반영 |

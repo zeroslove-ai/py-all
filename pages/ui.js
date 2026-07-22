@@ -125,6 +125,16 @@ const ui = {
     this.els.characterImg.classList.remove('hidden');
   },
 
+  clearGameView() {
+    this.els.storyStream.querySelectorAll('.narrative, .divider').forEach(node => node.remove());
+    this.els.choiceButtons.replaceChildren();
+    this.els.characterImg.removeAttribute('src');
+    this.els.characterImg.classList.add('hidden');
+    this.els.audioPlayer.pause();
+    this.els.audioPlayer.removeAttribute('src');
+    this.els.audioPlayer.classList.remove('active');
+  },
+
   // ─── 오디오 ───
   playAudio(url) {
     this.els.audioPlayer.src = url;

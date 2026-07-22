@@ -138,7 +138,7 @@ async function handleContext(req, env) {
 // ─────────────────────────────────────────────
 
 async function handleStory(req, env) {
-  const { game_id, player_input } = await readJson(req);
+  const { game_id, player_input, feedback = [] } = await readJson(req);
   if (!game_id) return jsonResponse({ error: 'game_id required' }, 400);
 
   const ctx = await supabaseRpc(env, 'get_context', { 
@@ -147,7 +147,7 @@ async function handleStory(req, env) {
   });
 
   const currentTurn = ctx?.turn_count ?? 0;
-  const prompt = buildStoryPrompt(ctx, player_input, currentTurn);
+  const prompt = buildStoryPrompt(ctx, player_input, currentTurn, feedback);
 
   const deepseekRes = await fetch('https://api.deepseek.com/v1/chat/completions', {
     method: 'POST',
@@ -252,14 +252,14 @@ async function handleImage(req, env) {
 }
 
 async function handleTts(req, env) {
-  const { text, voice_id } = await readJson(req);
+  const { text, voice_id, direction = '' } = await readJson(req);
   if (!text || !voice_id) {
     return jsonResponse({ error: 'text and voice_id required' }, 400);
   }
   const res = await fetch('https://fancy-dust-7f8c.zeroslove.workers.dev/', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ text, voice_id })
+    body: JSON.stringify({ text, voice_id, emotion: mapDirection(direction) })
   });
   if (!res.ok) {
     return jsonResponse({ error: `TTS Worker error: ${res.status}` }, 502);
@@ -327,7 +327,7 @@ async function handleReset(req, env) {
 // 동적 프롬프트 빌더 (C안)
 // ═════════════════════════════════════════════
 
-function buildStoryPrompt(ctx, playerInput, currentTurn) {
+function buildStoryPrompt(ctx, playerInput, currentTurn, feedback = []) {
   const master = ctx?.master || {};
   const save = ctx?.save || {};
   const recentMemories = ctx?.recent_memories || [];
@@ -405,7 +405,10 @@ ${recentMemories.slice(-3).map(m => m.content?.slice(0, 200) || '').join('\n---\
 
   // ─── 조립 ───
   const csaSection = buildApplicableCsaSection(save);
-  const systemPrompt = coreRules + playerGate + modeSection + rulebookSection + displayFormatSection + csaSection + contextSection;
+  const feedbackSection = Array.isArray(feedback) && feedback.length
+    ? `\n\n[USER FEEDBACK — APPLY TO THIS NEXT RESPONSE ONLY]\n${feedback.map(item => `- ${typeof item === 'string' ? item : item?.text || ''}`).filter(Boolean).join('\n')}\nThis is not an in-world action. Never narrate it as dialogue or an event; use it only to improve output quality.`
+    : '';
+  const systemPrompt = coreRules + playerGate + modeSection + rulebookSection + displayFormatSection + csaSection + contextSection + feedbackSection;
 
   return {
     mode,
@@ -558,6 +561,15 @@ function buildSavePatch(extract, enginePatch = {}, summaryPlan = null, previousS
   const csaState = applyCsaAction(previousSave, extract.csa_action, patch.player_progress.level, turnNumber);
   if (csaState) Object.assign(patch, csaState);
   return patch;
+}
+
+function mapDirection(direction = '') {
+  if (/속삭|작게|귓속말/.test(direction)) return 'whisper';
+  if (/울먹|떨리는|눈물/.test(direction)) return 'sad';
+  if (/화난|날카롭게|소리치/.test(direction)) return 'angry';
+  if (/웃으며|밝게|활기차게/.test(direction)) return 'happy';
+  if (/당황|긴장|머뭇/.test(direction)) return 'nervous';
+  return 'neutral';
 }
 
 function normalizeExtract(extract) {

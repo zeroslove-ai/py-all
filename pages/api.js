@@ -68,11 +68,11 @@ const api = {
   },
 
   // ─── 5. TTS 생성 ───
-  async tts(text, voiceId) {
+  async tts(text, voiceId, direction = '') {
     const res = await fetch(`${API_BASE}/api/tts`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ text, voice_id: voiceId })
+      body: JSON.stringify({ text, voice_id: voiceId, direction })
     });
     if (!res.ok) throw new Error(`tts failed: ${res.status}`);
     return await res.json();

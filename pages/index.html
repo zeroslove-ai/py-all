@@ -264,9 +264,20 @@
     }
     @keyframes spin { to { transform: rotate(360deg); } }
 
+    .tts-toggle, .command-toggle { position: absolute; top: 10px; background: var(--bg-tertiary); color: var(--text-primary); border: 1px solid var(--border); border-radius: var(--radius); padding: 7px 10px; cursor: pointer; }
+    .tts-toggle { right: 16px; } .command-toggle { right: 120px; }
+    .reset-modal-overlay { position: fixed; inset: 0; background: rgba(0,0,0,.65); z-index: 50; display: grid; place-items: center; padding: 20px; }
+    .reset-modal { max-width: 480px; background: var(--bg-secondary); border: 1px solid var(--border); border-radius: var(--radius); padding: 24px; display: grid; gap: 14px; }
+    .reset-actions { display: flex; gap: 10px; justify-content: flex-end; } .reset-actions .danger { background: var(--danger); }
+
     /* Responsive */
     @media (max-width: 768px) {
-      .side-panel { display: none; }
+      body { height: auto; min-height: 100vh; overflow-y: auto; }
+      .main { display: flex; flex-direction: column; overflow: visible; }
+      .story-panel, .story-stream { overflow: visible; }
+      .side-panel { display: flex; width: 100%; border-left: none; border-top: 1px solid var(--border); overflow: visible; }
+      .character-img { width: 100%; height: min(620px, 125vw); object-fit: contain; object-position: top center; }
+      .bottom-bar { position: sticky; bottom: 0; z-index: 20; }
       .choice-btn { min-width: 100%; }
     }
   </style>
@@ -281,6 +292,8 @@
     </div>
   </header>
 
+  <button class="tts-toggle" id="tts-toggle" type="button">🔊 음성 ON</button>
+  <button class="command-toggle" id="command-toggle" type="button">/ 안내</button>
   <div class="main">
     <div class="story-panel">
       <div class="story-stream" id="story-stream">
@@ -369,6 +382,10 @@
     document.getElementById('chat-input').addEventListener('keydown', (e) => {
       if (e.key === 'Enter') handleTurnInput();
     });
+    state.autoTts = localStorage.getItem('autoTts') !== 'false';
+    setAutoTts(state.autoTts);
+    document.getElementById('tts-toggle').addEventListener('click', () => setAutoTts(!state.autoTts));
+    document.getElementById('command-toggle').addEventListener('click', () => handleCommand('/안내'));
 
     async function handleInput() {
       const input = document.getElementById('chat-input').value.trim();
@@ -460,10 +477,55 @@
       }
     }
 
+    function feedbackKey() { return `gameFeedback:${state.gameId}`; }
+    function getFeedback() { try { return JSON.parse(localStorage.getItem(feedbackKey()) || '[]'); } catch { return []; } }
+    function saveFeedback(items) { localStorage.setItem(feedbackKey(), JSON.stringify(items)); }
+
+    async function handleCommand(input) {
+      const [command, ...rest] = input.trim().split(/\s+/);
+      const value = rest.join(' ').trim();
+      if (['/안내', '/도움말', '/help'].includes(command)) {
+        ui.showSystemMessage('사용 가능한 명령어\n/플레이 — 현재 상태 새로고침\n/리셋 — 진행 기록 초기화\n/피드백 내용 — 다음 서사에 한 번 반영\n/음성 켜기 · /음성 끄기');
+      } else if (command === '/플레이') {
+        await loadGameContext();
+        const choices = state.context?.save?.active_suggestions || [];
+        ui.renderChoices(choices.map((text, i) => ({ marker: ['①','②','③','④'][i] || '•', text, isExplicit: false })), submitChoice);
+        ui.showSystemMessage('현재 게임을 이어서 진행합니다.');
+      } else if (command === '/리셋') {
+        showResetModal();
+      } else if (command === '/피드백') {
+        if (!value) { ui.showSystemMessage('사용법: /피드백 다음 서사에서 고칠 점'); return; }
+        saveFeedback([...getFeedback(), { text: value, created_at: new Date().toISOString() }]);
+        ui.showSystemMessage('피드백을 다음 서사에 반영합니다.');
+      } else if (command === '/음성' && value === '켜기') {
+        setAutoTts(true); ui.showSystemMessage('자동 음성을 켰습니다.');
+      } else if (command === '/음성' && value === '끄기') {
+        setAutoTts(false); ui.showSystemMessage('자동 음성을 껐습니다.');
+      } else ui.showSystemMessage('알 수 없는 명령어입니다. /안내를 입력해 보세요.');
+    }
+
+    function setAutoTts(enabled) {
+      state.autoTts = enabled; localStorage.setItem('autoTts', String(enabled));
+      if (!enabled) { ui.els.audioPlayer.pause(); ui.els.audioPlayer.removeAttribute('src'); }
+      document.getElementById('tts-toggle').textContent = enabled ? '🔊 음성 ON' : '🔇 음성 OFF';
+    }
+
+    function showResetModal() {
+      const overlay = document.createElement('div'); overlay.className = 'reset-modal-overlay';
+      overlay.innerHTML = `<div class="reset-modal" role="dialog" aria-modal="true"><h2>게임 진행 기록 초기화</h2><p>게임 ID<br><code>${state.gameId}</code></p><p>현재 게임의 턴, 플레이어 정보, NPC 상태 및 진행 기록이 초기 상태로 돌아갑니다.</p><p>이 작업은 되돌릴 수 없습니다.</p><div class="reset-actions"><button class="choice-btn cancel">취소</button><button class="choice-btn danger confirm">진행 기록 초기화</button></div></div>`;
+      const close = () => overlay.remove();
+      overlay.addEventListener('click', event => { if (event.target === overlay) close(); });
+      overlay.querySelector('.cancel').addEventListener('click', close);
+      overlay.querySelector('.confirm').addEventListener('click', async () => { await api.reset(state.gameId); close(); ui.clearGameView(); await loadGameContext(); ui.showSystemMessage('진행 기록을 초기화했습니다.'); });
+      document.addEventListener('keydown', function onKey(event) { if (event.key === 'Escape') { close(); document.removeEventListener('keydown', onKey); } });
+      document.body.appendChild(overlay); overlay.querySelector('.cancel').focus();
+    }
+
     async function handleTurnInput() {
       const input = document.getElementById('chat-input').value.trim();
       if (!input || !state.gameId || state.isStreaming) return;
       document.getElementById('chat-input').value = '';
+      if (input.startsWith('/')) { await handleCommand(input); return; }
       ui.addUserMessage(input);
       await retryStory({ input, nextTurn: state.turnCount + 1, narrative: null, extract: null, mode: null });
     }
@@ -471,7 +533,7 @@
     async function retryStory(pending) {
       state.isStreaming = true; ui.setLoading(true, '서사 생성 중');
       try {
-        const result = await stream.story(state.gameId, pending.input, state.turnCount, chunk => ui.appendNarrative(chunk));
+        const result = await stream.story(state.gameId, pending.input, state.turnCount, chunk => ui.appendNarrative(chunk), getFeedback());
         pending.narrative = result.text; pending.mode = result.mode; ui.finalizeNarrative();
         if (result.mode === 'reentry') { ui.renderChoices(ui.parseChoices(result.text), submitChoice); return; }
         await retryExtract(pending);
@@ -496,6 +558,7 @@
       try {
         const saved = await api.commitTurn(state.gameId, pending.nextTurn, pending.narrative, pending.extract, pending.mode === 'opening' ? { opening_started: true } : {});
         state.turnCount = saved.turn_count; ui.updateMeta(null, state.turnCount);
+        saveFeedback([]);
         sidebar.updateCharacter(pending.extract.character_id); sidebar.updateMind(pending.extract.npc_emotion); sidebar.renderStats(pending.extract.npc_stats);
         ui.renderChoices(ui.parseChoices(pending.narrative), submitChoice);
         prepareMedia(pending.extract);
@@ -509,6 +572,7 @@
     }
 
     function prepareMedia(extract) {
+      enqueueTts(extract);
       if (extract.character_id && extract.character_id !== 'narrator') {
         ui.setLoading(true, '이미지 준비 중');
         api.image(state.gameId, extract.character_id, extract.image_id)
@@ -517,13 +581,39 @@
           .finally(() => ui.setLoading(false));
       }
       const line = extract.dialogue_lines?.[0], voiceId = getVoiceId(extract.character_id);
-      if (state.autoTts && line?.text && voiceId) {
+      if (false && state.autoTts && line?.text && voiceId) {
         ui.setLoading(true, '음성 준비 중');
         api.tts(line.text, voiceId)
           .then(res => { if (res.url) ui.playAudio(res.url); })
           .catch(() => ui.showRetryNotice('음성 재생에 실패했습니다.', '음성 다시 재생', () => prepareMedia({ ...extract, character_id: null }), false))
           .finally(() => ui.setLoading(false));
       }
+    }
+
+    const playedTtsKeys = new Set(JSON.parse(sessionStorage.getItem('playedTtsKeys') || '[]'));
+    let ttsQueue = Promise.resolve();
+    function ttsKey(line) { return `${state.turnCount}:${line.speaker}:${line.text}`; }
+    function enqueueTts(extract) {
+      if (!state.autoTts) return;
+      for (const line of (extract.dialogue_lines || [])) {
+        const characterId = Object.entries(state.context?.master?.characters || {}).find(([, character]) => character?.name === line.speaker)?.[0];
+        const voiceId = getVoiceId(characterId);
+        const key = ttsKey(line);
+        if (!voiceId || !line.text || playedTtsKeys.has(key)) continue;
+        playedTtsKeys.add(key); sessionStorage.setItem('playedTtsKeys', JSON.stringify([...playedTtsKeys]));
+        ttsQueue = ttsQueue.then(() => playQueuedTts(line, voiceId, key));
+      }
+    }
+    async function playQueuedTts(line, voiceId, key) {
+      if (!state.autoTts) return;
+      ui.setLoading(true, '음성 준비 중');
+      try {
+        const result = await api.tts(line.text, voiceId, line.direction || '');
+        if (!result.url || !state.autoTts) return;
+        const audio = ui.els.audioPlayer; audio.src = result.url; audio.classList.add('active');
+        await new Promise((resolve, reject) => { audio.onended = resolve; audio.onerror = reject; audio.play().catch(reject); });
+      } catch (_) { ui.showRetryNotice('음성 재생에 실패했습니다.', '음성 다시 재생', () => { playedTtsKeys.delete(key); enqueueTts({ dialogue_lines: [line] }); }, false); }
+      finally { ui.setLoading(false); }
     }
 
     function submitChoice(choiceText) {

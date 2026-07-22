@@ -191,6 +191,14 @@ test('opening mode remains explicit until opening is committed', () => {
   assert.equal(prompt.mode, 'opening');
 });
 
+test('player setup starts with app discovery and defers hospital scene until setup is saved', () => {
+  const setup = buildStoryPrompt({ master: {}, save: { player: {} }, recent_memories: [] }, 'start', 0);
+  const opening = buildStoryPrompt({ master: {}, save: { player: { name: 'A', job: 'doctor' } }, recent_memories: [] }, 'start', 0);
+  assert.match(setup.messages[0].content, /OPENING PHASE A/);
+  assert.match(setup.messages[0].content, /Do not show a hospital scene or NPC encounter/);
+  assert.match(opening.messages[0].content, /OPENING PHASE B/);
+});
+
 test('legacy save APIs return 410 Gone', async () => {
   for (const path of ['/api/save-turn', '/api/set-save']) {
     const response = await worker.fetch(apiRequest(path), {});

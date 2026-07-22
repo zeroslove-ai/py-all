@@ -410,7 +410,12 @@ ${recentMemories.slice(-3).map(m => m.content?.slice(0, 200) || '').join('\n---\
     ? `\n\n[USER FEEDBACK — APPLY TO THIS NEXT RESPONSE ONLY]\n${feedback.map(item => `- ${typeof item === 'string' ? item : item?.text || ''}`).filter(Boolean).join('\n')}\nThis is not an in-world action. Never narrate it as dialogue or an event; use it only to improve output quality.`
     : '';
   const finalFormatRules = `\n\n[FINAL OUTPUT CONTRACT — HIGHEST PRIORITY]\nThe response body contains exactly three sections: [1. 서사 및 행동], [2. 플레이어 상황판], [3. 선택지]. Never include a mind monitor, NPC stat table, character body information, or turn number in the body. Mind monitor belongs only to npc_emotion extraction and the sidebar UI.\nIf player.name or player.job is missing, propose one complete hospital-world character at once (name, age, gender, hospital job/major/rank, height, weight, speaking style, background), then offer ① approve ② edit parts ③ describe directly. Do not ask one field at a time. Do not repeat this after name and job are saved.\nDo not use formulaic first-impression or hypnosis-success calculations.\n`;
-  const systemPrompt = coreRules + playerGate + modeSection + rulebookSection + displayFormatSection + csaSection + contextSection + feedbackSection + finalFormatRules;
+  const openingFlow = !hasPlayer
+    ? `\n\n[OPENING PHASE A — BEFORE PLAYER SETUP]\nFirst narrate only this prelude: an unknown hypnosis app appears on the player's phone; deleting it and factory-resetting the phone do not remove it; opening it briefly introduces individual hypnosis/suggestions, mind monitor, app level/experience, and spatial common-sense alteration. Explain that spatial alteration affects people inside its scope, but never the player, who remembers the original common sense. Do not assign the player's name, age, job, rank, or background. Do not show a hospital scene or NPC encounter. Then recommend one complete hospital-world player character and offer exactly ① approve recommendation ② change parts ③ describe directly.\n`
+    : (needsOpening
+      ? `\n\n[OPENING PHASE B — AFTER PLAYER SETUP]\nThe player setup is now confirmed. Generate the first hospital scene and first NPC encounter only now. Never claim that the player has already used the app to change the hospital in the past.\n`
+      : '');
+  const systemPrompt = coreRules + playerGate + modeSection + rulebookSection + displayFormatSection + csaSection + contextSection + feedbackSection + finalFormatRules + openingFlow;
 
   return {
     mode,

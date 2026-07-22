@@ -30,8 +30,9 @@ const ui = {
   },
 
   // ─── 로딩 ───
-  setLoading(active) {
+  setLoading(active, label = '처리 중') {
     this.els.loading.classList.toggle('active', active);
+    this.els.loading.textContent = label;
     this.els.chatSend.disabled = active;
     this.els.chatInput.disabled = active;
   },
@@ -95,6 +96,27 @@ const ui = {
     div.textContent = `[시스템] ${text}`;
     this.els.storyStream.appendChild(div);
     this.scrollToBottom();
+  },
+
+  showRetryNotice(text, actionLabel, onRetry, blocking = true) {
+    const div = document.createElement('div');
+    div.className = 'narrative';
+    div.style.color = blocking ? 'var(--warning)' : 'var(--muted)';
+    div.textContent = text + ' ';
+    const button = document.createElement('button');
+    button.className = 'choice-btn';
+    button.textContent = actionLabel;
+    button.addEventListener('click', onRetry, { once: true });
+    div.appendChild(button);
+    this.els.storyStream.appendChild(div);
+    this.scrollToBottom();
+  },
+
+  failCurrentNarrative() {
+    const current = document.getElementById('current-narrative');
+    if (current) current.remove();
+    const cursor = this.els.storyStream.querySelector('.typing-cursor');
+    if (cursor) cursor.remove();
   },
 
   // ─── 이미지 ───

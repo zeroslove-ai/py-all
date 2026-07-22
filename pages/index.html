@@ -365,9 +365,9 @@
     }
 
     // ─── Event Listeners ───
-    document.getElementById('chat-send').addEventListener('click', handleInput);
+    document.getElementById('chat-send').addEventListener('click', handleTurnInput);
     document.getElementById('chat-input').addEventListener('keydown', (e) => {
-      if (e.key === 'Enter') handleInput();
+      if (e.key === 'Enter') handleTurnInput();
     });
 
     async function handleInput() {
@@ -460,9 +460,75 @@
       }
     }
 
+    async function handleTurnInput() {
+      const input = document.getElementById('chat-input').value.trim();
+      if (!input || !state.gameId || state.isStreaming) return;
+      document.getElementById('chat-input').value = '';
+      ui.addUserMessage(input);
+      await retryStory({ input, nextTurn: state.turnCount + 1, narrative: null, extract: null, mode: null });
+    }
+
+    async function retryStory(pending) {
+      state.isStreaming = true; ui.setLoading(true, '서사 생성 중');
+      try {
+        const result = await stream.story(state.gameId, pending.input, state.turnCount, chunk => ui.appendNarrative(chunk));
+        pending.narrative = result.text; pending.mode = result.mode; ui.finalizeNarrative();
+        if (result.mode === 'reentry') { ui.renderChoices(ui.parseChoices(result.text), submitChoice); return; }
+        await retryExtract(pending);
+      } catch (_) {
+        ui.failCurrentNarrative();
+        ui.showRetryNotice('서사 생성에 실패했습니다.', '다시 생성', () => retryStory(pending));
+      } finally { state.isStreaming = false; ui.setLoading(false); }
+    }
+
+    async function retryExtract(pending) {
+      state.isStreaming = true; ui.setLoading(true, '상태 분석 중');
+      try {
+        pending.extract = await api.extract(state.gameId, pending.narrative, pending.nextTurn, pending.input);
+        await retryCommit(pending);
+      } catch (_) {
+        ui.showRetryNotice('서사는 생성되었지만 상태 분석에 실패했습니다.', '상태 분석 다시 시도', () => retryExtract(pending));
+      } finally { state.isStreaming = false; ui.setLoading(false); }
+    }
+
+    async function retryCommit(pending) {
+      state.isStreaming = true; ui.setLoading(true, '턴 저장 중');
+      try {
+        const saved = await api.commitTurn(state.gameId, pending.nextTurn, pending.narrative, pending.extract, pending.mode === 'opening' ? { opening_started: true } : {});
+        state.turnCount = saved.turn_count; ui.updateMeta(null, state.turnCount);
+        sidebar.updateCharacter(pending.extract.character_id); sidebar.updateMind(pending.extract.npc_emotion); sidebar.renderStats(pending.extract.npc_stats);
+        ui.renderChoices(ui.parseChoices(pending.narrative), submitChoice);
+        prepareMedia(pending.extract);
+      } catch (error) {
+        if (error.status === 409) {
+          document.getElementById('chat-input').value = pending.input;
+          ui.showSystemMessage('다른 창에서 게임이 먼저 진행되었습니다. 최신 상태를 다시 불러왔습니다.');
+          await loadGameContext();
+        } else ui.showRetryNotice('서사와 상태 분석은 완료됐지만 저장에 실패했습니다.', '저장 다시 시도', () => retryCommit(pending));
+      } finally { state.isStreaming = false; ui.setLoading(false); }
+    }
+
+    function prepareMedia(extract) {
+      if (extract.character_id && extract.character_id !== 'narrator') {
+        ui.setLoading(true, '이미지 준비 중');
+        api.image(state.gameId, extract.character_id, extract.image_id)
+          .then(res => { if (res.image_url) ui.showImage(res.image_url); })
+          .catch(() => ui.showRetryNotice('이미지를 불러오지 못했습니다.', '이미지만 다시 불러오기', () => prepareMedia({ ...extract, dialogue_lines: [] }), false))
+          .finally(() => ui.setLoading(false));
+      }
+      const line = extract.dialogue_lines?.[0], voiceId = getVoiceId(extract.character_id);
+      if (state.autoTts && line?.text && voiceId) {
+        ui.setLoading(true, '음성 준비 중');
+        api.tts(line.text, voiceId)
+          .then(res => { if (res.url) ui.playAudio(res.url); })
+          .catch(() => ui.showRetryNotice('음성 재생에 실패했습니다.', '음성 다시 재생', () => prepareMedia({ ...extract, character_id: null }), false))
+          .finally(() => ui.setLoading(false));
+      }
+    }
+
     function submitChoice(choiceText) {
       document.getElementById('chat-input').value = choiceText;
-      handleInput();
+      handleTurnInput();
     }
 
     async function retryRequest(operation, maxAttempts = 3) {

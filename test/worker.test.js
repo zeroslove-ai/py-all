@@ -19,6 +19,7 @@ import {
   isSetupComplete,
   isApprovalInput,
   mergeRecommendation,
+  normalizeRegisteredNpcExtract,
   mindMonologueLength,
   validateMindMonologue,
   validateNpcEmotion
@@ -174,6 +175,65 @@ test('NPC obedience is capped at three without a hypnosis-depth event', () => {
   });
   assert.equal(update.stats.순응도, 20);
   assert.match(update.errors.join('\n'), /순응도: delta 4 exceeds allowed ±3/);
+});
+
+test('unregistered NPC IDs, present lists, and dialogue cannot become a save target', () => {
+  const characters = { heroine1: { name: '한소영' }, heroine9: { name: '박소현' } };
+  const extract = normalizeRegisteredNpcExtract({
+    character_id: 'new_nurse',
+    npcs_present: ['heroine1', 'new_nurse', 'heroine9'],
+    dialogue_lines: [{ speaker: '새 간호사', text: '안녕하세요' }, { speaker: '한소영', text: '등록 대사' }],
+    npc_emotion: { surface: 'bad' },
+    npc_stat_changes: { 호감도: { delta: 5, reason: 'bad' } },
+    npc_relationship_state: { player_ejaculation_count: 99 },
+    image_id: 99
+  }, characters, 'heroine1');
+  assert.equal(extract.character_id, 'heroine1');
+  assert.equal(extract._npc_registration_rejected, true);
+  assert.deepEqual(extract.npcs_present, ['heroine1', 'heroine9']);
+  assert.deepEqual(extract.dialogue_lines, [{ speaker: '한소영', text: '등록 대사' }]);
+  assert.deepEqual(extract.npc_stat_changes, {});
+  assert.equal(extract.image_id, null);
+  const patch = buildSavePatch(extract, {}, null, { npc_stats: { heroine1: { 호감도: 20 } } });
+  assert.equal(patch.npc_stats, undefined);
+  assert.equal(patch.npc_emotion, undefined);
+  assert.equal(patch.npc_relationship_state, undefined);
+});
+
+test('narrator stores no NPC state while registered location characters remain valid', () => {
+  const characters = { heroine5: { name: '윤아름' }, heroine6: { name: '서지아' }, heroine9: { name: '박소현' } };
+  const sixWard = normalizeRegisteredNpcExtract({ character_id: 'six_ward_new_nurse' }, characters, 'heroine5');
+  assert.equal(sixWard.character_id, 'heroine5');
+  assert.equal(sixWard._npc_registration_rejected, true);
+  const parkSohyun = normalizeRegisteredNpcExtract({ character_id: 'heroine9', npcs_present: ['heroine9'] }, characters, null);
+  assert.equal(parkSohyun.character_id, 'heroine9');
+  assert.equal(parkSohyun._npc_registration_rejected, false);
+  const narratorPatch = buildSavePatch(normalizeRegisteredNpcExtract({
+    character_id: 'narrator', npc_stat_changes: { 호감도: { delta: 5, reason: 'ignored' } }, npc_emotion: { surface: 'ignored' }
+  }, characters), {});
+  assert.equal(narratorPatch.npc_stats, undefined);
+  assert.equal(narratorPatch.npc_emotion, undefined);
+  assert.equal(narratorPatch.npc_relationship_state, undefined);
+});
+
+test('ordinary favorable, trust, and voluntary acceptance reactions apply plus-one deltas', () => {
+  const cases = [
+    ['호감도', '호의와 편안함', { 호감도: 10 }, { 호감도: 11 }],
+    ['신뢰도', '의심 완화와 도움 수용', { 신뢰도: 10 }, { 신뢰도: 11 }],
+    ['순응도', '부탁을 자발적으로 수용', { 순응도: 10 }, { 순응도: 11 }]
+  ];
+  for (const [key, reason, previous, expected] of cases) {
+    const update = applyNpcStatChanges(previous, { [key]: { delta: 1, reason } });
+    assert.equal(update.stats[key], expected[key]);
+    assert.deepEqual(update.changes[key], { delta: 1, reason });
+  }
+});
+
+test('no-change dialogue preserves all NPC stats at zero delta', () => {
+  const previous = { 호감도: 3, 신뢰도: 4, 최면깊이: 5, 순응도: 6, 최면저항력: 70 };
+  const update = applyNpcStatChanges(previous, {});
+  assert.deepEqual(update.stats, previous);
+  assert.deepEqual(Object.values(update.changes).map(change => change.delta), [0, 0, 0, 0, 0]);
 });
 
 test('CSA uses level limits, stores spatial scope, and filters current scene only', () => {

@@ -18,7 +18,7 @@ docs/                 # 프로젝트 인수인계 문서
 from supabase import create_client
 
 URL = "https://ckzwlmoojtmcpwlqsqzv.supabase.co"
-KEY = "sb_secret_NkwcIvqMYFA1ybDh_cUH0w_9TdimbO0"
+KEY = "<SUPABASE_SECRET_KEY>"
 
 supabase = create_client(URL, KEY)
 

@@ -30,6 +30,7 @@ test('extract normalization converts numeric image IDs', () => {
   assert.equal(extract.image_id, 42);
   assert.deepEqual(extract.choices, []);
   assert.deepEqual(extract.player_patch, {});
+  assert.equal(extract.npc_emotion.physical_reaction, '');
 });
 
 test('extract prompt receives raw player input separately from the narrative', () => {
@@ -85,6 +86,15 @@ test('first generated turn receives rulebook while normal turn omits it', () => 
 
   assert.match(first.messages[0].content, /규칙 본문/);
   assert.doesNotMatch(normal.messages[0].content, /규칙 본문/);
+});
+
+test('story prompt excludes mind monitor and preserves full display format', () => {
+  const displayFormat = '상황판 전체 항목을 유지한다. '.repeat(700);
+  const prompt = buildStoryPrompt({
+    master: { rulebook_display_format: displayFormat }, save: { player: {} }, recent_memories: []
+  }, '시작', 0);
+  assert.match(prompt.messages[0].content, /마인드 모니터는 본문에 절대 출력하지 않는다/);
+  assert.equal(prompt.messages[0].content.includes(displayFormat), true);
 });
 
 test('opening mode remains explicit until opening is committed', () => {

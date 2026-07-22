@@ -118,8 +118,9 @@
     /* Character Image */
     .character-img {
       width: 100%;
-      aspect-ratio: 16/9;
-      object-fit: cover;
+      height: 440px;
+      object-fit: contain;
+      object-position: top center;
       border-radius: var(--radius);
       background: var(--bg-tertiary);
       display: block;
@@ -135,7 +136,8 @@
       background: var(--bg-tertiary);
       padding: 12px;
       border-radius: var(--radius);
-      white-space: pre-wrap;
+      display: grid;
+      gap: 10px;
     }
 
     /* Player Status */
@@ -150,6 +152,11 @@
     }
     .player-status .stat-label { color: var(--text-secondary); }
     .player-status .stat-value { color: var(--accent); }
+    .info-list, .npc-status { font-size: 0.85rem; }
+    .stat-value.signal-green { color: #4ade80; }
+    .stat-value.signal-yellow { color: #facc15; }
+    .stat-value.signal-red { color: #fb7185; }
+    .delta-up { color: #4ade80; } .delta-down { color: #fb7185; }
 
     /* Audio Player */
     .audio-player {
@@ -321,6 +328,7 @@
   <script src="api.js"></script>
   <script src="stream.js"></script>
   <script src="ui.js"></script>
+  <script src="sidebar.js"></script>
   <script>
     // ─── Entry Point ───
     const GAME_ID = new URLSearchParams(location.search).get('game') || localStorage.getItem('gameId');
@@ -340,6 +348,15 @@
         state.imageCatalog = ctx.image_catalog || {};
         state.context = ctx.context || null;
         ui.updateMeta(ctx.context?.master?.title || ctx.context?.title || '게임 제목', state.turnCount);
+        sidebar.updateContext(state.context);
+        const activeCharacterId = state.context?.save?.last_character_id;
+        if (activeCharacterId && activeCharacterId !== 'narrator') {
+          sidebar.updateMind(state.context?.save?.npc_emotion?.[activeCharacterId]);
+          sidebar.renderStats(state.context?.save?.npc_stats?.[activeCharacterId]);
+          api.image(state.gameId, activeCharacterId, state.context?.save?.last_image_id)
+            .then(res => { if (res.image_url) ui.showImage(res.image_url); })
+            .catch(() => {});
+        }
         ui.setLoading(false);
       } catch (e) {
         ui.showSystemMessage('컨텍스트 로드 실패: ' + e.message);
@@ -420,11 +437,9 @@
         );
         state.turnCount = saveRes.turn_count;
         ui.updateMeta(null, state.turnCount);
-        ui.updateMindMonitor(extract.npc_emotion?.surface, extract.npc_emotion?.inner);
-        ui.updatePlayerStatus({
-          ...(extract.npc_stats || {}),
-          location: extract.player_patch?.location
-        });
+        sidebar.updateCharacter(extract.character_id);
+        sidebar.updateMind(extract.npc_emotion);
+        sidebar.renderStats(extract.npc_stats);
 
         // ⑤ 저장 성공 후 선택지를 활성화한다.
         const choices = ui.parseChoices(narrative);

@@ -232,3 +232,7 @@ Worker의 `buildSavePatch()`는 추출 결과를 DB 구조에 맞게 바꾼다.
 - 동일 내용 재요청은 `replay`다.
 - 다른 내용의 같은 턴 요청은 `conflict`다.
 - conflict 후 DB가 부분 변경되지 않는다.
+
+## JSONB deep merge migration
+
+`supabase/migrations/20260722095050_jsonb_deep_merge.sql` defines `public.jsonb_deep_merge(jsonb, jsonb)` before `commit_turn` is applied to a new database. When both values are JSON objects, it recursively merges their keys. Arrays, scalar values, and JSON `null` are replaced by the patch value. The migration uses `create or replace function` and `set search_path = public`, so it is idempotent.

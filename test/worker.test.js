@@ -8,6 +8,15 @@ import {
   normalizeExtract,
   normalizeImageCatalog
 } from '../worker/game-proxy-v2.js';
+import worker from '../worker/game-proxy-v2.js';
+
+function apiRequest(path, body = {}) {
+  return new Request(`https://worker.test${path}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body)
+  });
+}
 
 test('context image catalog accepts DB id and exposes API image_id', () => {
   const catalog = normalizeImageCatalog([
@@ -85,4 +94,31 @@ test('opening mode remains explicit until opening is committed', () => {
     recent_memories: []
   }, '계속', 1);
   assert.equal(prompt.mode, 'opening');
+});
+
+test('legacy save APIs return 410 Gone', async () => {
+  for (const path of ['/api/save-turn', '/api/set-save']) {
+    const response = await worker.fetch(apiRequest(path), {});
+    assert.equal(response.status, 410);
+    assert.match((await response.json()).error, /commit-turn/);
+  }
+});
+
+test('commit-turn rejects non-object extract before persistence', async () => {
+  for (const extract of [null, [], 'not-an-object']) {
+    const response = await worker.fetch(apiRequest('/api/commit-turn', {
+      game_id: 'test-game', turn_number: 1, content: 'test', extract
+    }), {});
+    assert.equal(response.status, 400);
+    assert.equal((await response.json()).error, 'extract must be a non-null JSON object');
+  }
+});
+
+test('version endpoint exposes Cloudflare version metadata', async () => {
+  const response = await worker.fetch(apiRequest('/api/version'), {
+    VERSION_METADATA: { id: 'version-id', tag: 'git-tag', message: 'git:commit' }
+  });
+  assert.deepEqual(await response.json(), {
+    worker: 'game-proxy-v2', version_id: 'version-id', tag: 'git-tag', message: 'git:commit'
+  });
 });

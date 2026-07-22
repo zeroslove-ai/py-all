@@ -29,9 +29,11 @@ export default {
         case '/api/extract':    return handleExtract(req, env);
         case '/api/image':      return handleImage(req, env);
         case '/api/tts':        return handleTts(req, env);
-        case '/api/save-turn':  return handleSaveTurn(req, env);
-        case '/api/set-save':   return handleSetSave(req, env);
+        case '/api/save-turn':
+        case '/api/set-save':
+          return jsonResponse({ error: 'This legacy API is gone. Use /api/commit-turn.' }, 410);
         case '/api/commit-turn': return handleCommitTurn(req, env);
+        case '/api/version': return handleVersion(env);
         case '/api/reset':      return handleReset(req, env);
         default:
           return jsonResponse({ error: 'Not Found' }, 404);
@@ -264,40 +266,15 @@ async function handleTts(req, env) {
   return jsonResponse({ url: data.url });
 }
 
-async function handleSaveTurn(req, env) {
-  const { game_id, turn_number, content } = await readJson(req);
-  if (!game_id || content === undefined) {
-    return jsonResponse({ error: 'game_id and content required' }, 400);
-  }
-  await supabaseRpc(env, 'save_turn', {
-    p_game_id: game_id,
-    p_turn_number: turn_number,
-    p_content: content
-  });
-  return jsonResponse({ ok: true });
-}
-
-async function handleSetSave(req, env) {
-  const { game_id, patch, turn_number } = await readJson(req);
-  if (!game_id || !patch) {
-    return jsonResponse({ error: 'game_id and patch required' }, 400);
-  }
-  await supabaseRpc(env, 'set_save', {
-    p_game_id: game_id,
-    p_patch: patch,
-    p_turn_number: turn_number
-  });
-  const save = await supabaseGet(env, 'game_save', `select=turn_count&game_id=eq.${game_id}&limit=1`);
-  const newTurnCount = save?.[0]?.turn_count || turn_number;
-  return jsonResponse({ ok: true, turn_count: newTurnCount });
-}
-
 async function handleCommitTurn(req, env) {
   const { game_id, turn_number, content, extract, engine_patch } = await readJson(req);
-  if (!game_id || !Number.isInteger(turn_number) || !content || !extract) {
+  if (!game_id || !Number.isInteger(turn_number) || !content) {
     return jsonResponse({
       error: 'game_id, integer turn_number, content and extract required'
     }, 400);
+  }
+  if (!isPlainObject(extract)) {
+    return jsonResponse({ error: 'extract must be a non-null JSON object' }, 400);
   }
 
   const patch = buildSavePatch(extract, engine_patch);
@@ -320,6 +297,16 @@ async function handleCommitTurn(req, env) {
     ok: true,
     turn_count: result?.turn_count ?? turn_number,
     replay: result?.status === 'replay'
+  });
+}
+
+function handleVersion(env) {
+  const metadata = env.VERSION_METADATA || {};
+  return jsonResponse({
+    worker: 'game-proxy-v2',
+    version_id: metadata.id || null,
+    tag: metadata.tag || null,
+    message: metadata.message || null
   });
 }
 
@@ -522,6 +509,10 @@ function flattenImageCatalog(catalog) {
   if (Array.isArray(catalog)) return catalog;
   if (!catalog || typeof catalog !== 'object') return [];
   return Object.values(catalog).flatMap(value => Array.isArray(value) ? value : []);
+}
+
+function isPlainObject(value) {
+  return value !== null && typeof value === 'object' && !Array.isArray(value);
 }
 
 function buildSavePatch(extract, enginePatch = {}) {

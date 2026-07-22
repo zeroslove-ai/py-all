@@ -79,35 +79,7 @@ const api = {
   },
 
   // ─── 6. 턴 저장 ───
-  async saveTurn(gameId, turnNumber, content) {
-    const res = await fetch(`${API_BASE}/api/save-turn`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        game_id: gameId,
-        turn_number: turnNumber,
-        content: content
-      })
-    });
-    if (!res.ok) throw new Error(`save-turn failed: ${res.status}`);
-    return await res.json();
-  },
-
   // ─── 7. 진행 상태 갱신 ───
-  async setSave(gameId, patch, turnNumber) {
-    const res = await fetch(`${API_BASE}/api/set-save`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        game_id: gameId,
-        patch: patch,
-        turn_number: turnNumber
-      })
-    });
-    if (!res.ok) throw new Error(`set-save failed: ${res.status}`);
-    return await res.json();
-  },
-
   // ─── 8. 턴 전체 커밋 ───
   // DB의 save_turn/set_save는 Worker가 순서대로 호출하고 브라우저는 한 번만 요청한다.
   async commitTurn(gameId, turnNumber, content, extract, enginePatch = {}) {

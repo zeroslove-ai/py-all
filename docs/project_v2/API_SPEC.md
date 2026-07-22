@@ -221,3 +221,9 @@ data: [DONE]
 | `429` | 속도 제한 초과 — 제한 활성화 후 사용 |
 | `500` | Worker 또는 Supabase 처리 오류 |
 | `502` | DeepSeek 또는 TTS upstream 오류 |
+
+## Deployment identity and retired APIs
+
+- `POST /api/version` returns the active Cloudflare Worker `version_id`, `tag`, and deployment `message`. The deploy command tags each deployment with the Git commit SHA, so compare `tag` with `git rev-parse HEAD` or `origin/main`.
+- `/api/save-turn` and `/api/set-save` are retired. Both now return `410 Gone` JSON; clients must use `/api/commit-turn`.
+- `/api/commit-turn` accepts `extract` only when it is a non-null JSON object. `null`, arrays, and scalar values return `400` before any save patch is built.

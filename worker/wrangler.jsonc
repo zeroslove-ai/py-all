@@ -4,6 +4,9 @@
   "main": "./game-proxy-v2.js",
   "compatibility_date": "2026-07-22",
   "compatibility_flags": ["nodejs_compat"],
+  "version_metadata": {
+    "binding": "VERSION_METADATA"
+  },
   "observability": {
     "enabled": true
   }

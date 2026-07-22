@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+// REFERENCE ONLY - DO NOT DEPLOY OR RUN AS THE WORKER BUILD INPUT.
 /**
  * GameBuilder v2 Worker patch generator
  *

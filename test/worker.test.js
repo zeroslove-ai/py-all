@@ -200,6 +200,25 @@ test('unregistered NPC IDs, present lists, and dialogue cannot become a save tar
   assert.equal(patch.npc_relationship_state, undefined);
 });
 
+test('registered character is added once to npcs_present and no-previous invalid ID becomes narrator', () => {
+  const characters = { heroine1: { name: '한소영' }, heroine9: { name: '박소현' } };
+  const registered = normalizeRegisteredNpcExtract({
+    character_id: 'heroine9',
+    npcs_present: ['heroine1', 'heroine1', 'unknown']
+  }, characters, null);
+  assert.deepEqual(registered.npcs_present, ['heroine9', 'heroine1']);
+  const invalid = normalizeRegisteredNpcExtract({
+    character_id: 'unknown', image_id: 9, is_sexual: true,
+    npc_emotion: { surface: 'not kept' }, npc_stat_changes: { 호감도: { delta: 3, reason: 'not kept' } }
+  }, characters, null);
+  assert.equal(invalid.character_id, 'narrator');
+  assert.deepEqual(invalid.npcs_present, []);
+  assert.deepEqual(invalid.npc_emotion, {});
+  assert.deepEqual(invalid.npc_stat_changes, {});
+  assert.equal(invalid.image_id, null);
+  assert.equal(invalid.is_sexual, false);
+});
+
 test('narrator stores no NPC state while registered location characters remain valid', () => {
   const characters = { heroine5: { name: '윤아름' }, heroine6: { name: '서지아' }, heroine9: { name: '박소현' } };
   const sixWard = normalizeRegisteredNpcExtract({ character_id: 'six_ward_new_nurse' }, characters, 'heroine5');
@@ -337,6 +356,8 @@ test('Story and Extract prompt lengths are logged and NPC delta rules stay Extra
   const extract = buildExtractPrompt('테스트 서사', '테스트 행동', ctx, [], 2);
   console.log(`[prompt-length] story=${story.messages[0].content.length} extract=${extract.length}`);
   assert.doesNotMatch(story.messages[0].content, /NPC STAT DELTA CONTRACT|npc_stat_changes/);
+  assert.match(story.messages[0].content, /등록 상호작용 NPC/);
+  assert.match(story.messages[0].content, /3병동 상호작용/);
   assert.match(extract, /NPC STAT DELTA CONTRACT/);
   assert.equal(story.messages[0].content.length > 0, true);
   assert.equal(extract.length > 0, true);

@@ -458,9 +458,20 @@ function buildStoryPrompt(ctx, playerInput, currentTurn, feedback = []) {
 ${JSON.stringify(rulebook, null, 2).slice(0, 8000)}`;
   }
 
-  const displayFormatSection = master.rulebook_display_format
-    ? `\n\n[플레이어 상황판 형식 — 축약·생략 금지]\n${master.rulebook_display_format}`
-    : '';
+  const playerStatusPanel = `
+
+[PLAYER STATUS PANEL CONTRACT — HIGHEST PRIORITY FOR SECTION 2]
+[2. 플레이어 상황판]은 단순 키·값 나열표가 아니라 게임 속 최면 어플의 현재 화면처럼 작성한다. 이모지와 짧은 구분을 사용하되, 매 턴 문구와 배치를 기계적으로 복제하지 말고 현재 장면에 맞춰 자연스럽게 구성한다.
+저장값과 현재 장면에서 확인 가능한 정보를 우선 사용하며, 알 수 없는 값은 지어내지 않는다. 가능한 범위에서 다음 정보를 포함한다:
+- 🧑 플레이어: 이름, 나이, 성별, 직업 또는 역할
+- 📍 현재 상태와 위치, 저장된 게임 일자·시각이 있으면 함께 표시
+- 📱 최면 어플: 레벨, 현재 EXP/다음 레벨 필요 EXP, 현재 레벨과 룰북이 허용하는 최면 강도
+- 🌀 활성 암시 목록
+- 🌐 상식 개변: 활성 개수/최대 개수, 현재 적용 가능 범위, 오늘 사용 횟수/한도
+- 🎯 접근 대상: 현재 접근 중인 NPC의 이름과 진행에 유용한 최소 정보(예: 순응·저항). NPC 5개 스탯 전체 표는 절대 출력하지 않는다.
+- 💭 플레이어 상황 독백: 플레이어 자신의 말투·성격·현재 목표와 판단을 반영한 1인칭 직접 독백. 반드시 한국어 큰따옴표 “…”로 감싸고, 공백과 따옴표를 제외한 실질 길이 40자 이상으로 쓴다. 해설문·제3자 분석문·NPC의 표면의식/잠재의식과 혼동하는 내용은 금지하며, 이 독백은 [2]에만 출력한다.
+- 📌 현재 목표와 🔄 이번 턴에 실제로 발생한 중요 변화
+턴 번호, 일반 최면의 하루 횟수 제한, 동시 최면 인원 제한, 1인당 중첩 암시 제한, NPC 5개 스탯 전체 표, 사정·오르가즘 누적값은 절대 출력하지 않는다.`;
 
   // ─── 섹션 5: 컨텍스트 ───
   const contextSection = `
@@ -479,11 +490,11 @@ ${recentMemories.slice(-3).map(m => m.content?.slice(0, 200) || '').join('\n---\
   const feedbackSection = Array.isArray(feedback) && feedback.length
     ? `\n\n[USER FEEDBACK — APPLY TO THIS NEXT RESPONSE ONLY]\n${feedback.map(item => `- ${typeof item === 'string' ? item : item?.text || ''}`).filter(Boolean).join('\n')}\nThis is not an in-world action. Never narrate it as dialogue or an event; use it only to improve output quality.`
     : '';
-  const finalFormatRules = `\n\n[FINAL OUTPUT CONTRACT — HIGHEST PRIORITY]\nThe response body contains exactly three sections: [1. 서사 및 행동], [2. 플레이어 상황판], [3. 선택지]. Never include a mind monitor, NPC stat table, character body information, or turn number in the body. Mind monitor belongs only to npc_emotion extraction and the sidebar UI.\nDo not use formulaic first-impression or hypnosis-success calculations.\n`;
+  const finalFormatRules = `\n\n[FINAL OUTPUT CONTRACT — HIGHEST PRIORITY]\nThe response body contains exactly three sections: [1. 서사 및 행동], [2. 플레이어 상황판], [3. 선택지]. Never include a mind monitor, NPC stat table, character body information, or turn number in the body. Mind monitor belongs only to npc_emotion extraction and the sidebar UI. The Player Status Panel Contract overrides any legacy display-format text.\nDo not use formulaic first-impression or hypnosis-success calculations.\n`;
   const openingFlow = mode === 'opening'
     ? `\n\n[OPENING PHASE — AFTER PLAYER SETUP]\nThe player setup is confirmed. Generate only the first hospital scene and first NPC encounter now. Do not repeat the app discovery, app feature explanation, player questions, or character recommendation. Never claim that the player has already used the app to change the hospital in the past.\n`
     : '';
-  const systemPrompt = coreRules + playerGate + modeSection + rulebookSection + displayFormatSection + csaSection + contextSection + feedbackSection + finalFormatRules + openingFlow;
+  const systemPrompt = coreRules + playerGate + modeSection + rulebookSection + playerStatusPanel + csaSection + contextSection + feedbackSection + finalFormatRules + openingFlow;
 
   return {
     mode,

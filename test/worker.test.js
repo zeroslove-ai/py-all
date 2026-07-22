@@ -227,13 +227,17 @@ test('first generated turn receives rulebook while normal turn omits it', () => 
   assert.doesNotMatch(normal.messages[0].content, /규칙 본문/);
 });
 
-test('story prompt excludes mind monitor and preserves full display format', () => {
+test('story prompt uses the V1-style player status panel contract and excludes monitor details', () => {
   const displayFormat = '상황판 전체 항목을 유지한다. '.repeat(700);
   const prompt = buildStoryPrompt({
     master: { rulebook_display_format: displayFormat }, save: { player: {} }, recent_memories: []
   }, '시작', 0);
   assert.match(prompt.messages[0].content, /마인드 모니터는 본문에 절대 출력하지 않는다/);
-  assert.equal(prompt.messages[0].content.includes(displayFormat), true);
+  assert.match(prompt.messages[0].content, /PLAYER STATUS PANEL CONTRACT/);
+  assert.match(prompt.messages[0].content, /💭 플레이어 상황 독백/);
+  assert.match(prompt.messages[0].content, /실질 길이 40자 이상/);
+  assert.match(prompt.messages[0].content, /사정·오르가즘 누적값은 절대 출력하지 않는다/);
+  assert.equal(prompt.messages[0].content.includes(displayFormat), false);
   assert.match(prompt.messages[0].content, /FINAL OUTPUT CONTRACT/);
   assert.match(prompt.messages[0].content, /Never include a mind monitor/);
 });

@@ -2,6 +2,24 @@
 
 const API_BASE = ''; // 같은 도메인 (Cloudflare Pages + Worker)
 
+class ApiError extends Error {
+  constructor(message, status, details = {}) {
+    super(message);
+    this.name = 'ApiError';
+    this.status = status;
+    this.details = details;
+  }
+}
+
+async function readApiResponse(res, label) {
+  let data = {};
+  try { data = await res.json(); } catch { /* 빈 응답 */ }
+  if (!res.ok) {
+    throw new ApiError(data.error || `${label} failed: ${res.status}`, res.status, data);
+  }
+  return data;
+}
+
 const api = {
   // ─── 1. 컨텍스트 로드 ───
   async context(gameId) {
@@ -89,7 +107,24 @@ const api = {
     return await res.json();
   },
 
-  // ─── 8. 진행 초기화 ───
+  // ─── 8. 턴 전체 커밋 ───
+  // DB의 save_turn/set_save는 Worker가 순서대로 호출하고 브라우저는 한 번만 요청한다.
+  async commitTurn(gameId, turnNumber, content, extract, enginePatch = {}) {
+    const res = await fetch(`${API_BASE}/api/commit-turn`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        game_id: gameId,
+        turn_number: turnNumber,
+        content,
+        extract,
+        engine_patch: enginePatch
+      })
+    });
+    return readApiResponse(res, 'commit-turn');
+  },
+
+  // ─── 9. 진행 초기화 ───
   async reset(gameId) {
     const res = await fetch(`${API_BASE}/api/reset`, {
       method: 'POST',

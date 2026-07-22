@@ -336,9 +336,10 @@
       ui.setLoading(true);
       try {
         const ctx = await api.context(state.gameId);
-        state.turnCount = ctx.turn_count || 0;
+        state.turnCount = ctx.turn_count ?? 0;
         state.imageCatalog = ctx.image_catalog || {};
-        ui.updateMeta(ctx.context?.title || '게임 제목', state.turnCount);
+        state.context = ctx.context || null;
+        ui.updateMeta(ctx.context?.master?.title || ctx.context?.title || '게임 제목', state.turnCount);
         ui.setLoading(false);
       } catch (e) {
         ui.showSystemMessage('컨텍스트 로드 실패: ' + e.message);
@@ -362,23 +363,34 @@
       state.isStreaming = true;
 
       try {
+        const currentTurn = state.turnCount;
+        const nextTurn = currentTurn + 1;
+
         // ① 서사 스트리밍
-        const narrative = await stream.story(state.gameId, input, state.turnCount, (chunk) => {
+        const storyResult = await stream.story(state.gameId, input, currentTurn, (chunk) => {
           ui.appendNarrative(chunk);
         });
+        const narrative = storyResult.text;
 
         ui.finalizeNarrative();
 
+        // 재진입 응답은 현재 상태 안내이므로 새로운 턴으로 저장하지 않는다.
+        if (storyResult.mode === 'reentry') {
+          const choices = ui.parseChoices(narrative);
+          ui.renderChoices(choices, submitChoice);
+          return;
+        }
+
         // ② 상태 추출
-        const extract = await api.extract(state.gameId, narrative, state.turnCount);
+        const extract = await api.extract(state.gameId, narrative, nextTurn);
         state.lastExtract = extract;
 
-        // ③ 병렬: 이미지 + TTS + 저장
-        const promises = [];
+        // ③ 이미지/TTS는 선택 작업으로 병렬 실행
+        const optionalTasks = [];
 
         // 이미지
         if (extract.character_id && extract.character_id !== 'narrator') {
-          promises.push(
+          optionalTasks.push(
             api.image(state.gameId, extract.character_id, extract.image_id)
               .then(res => { if (res.image_url) ui.showImage(res.image_url); })
               .catch(() => {})
@@ -390,7 +402,7 @@
           const line = extract.dialogue_lines[0];
           const voiceId = getVoiceId(extract.character_id);
           if (voiceId && line.text) {
-            promises.push(
+            optionalTasks.push(
               api.tts(line.text, voiceId)
                 .then(res => { if (res.url) ui.playAudio(res.url); })
                 .catch(() => {})
@@ -398,46 +410,63 @@
           }
         }
 
-        // 저장 (병렬)
-        promises.push(
-          api.saveTurn(state.gameId, state.turnCount, narrative).catch(() => {})
+        // ④ 핵심 저장은 Worker의 단일 커밋 엔드포인트로 수행한다.
+        const enginePatch = storyResult.mode === 'opening'
+          ? { opening_started: true }
+          : {};
+        const saveRes = await retryRequest(() =>
+          api.commitTurn(state.gameId, nextTurn, narrative, extract, enginePatch)
         );
-        promises.push(
-          api.setSave(state.gameId, extract, state.turnCount).catch(() => {})
-        );
-
-        await Promise.allSettled(promises);
-
-        // ④ 선택지 렌더링
-        const choices = ui.parseChoices(narrative);
-        ui.renderChoices(choices, (choiceText) => {
-          document.getElementById('chat-input').value = choiceText;
-          handleInput();
+        state.turnCount = saveRes.turn_count;
+        ui.updateMeta(null, state.turnCount);
+        ui.updateMindMonitor(extract.npc_emotion?.surface, extract.npc_emotion?.inner);
+        ui.updatePlayerStatus({
+          ...(extract.npc_stats || {}),
+          location: extract.player_patch?.location
         });
 
-        // ⑤ turn_count 갱신 (서버 응답값으로 덮어쓰기)
-        const saveRes = await api.setSave(state.gameId, extract, state.turnCount);
-        if (saveRes.turn_count !== undefined) {
-          state.turnCount = saveRes.turn_count;
-          ui.updateMeta(null, state.turnCount);
-        }
+        // ⑤ 저장 성공 후 선택지를 활성화한다.
+        const choices = ui.parseChoices(narrative);
+        ui.renderChoices(choices, submitChoice);
+
+        await Promise.allSettled(optionalTasks);
 
       } catch (e) {
-        ui.showSystemMessage('오류: ' + e.message);
+        if (e.status === 409) {
+          ui.showSystemMessage('다른 창에서 턴이 진행되었습니다. 최신 상태를 다시 불러옵니다.');
+          await loadGameContext();
+        } else {
+          ui.showSystemMessage('턴 저장 또는 처리 실패: ' + e.message + ' — 입력을 다시 시도해 주세요.');
+        }
       } finally {
         state.isStreaming = false;
         ui.setLoading(false);
       }
     }
 
+    function submitChoice(choiceText) {
+      document.getElementById('chat-input').value = choiceText;
+      handleInput();
+    }
+
+    async function retryRequest(operation, maxAttempts = 3) {
+      let lastError;
+      for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+        try {
+          return await operation();
+        } catch (error) {
+          lastError = error;
+          if (error.status && error.status < 500) throw error;
+          if (attempt < maxAttempts) {
+            await new Promise(resolve => setTimeout(resolve, 300 * (2 ** (attempt - 1))));
+          }
+        }
+      }
+      throw lastError;
+    }
+
     function getVoiceId(characterId) {
-      // TODO: 컨텍스트에서 voice_id 조회
-      const voiceMap = {
-        heroine1: 'ko-KR-SunHiNeural',
-        heroine2: 'ko-KR-InJoonNeural',
-        // ... 실제 voice_id로 교체
-      };
-      return voiceMap[characterId] || null;
+      return state.context?.master?.characters?.[characterId]?.voice_id || null;
     }
   </script>
 </body>

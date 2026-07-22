@@ -24,6 +24,8 @@ const stream = {
       throw new Error('ReadableStream not supported');
     }
 
+    const mode = res.headers.get('X-Game-Mode') || 'normal';
+
     const reader = res.body.getReader();
     const decoder = new TextDecoder();
     let buffer = '';
@@ -43,7 +45,7 @@ const stream = {
 
         const payload = trimmed.slice(6);
         if (payload === '[DONE]') {
-          return fullText;
+          return { text: fullText, mode };
         }
 
         try {
@@ -80,6 +82,6 @@ const stream = {
       }
     }
 
-    return fullText;
+    return { text: fullText, mode };
   }
 };

@@ -39,6 +39,14 @@ const ui = {
     this.els.loading.textContent = label;
     this.els.chatSend.disabled = active;
     this.els.chatInput.disabled = active;
+    if (active) {
+      requestAnimationFrame(() => {
+        this.scrollToBottom();
+        if (window.matchMedia('(max-width: 768px)').matches) {
+          this.els.loading.scrollIntoView({ block: 'nearest' });
+        }
+      });
+    }
   },
 
   // ─── 사용자 메시지 ───

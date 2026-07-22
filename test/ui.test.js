@@ -53,3 +53,11 @@ test('mind monitor preserves quoted monologues and separates observable reaction
   assert.match(pageSource, /white-space: pre-wrap/);
   assert.match(pageSource, /font-style: italic/);
 });
+
+test('loading status follows the narrative and stays above the bottom controls', () => {
+  assert.match(pageSource, /<div class="story-stream" id="story-stream"><\/div>\s*<div class="loading story-loading" id="loading" role="status" aria-live="polite">/);
+  assert.doesNotMatch(pageSource, /<div class="story-stream" id="story-stream">\s*<div class="loading"/);
+  assert.match(pageSource, /\.story-loading\s*{[\s\S]*?flex-shrink: 0;/);
+  assert.match(pageSource, /\.story-loading\s*{[\s\S]*?scroll-margin-bottom: 76px;/);
+  assert.match(uiSource, /setLoading\(active, label = '처리 중'\)[\s\S]*?if \(active\)[\s\S]*?this\.scrollToBottom\(\)/);
+});

@@ -5,7 +5,7 @@ const stream = {
   // Worker가 DeepSeek OpenAI 호환 SSE를 그대로 중계
   // 파싱은 브라우저에서 한 번만 수행
   async story(gameId, playerInput, turnCount, onChunk) {
-    const res = await fetch('/api/story', {
+    const res = await fetch(`${API_BASE}/api/story`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({

@@ -18,13 +18,14 @@ const sidebar = {
     ui.init();
     const relationship = document.createElement('section');
     relationship.className = 'panel-section';
-    relationship.innerHTML = '<div class="panel-title" id="npc-relationship-title">관계 기록</div><div class="info-list" id="npc-relationship"></div>';
+    relationship.innerHTML = '<div class="panel-title" id="npc-relationship-title">관계 기록</div><div id="npc-relationship" class="relationship-inline"></div>';
     panel.appendChild(relationship);
-    const resume = document.createElement('section');
-    resume.className = 'side-panel-footer';
-    resume.innerHTML = '<button id="resume-game-button" class="resume-play-btn" type="button">▶ 플레이 재개</button>';
-    resume.querySelector('#resume-game-button').addEventListener('click', () => window.resumeGame?.());
-    panel.appendChild(resume);
+    const actions = document.createElement('section');
+    actions.className = 'side-panel-footer';
+    actions.innerHTML = '<div class="side-action-row"><button id="app-info-side-button" class="side-action-btn" type="button">📱 어플 정보</button><button id="resume-game-button" class="side-action-btn" type="button">▶ 플레이 재개</button></div>';
+    actions.querySelector('#app-info-side-button').addEventListener('click', () => window.showAppInfo?.());
+    actions.querySelector('#resume-game-button').addEventListener('click', () => window.resumeGame?.());
+    panel.appendChild(actions);
     this.renderStats({});
   },
 
@@ -38,17 +39,9 @@ const sidebar = {
     if (!characterId || characterId === 'narrator') return;
     const character = context?.master?.characters?.[characterId] || {};
     this.activeCharacterId = characterId;
-    const info = [
-      ['캐릭터명', character.name || character['이름']],
-      ['소속', character.affiliation || character.organization || character['소속']],
-      ['나이', character.age || character['나이']],
-      ['키·몸무게·체형', [character.height || character.height_cm || character['키'], character.weight || character.weight_kg || character['몸무게'], character.body_type || character['체형']].filter(Boolean).join(' / ')],
-      ['현재 관계', character.relationship || character.current_relationship || character['연인관계']],
-      ['공개 배경/상태', character.public_background || character.current_status || character.public_summary]
-    ];
     document.getElementById('character-info-title').textContent = `${character.name || characterId} 기본정보`;
     document.getElementById('npc-status-title').textContent = `${character.name || characterId} 상태`;
-    document.getElementById('character-info').replaceChildren(...info.map(([label, value]) => this.row(label, value || '-')));
+    this.renderCharacterInfo(character);
     const relationship = context?.save?.npc_relationship_state?.[characterId] || {};
     const playerEjaculationCount = Number.isInteger(relationship.player_ejaculation_count)
       ? Math.max(0, relationship.player_ejaculation_count)
@@ -58,8 +51,8 @@ const sidebar = {
       : 0;
     document.getElementById('npc-relationship-title').textContent = `${character.name || characterId} 관계 기록`;
     const relationshipRoot = document.getElementById('npc-relationship');
-    relationshipRoot.classList.add('relationship-inline');
-    relationshipRoot.textContent = `사정 ${playerEjaculationCount}회 · 오르가즘 ${npcOrgasmCount}회`;
+    relationshipRoot.replaceChildren();
+    relationshipRoot.append('💦 사정 ', this.emphasis(`${playerEjaculationCount}회`), ' · ✨ 오르가즘 ', this.emphasis(`${npcOrgasmCount}회`));
     this.renderStats(context?.save?.npc_stats?.[characterId] || {}, characterId);
   },
 
@@ -98,13 +91,43 @@ const sidebar = {
     if (characterId) this.previousStats[characterId] = next;
   },
 
-  signal(value) { return value >= 70 ? 'signal-green' : value >= 35 ? 'signal-yellow' : 'signal-red'; },
-  row(label, value) {
-    const row = document.createElement('div'); row.className = 'stat-row';
-    const name = document.createElement('span'); name.className = 'stat-label'; name.textContent = label;
-    const current = document.createElement('span'); current.className = 'stat-value'; current.textContent = value;
-    row.append(name, current); return row;
-  }
+  renderCharacterInfo(character = {}) {
+    const root = document.getElementById('character-info');
+    root.className = 'character-info-compact';
+    root.replaceChildren();
+    const appendLine = (text, className = '') => {
+      if (!text) return;
+      const line = document.createElement('div');
+      if (className) line.className = className;
+      line.textContent = text;
+      root.appendChild(line);
+    };
+    const affiliation = character.affiliation || character.organization || character['소속'];
+    appendLine(affiliation, 'character-affiliation');
+    const age = this.withUnit(character.age || character['나이'], '세');
+    const height = this.withUnit(character.height || character.height_cm || character['키'], 'cm');
+    const weight = this.withUnit(character.weight || character.weight_kg || character['몸무게'], 'kg');
+    const metrics = [['나이', age], ['키', height], ['몸무게', weight]].filter(([, value]) => value);
+    appendLine(metrics.map(([label, value]) => `${label} ${value}`).join(' · '));
+    appendLine(character.body_type || character['체형']);
+    const relationship = character.relationship || character.current_relationship || character['연인관계'];
+    const publicBackground = character.public_background || character.current_status || character.public_summary;
+    appendLine([relationship ? `관계 ${relationship}` : '', publicBackground].filter(Boolean).join(' · '));
+  },
+
+  withUnit(value, unit) {
+    if (value === null || value === undefined || String(value).trim() === '') return '';
+    const text = String(value).trim();
+    return new RegExp(`${unit}$`, 'i').test(text) ? text : `${text}${unit}`;
+  },
+
+  emphasis(text) {
+    const value = document.createElement('strong');
+    value.textContent = text;
+    return value;
+  },
+
+  signal(value) { return value >= 70 ? 'signal-green' : value >= 35 ? 'signal-yellow' : 'signal-red'; }
 };
 
 document.addEventListener('DOMContentLoaded', () => sidebar.init());

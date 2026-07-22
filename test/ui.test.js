@@ -4,6 +4,7 @@ import { readFile } from 'node:fs/promises';
 
 const sidebarSource = await readFile(new URL('../pages/sidebar.js', import.meta.url), 'utf8');
 const pageSource = await readFile(new URL('../pages/index.html', import.meta.url), 'utf8');
+const uiSource = await readFile(new URL('../pages/ui.js', import.meta.url), 'utf8');
 
 test('NPC status is rendered as one inline status sentence, not five rows', () => {
   const renderStats = sidebarSource.match(/renderStats\(stats[\s\S]*?\n  signal\(/)?.[0] || '';
@@ -15,13 +16,26 @@ test('NPC status is rendered as one inline status sentence, not five rows', () =
 });
 
 test('sidebar resume button and slash command share resumeGame without turn APIs', () => {
+  assert.match(sidebarSource, /id="app-info-side-button"/);
   assert.match(sidebarSource, /id="resume-game-button"/);
+  assert.match(sidebarSource, /window\.showAppInfo/);
   assert.match(sidebarSource, /window\.resumeGame/);
   assert.match(pageSource, /command === '\/플레이'[\s\S]*?await resumeGame\(\)/);
   const resume = pageSource.match(/async function resumeGame\(\)[\s\S]*?\n    }\n\n    async function startPlayerSetup/)?.[0] || '';
   assert.match(resume, /loadGameContext\(\)/);
   assert.match(resume, /restoreLastTurn\(\)/);
   assert.doesNotMatch(resume, /stream\.story|api\.extract|api\.commitTurn/);
+});
+
+test('sidebar uses compact character facts and relationship counters, not choice app-info UI', () => {
+  assert.match(sidebarSource, /renderCharacterInfo/);
+  assert.match(sidebarSource, /💦 사정/);
+  assert.match(sidebarSource, /✨ 오르가즘/);
+  assert.doesNotMatch(sidebarSource, /캐릭터명/);
+  assert.match(pageSource, /side-action-row/);
+  assert.match(pageSource, /width: calc\(50% - 4px\)/);
+  assert.doesNotMatch(uiSource, /choice-btn app-info|className = 'choice-btn app-info'/);
+  assert.doesNotMatch(pageSource, /어플 정보 보기/);
 });
 
 test('reset clears the view and starts only the player setup prologue', () => {

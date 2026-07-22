@@ -239,6 +239,7 @@ test('story prompt uses the V1-style player status panel contract and excludes m
   assert.match(prompt.messages[0].content, /사정·오르가즘 누적값은 절대 출력하지 않는다/);
   assert.equal(prompt.messages[0].content.includes(displayFormat), false);
   assert.match(prompt.messages[0].content, /FINAL OUTPUT CONTRACT/);
+  assert.match(prompt.messages[0].content, /exactly four in-world action choices/);
   assert.match(prompt.messages[0].content, /Never include a mind monitor/);
 });
 

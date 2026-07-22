@@ -15,7 +15,10 @@ import {
   applyCsaAction,
   isCsaApplicable,
   filterMainNpcDialogue,
-  normalizeRelationshipState
+  normalizeRelationshipState,
+  isSetupComplete,
+  isApprovalInput,
+  mergeRecommendation
 } from '../worker/game-proxy-v2.js';
 import worker from '../worker/game-proxy-v2.js';
 
@@ -216,18 +219,58 @@ test('story prompt excludes mind monitor and preserves full display format', () 
 test('opening mode remains explicit until opening is committed', () => {
   const prompt = buildStoryPrompt({
     master: { opening_scenario: '오프닝' },
-    save: { player: { name: '플레이어' } },
+    save: { player: { name: '플레이어', job: '의사' } },
     recent_memories: []
   }, '계속', 1);
   assert.equal(prompt.mode, 'opening');
 });
 
-test('player setup starts with app discovery and defers hospital scene until setup is saved', () => {
+test('player setup has one recommendation contract and defers the hospital until setup completes', () => {
   const setup = buildStoryPrompt({ master: {}, save: { player: {} }, recent_memories: [] }, 'start', 0);
-  const opening = buildStoryPrompt({ master: {}, save: { player: { name: 'A', job: 'doctor' } }, recent_memories: [] }, 'start', 0);
-  assert.match(setup.messages[0].content, /OPENING PHASE A/);
-  assert.match(setup.messages[0].content, /Do not show a hospital scene or NPC encounter/);
-  assert.match(opening.messages[0].content, /OPENING PHASE B/);
+  const opening = buildStoryPrompt({ master: {}, save: { player_setup: { status: 'complete' }, player: { name: 'A', job: 'doctor' } }, recent_memories: [] }, 'start', 0);
+  assert.equal(setup.mode, 'player_setup');
+  assert.match(setup.messages[0].content, /\[PLAYER SETUP PHASE\]/);
+  assert.match(setup.messages[0].content, /병원 장면이나 NPC는 아직 등장시키지 않는다/);
+  assert.match(setup.messages[0].content, /① 추천 설정으로 시작한다/);
+  assert.equal((setup.messages[0].content.match(/\[PLAYER SETUP PHASE\]/g) || []).length, 1);
+  assert.equal(opening.mode, 'opening');
+  assert.match(opening.messages[0].content, /병원 첫 장면과 첫 NPC 조우만/);
+  assert.match(opening.messages[0].content, /어플 발견, 기능 설명, 설정 질문, 추천안은 다시 출력하지 않는다/);
+});
+
+test('approval stores the existing recommendation deterministically', () => {
+  const recommendation = {
+    name: '민준', age: 29, gender: '남성', job: '의사', major: '내과', rank: '전공의',
+    height_cm: 178, weight_kg: 70, style: '차분함', background: '병원 근무 중'
+  };
+  assert.equal(isApprovalInput('①'), true);
+  assert.equal(isApprovalInput('1'), true);
+  assert.equal(isApprovalInput('추천 설정으로 시작'), true);
+  assert.equal(isApprovalInput('승인'), true);
+  assert.equal(isApprovalInput('일부 변경'), false);
+  const patch = buildSavePatch({}, {}, null, { player_setup: { status: 'recommended', recommendation } }, 1, '승인');
+  assert.deepEqual(patch.player, recommendation);
+  assert.deepEqual(patch.player_setup, { status: 'complete', recommendation });
+});
+
+test('setup recommendation merges only supplied edits before approval', () => {
+  const previous = { name: '민준', age: 29, job: '의사', height_cm: 178 };
+  assert.deepEqual(mergeRecommendation(previous, { job: '간호사', weight_kg: 62 }), {
+    name: '민준', age: 29, job: '간호사', height_cm: 178, weight_kg: 62
+  });
+  const patch = buildSavePatch({ player_recommendation: { job: '간호사' } }, {}, null, {
+    player_setup: { status: 'recommended', recommendation: previous }
+  }, 2, '직업만 간호사로 바꿔줘');
+  assert.equal(patch.player, undefined);
+  assert.deepEqual(patch.player_setup, {
+    status: 'recommended', recommendation: { name: '민준', age: 29, job: '간호사', height_cm: 178 }
+  });
+});
+
+test('setup completion requires status, name, and job', () => {
+  assert.equal(isSetupComplete({ player_setup: { status: 'complete' }, player: { name: 'A', job: 'B' } }), true);
+  assert.equal(isSetupComplete({ player_setup: { status: 'recommended' }, player: { name: 'A', job: 'B' } }), false);
+  assert.equal(isSetupComplete({ player_setup: { status: 'complete' }, player: { name: 'A' } }), false);
 });
 
 test('legacy save APIs return 410 Gone', async () => {

@@ -1,5 +1,11 @@
 const sidebar = {
-  stats: ['호감도', '신뢰도', '최면깊이', '순응도', '최면저항력'],
+  stats: [
+    { key: '호감도', label: '호감' },
+    { key: '신뢰도', label: '신뢰' },
+    { key: '최면깊이', label: '최면' },
+    { key: '순응도', label: '순응' },
+    { key: '최면저항력', label: '저항' }
+  ],
   previousStats: {},
 
   init() {
@@ -14,6 +20,11 @@ const sidebar = {
     relationship.className = 'panel-section';
     relationship.innerHTML = '<div class="panel-title" id="npc-relationship-title">관계 기록</div><div class="info-list" id="npc-relationship"></div>';
     panel.appendChild(relationship);
+    const resume = document.createElement('section');
+    resume.className = 'side-panel-footer';
+    resume.innerHTML = '<button id="resume-game-button" class="resume-play-btn" type="button">▶ 플레이 재개</button>';
+    resume.querySelector('#resume-game-button').addEventListener('click', () => window.resumeGame?.());
+    panel.appendChild(resume);
     this.renderStats({});
   },
 
@@ -26,6 +37,7 @@ const sidebar = {
   updateCharacter(characterId, context = state.context) {
     if (!characterId || characterId === 'narrator') return;
     const character = context?.master?.characters?.[characterId] || {};
+    this.activeCharacterId = characterId;
     const info = [
       ['캐릭터명', character.name || character['이름']],
       ['소속', character.affiliation || character.organization || character['소속']],
@@ -48,6 +60,7 @@ const sidebar = {
     const relationshipRoot = document.getElementById('npc-relationship');
     relationshipRoot.classList.add('relationship-inline');
     relationshipRoot.textContent = `사정 ${playerEjaculationCount}회 · 오르가즘 ${npcOrgasmCount}회`;
+    this.renderStats(context?.save?.npc_stats?.[characterId] || {}, characterId);
   },
 
   updateMind(emotion = {}) {
@@ -55,24 +68,33 @@ const sidebar = {
     document.querySelectorAll('#mind-monitor span').forEach((node, index) => { node.textContent = values[index] || '-'; });
   },
 
-  renderStats(stats = {}) {
+  renderStats(stats = {}, characterId = this.activeCharacterId) {
     const root = document.getElementById('npc-status');
-    root.replaceChildren(...this.stats.map(label => {
-      const value = Number(stats[label]);
-      const previous = this.previousStats[label];
-      const delta = Number.isFinite(value) && Number.isFinite(previous) ? value - previous : null;
-      const row = this.row(label, Number.isFinite(value) ? value : '-');
-      const valueNode = row.querySelector('.stat-value');
-      if (Number.isFinite(value)) valueNode.classList.add(this.signal(value));
-      if (delta) {
-        const change = document.createElement('small');
-        change.className = delta > 0 ? 'delta-up' : 'delta-down';
-        change.textContent = ` ${delta > 0 ? '▲' : '▼'}${Math.abs(delta)}`;
-        valueNode.appendChild(change);
+    const previous = this.previousStats[characterId] || {};
+    const next = {};
+    root.className = 'npc-status npc-status-inline';
+    root.replaceChildren();
+    this.stats.forEach((stat, index) => {
+      if (index) root.append(document.createTextNode(' · '));
+      const value = Number(stats[stat.key]);
+      const valueNode = document.createElement('span');
+      valueNode.className = 'stat-value';
+      valueNode.textContent = `${stat.label} ${Number.isFinite(value) ? value : '-'}`;
+      if (Number.isFinite(value)) {
+        valueNode.classList.add(this.signal(value));
+        const previousValue = Number(previous[stat.key]);
+        const delta = Number.isFinite(previousValue) ? value - previousValue : null;
+        if (delta) {
+          const change = document.createElement('small');
+          change.className = delta > 0 ? 'delta-up' : 'delta-down';
+          change.textContent = `${delta > 0 ? '▲' : '▼'}${Math.abs(delta)}`;
+          valueNode.appendChild(change);
+        }
+        next[stat.key] = value;
       }
-      if (Number.isFinite(value)) this.previousStats[label] = value;
-      return row;
-    }));
+      root.append(valueNode);
+    });
+    if (characterId) this.previousStats[characterId] = next;
   },
 
   signal(value) { return value >= 70 ? 'signal-green' : value >= 35 ? 'signal-yellow' : 'signal-red'; },

@@ -85,7 +85,7 @@ const api = {
   // ─── 7. 진행 상태 갱신 ───
   // ─── 8. 턴 전체 커밋 ───
   // DB의 save_turn/set_save는 Worker가 순서대로 호출하고 브라우저는 한 번만 요청한다.
-  async commitTurn(gameId, turnNumber, content, extract, enginePatch = {}) {
+  async commitTurn(gameId, turnNumber, content, extract, enginePatch = {}, playerInput = '') {
     const res = await fetch(`${API_BASE}/api/commit-turn`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -94,7 +94,8 @@ const api = {
         turn_number: turnNumber,
         content,
         extract,
-        engine_patch: enginePatch
+        engine_patch: enginePatch,
+        player_input: playerInput
       })
     });
     return readApiResponse(res, 'commit-turn');

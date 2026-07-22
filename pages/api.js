@@ -74,8 +74,11 @@ const api = {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ text, voice_id: voiceId, direction })
     });
-    if (!res.ok) throw new Error(`tts failed: ${res.status}`);
-    return await res.json();
+    const data = await readApiResponse(res, 'tts');
+    if (typeof data.url !== 'string' || !/^https?:\/\//i.test(data.url)) {
+      throw new ApiError('TTS 응답에 유효한 audio URL이 없습니다.', res.status, data);
+    }
+    return data;
   },
 
   // ─── 6. 턴 저장 ───

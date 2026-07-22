@@ -79,6 +79,19 @@ test('Extract keeps all unique dialogue from the main NPC only', () => {
   assert.deepEqual(lines, [{ speaker: 'Main', text: 'first', direction: 'softly' }, { speaker: 'Main', text: 'second', direction: 'firmly' }]);
 });
 
+test('Extract TTS dialogue keeps order and supplies a non-empty direction', () => {
+  const lines = filterMainNpcDialogue({ character_id: 'heroine1', dialogue_lines: [
+    { speaker: 'Main', text: 'first line', direction: '' },
+    { speaker: 'Other NPC', text: 'excluded', direction: 'calmly' },
+    { speaker: 'Main', text: 'second line', direction: 'softly' },
+    { speaker: 'Player', text: 'excluded', direction: 'firmly' }
+  ] }, { heroine1: { name: 'Main' } });
+  assert.deepEqual(lines, [
+    { speaker: 'Main', text: 'first line', direction: 'neutral' },
+    { speaker: 'Main', text: 'second line', direction: 'softly' }
+  ]);
+});
+
 test('NPC relationship state uses non-negative cumulative counters', () => {
   assert.deepEqual(normalizeRelationshipState({}, {}), { player_ejaculation_count: 0, npc_orgasm_count: 0 });
   assert.deepEqual(

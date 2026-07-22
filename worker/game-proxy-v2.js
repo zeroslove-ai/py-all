@@ -254,18 +254,23 @@ async function handleImage(req, env) {
 
 async function handleTts(req, env) {
   const { text, voice_id, direction = '' } = await readJson(req);
-  if (!text || !voice_id) {
+  if (typeof text !== 'string' || !text.trim() || typeof voice_id !== 'string' || !voice_id.trim()) {
     return jsonResponse({ error: 'text and voice_id required' }, 400);
   }
+  if (typeof direction !== 'string') return jsonResponse({ error: 'direction must be a string' }, 400);
   const res = await fetch('https://fancy-dust-7f8c.zeroslove.workers.dev/', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ text, voice_id, emotion: mapDirection(direction) })
+    body: JSON.stringify({ text: text.trim(), voice_id: voice_id.trim(), direction: direction.trim(), emotion: mapDirection(direction) })
   });
   if (!res.ok) {
-    return jsonResponse({ error: `TTS Worker error: ${res.status}` }, 502);
+    const detail = (await res.text()).slice(0, 300);
+    return jsonResponse({ error: `TTS Worker error: ${res.status}`, detail }, 502);
   }
   const data = await res.json();
+  if (typeof data?.url !== 'string' || !/^https?:\/\//i.test(data.url)) {
+    return jsonResponse({ error: 'TTS Worker returned no valid audio URL' }, 502);
+  }
   return jsonResponse({ url: data.url });
 }
 
@@ -614,7 +619,7 @@ function filterMainNpcDialogue(extract, characters) {
     if (seen.has(key)) return false;
     seen.add(key);
     return true;
-  }).map(line => ({ speaker: mainName, text: line.text.trim(), direction: typeof line.direction === 'string' ? line.direction.trim() : '' }));
+  }).map(line => ({ speaker: mainName, text: line.text.trim(), direction: typeof line.direction === 'string' && line.direction.trim() ? line.direction.trim() : 'neutral' }));
 }
 
 function normalizeRelationshipState(previous = {}, patch = {}) {

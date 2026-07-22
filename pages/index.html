@@ -49,6 +49,7 @@
     .header h1 { font-size: 1.2rem; color: var(--accent); }
     .header .meta { font-size: 0.8rem; color: var(--text-secondary); }
     .header .meta span { margin-left: 12px; }
+    .header-controls { display: flex; align-items: center; gap: 8px; margin-left: auto; }
 
     /* ─── Main Layout ─── */
     .main {
@@ -272,8 +273,9 @@
     }
     @keyframes spin { to { transform: rotate(360deg); } }
 
-    .tts-toggle, .command-toggle { position: absolute; top: 10px; background: var(--bg-tertiary); color: var(--text-primary); border: 1px solid var(--border); border-radius: var(--radius); padding: 7px 10px; cursor: pointer; }
-    .tts-toggle { right: 16px; } .command-toggle { right: 120px; }
+    .tts-toggle, .command-toggle, .tts-replay { background: var(--bg-tertiary); color: var(--text-primary); border: 1px solid var(--border); border-radius: var(--radius); padding: 7px 10px; cursor: pointer; white-space: nowrap; }
+    .tts-status { max-width: min(460px, 48vw); font-size: .78rem; color: var(--text-secondary); }
+    .tts-status.error { color: var(--warning); }
     .reset-modal-overlay { position: fixed; inset: 0; background: rgba(0,0,0,.65); z-index: 50; display: grid; place-items: center; padding: 20px; }
     .reset-modal { max-width: 480px; background: var(--bg-secondary); border: 1px solid var(--border); border-radius: var(--radius); padding: 24px; display: grid; gap: 14px; }
     .reset-actions { display: flex; gap: 10px; justify-content: flex-end; } .reset-actions .danger { background: var(--danger); }
@@ -286,6 +288,9 @@
       .side-panel { display: flex; width: 100%; border-left: none; border-top: 1px solid var(--border); overflow: visible; }
       .character-img { width: 100%; height: min(620px, 125vw); object-fit: contain; object-position: top center; }
       .bottom-bar { position: sticky; bottom: 0; z-index: 20; }
+      .header { padding: 10px 12px; gap: 8px; flex-wrap: wrap; }
+      .header-controls { margin-left: 0; width: 100%; }
+      .tts-status { max-width: none; flex: 1 1 160px; }
       .choice-buttons { grid-template-columns: 1fr; gap: 9px; }
       .choice-btn { width: 100%; min-width: 0; padding: 14px 16px; line-height: 1.5; text-align: left; }
     }
@@ -299,10 +304,13 @@
       <span id="turn-count">턴: 0</span>
       <span id="mode-badge">플레이</span>
     </div>
+    <div class="header-controls">
+      <button class="tts-toggle" id="tts-toggle" type="button" aria-pressed="true">🔊 음성 ON</button>
+      <button class="tts-replay" id="tts-replay" type="button" hidden>▶ 재생</button>
+      <button class="command-toggle" id="command-toggle" type="button">/ 안내</button>
+      <span class="tts-status" id="tts-status" role="status" hidden></span>
+    </div>
   </header>
-
-  <button class="tts-toggle" id="tts-toggle" type="button">🔊 음성 ON</button>
-  <button class="command-toggle" id="command-toggle" type="button">/ 안내</button>
   <div class="main">
     <div class="story-panel">
       <div class="story-stream" id="story-stream">
@@ -351,6 +359,7 @@
   <script src="stream.js"></script>
   <script src="ui.js"></script>
   <script src="sidebar.js"></script>
+  <script src="tts.js"></script>
   <script>
     // ─── Entry Point ───
     const GAME_ID = new URLSearchParams(location.search).get('game') || localStorage.getItem('gameId');
@@ -387,13 +396,11 @@
     }
 
     // ─── Event Listeners ───
-    document.getElementById('chat-send').addEventListener('click', handleTurnInput);
+    document.getElementById('chat-send').addEventListener('click', async () => { await tts.unlockAudio(); handleTurnInput(); });
     document.getElementById('chat-input').addEventListener('keydown', (e) => {
-      if (e.key === 'Enter') handleTurnInput();
+      if (e.key === 'Enter') { tts.unlockAudio(); handleTurnInput(); }
     });
-    state.autoTts = localStorage.getItem('autoTts') !== 'false';
-    setAutoTts(state.autoTts);
-    document.getElementById('tts-toggle').addEventListener('click', () => setAutoTts(!state.autoTts));
+    tts.init();
     document.getElementById('command-toggle').addEventListener('click', () => handleCommand('/안내'));
 
     async function handleInput() {
@@ -443,15 +450,7 @@
 
         // TTS (auto_tts ON이고 대사 있으면)
         if (state.autoTts && extract.dialogue_lines && extract.dialogue_lines.length > 0) {
-          const line = extract.dialogue_lines[0];
-          const voiceId = getVoiceId(extract.character_id);
-          if (voiceId && line.text) {
-            optionalTasks.push(
-              api.tts(line.text, voiceId)
-                .then(res => { if (res.url) ui.playAudio(res.url); })
-                .catch(() => {})
-            );
-          }
+          tts.enqueue(extract, nextTurn);
         }
 
         // ④ 핵심 저장은 Worker의 단일 커밋 엔드포인트로 수행한다.
@@ -521,11 +520,7 @@
       } else ui.showSystemMessage('알 수 없는 명령어입니다. /안내를 입력해 보세요.');
     }
 
-    function setAutoTts(enabled) {
-      state.autoTts = enabled; localStorage.setItem('autoTts', String(enabled));
-      if (!enabled) { ui.els.audioPlayer.pause(); ui.els.audioPlayer.removeAttribute('src'); }
-      document.getElementById('tts-toggle').textContent = enabled ? '🔊 음성 ON' : '🔇 음성 OFF';
-    }
+    function setAutoTts(enabled) { tts.setEnabled(enabled); }
 
     function showResetModal() {
       const overlay = document.createElement('div'); overlay.className = 'reset-modal-overlay';
@@ -591,7 +586,7 @@
     }
 
     function prepareMedia(extract) {
-      enqueueTts(extract);
+      tts.enqueue(extract, state.turnCount);
       if (extract.character_id && extract.character_id !== 'narrator') {
         ui.setLoading(true, '이미지 준비 중');
         api.image(state.gameId, extract.character_id, extract.image_id)
@@ -599,39 +594,6 @@
           .catch(() => ui.showRetryNotice('이미지를 불러오지 못했습니다.', '이미지만 다시 불러오기', () => prepareMedia({ ...extract, dialogue_lines: [] }), false))
           .finally(() => ui.setLoading(false));
       }
-      const line = extract.dialogue_lines?.[0], voiceId = getVoiceId(extract.character_id);
-      if (false && state.autoTts && line?.text && voiceId) {
-        ui.setLoading(true, '음성 준비 중');
-        api.tts(line.text, voiceId)
-          .then(res => { if (res.url) ui.playAudio(res.url); })
-          .catch(() => ui.showRetryNotice('음성 재생에 실패했습니다.', '음성 다시 재생', () => prepareMedia({ ...extract, character_id: null }), false))
-          .finally(() => ui.setLoading(false));
-      }
-    }
-
-    const playedTtsKeys = new Set(JSON.parse(sessionStorage.getItem('playedTtsKeys') || '[]'));
-    let ttsQueue = Promise.resolve();
-    function ttsKey(line) { return `${state.turnCount}:${line.speaker}:${line.text}`; }
-    function enqueueTts(extract) {
-      if (!state.autoTts) return;
-      for (const line of (extract.dialogue_lines || [])) {
-        const voiceId = getVoiceId(extract.character_id);
-        const key = ttsKey(line);
-        if (!voiceId || !line.text || playedTtsKeys.has(key)) continue;
-        playedTtsKeys.add(key); sessionStorage.setItem('playedTtsKeys', JSON.stringify([...playedTtsKeys]));
-        ttsQueue = ttsQueue.then(() => playQueuedTts(line, voiceId, key));
-      }
-    }
-    async function playQueuedTts(line, voiceId, key) {
-      if (!state.autoTts) return;
-      ui.setLoading(true, '음성 준비 중');
-      try {
-        const result = await api.tts(line.text, voiceId, line.direction || '');
-        if (!result.url || !state.autoTts) return;
-        const audio = ui.els.audioPlayer; audio.src = result.url; audio.classList.add('active');
-        await new Promise((resolve, reject) => { audio.onended = resolve; audio.onerror = reject; audio.play().catch(reject); });
-      } catch (_) { ui.showRetryNotice('음성 재생에 실패했습니다.', '음성 다시 재생', () => { playedTtsKeys.delete(key); enqueueTts({ dialogue_lines: [line] }); }, false); }
-      finally { ui.setLoading(false); }
     }
 
     function showAppInfo() {
@@ -643,6 +605,7 @@
     }
 
     function submitChoice(choiceText) {
+      tts.unlockAudio();
       document.getElementById('chat-input').value = choiceText;
       handleTurnInput();
     }
@@ -663,9 +626,6 @@
       throw lastError;
     }
 
-    function getVoiceId(characterId) {
-      return state.context?.master?.characters?.[characterId]?.voice_id || null;
-    }
   </script>
 </body>
 </html>

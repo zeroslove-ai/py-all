@@ -5,6 +5,7 @@ const state = {
   gameId: null,
   turnCount: 0,
   imageCatalog: {},
+  context: null,
   lastExtract: null,
 
   // ─── UI 상태 ───

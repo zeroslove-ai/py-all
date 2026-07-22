@@ -23,3 +23,9 @@ test('sidebar resume button and slash command share resumeGame without turn APIs
   assert.match(resume, /restoreLastTurn\(\)/);
   assert.doesNotMatch(resume, /stream\.story|api\.extract|api\.commitTurn/);
 });
+
+test('reset clears the view and starts only the player setup prologue', () => {
+  assert.match(pageSource, /await api\.reset\(state\.gameId\); close\(\); ui\.clearGameView\(\); await loadGameContext\(\); await startPlayerSetup\(\);/);
+  const startSetup = pageSource.match(/async function startPlayerSetup\(\)[\s\S]*?\n    }/)?.[0] || '';
+  assert.match(startSetup, /__START_PLAYER_SETUP__/);
+});

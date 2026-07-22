@@ -161,6 +161,8 @@ test('story prompt excludes mind monitor and preserves full display format', () 
   }, '시작', 0);
   assert.match(prompt.messages[0].content, /마인드 모니터는 본문에 절대 출력하지 않는다/);
   assert.equal(prompt.messages[0].content.includes(displayFormat), true);
+  assert.match(prompt.messages[0].content, /FINAL OUTPUT CONTRACT/);
+  assert.match(prompt.messages[0].content, /Never include a mind monitor/);
 });
 
 test('opening mode remains explicit until opening is committed', () => {

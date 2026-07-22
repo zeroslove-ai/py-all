@@ -408,7 +408,8 @@ ${recentMemories.slice(-3).map(m => m.content?.slice(0, 200) || '').join('\n---\
   const feedbackSection = Array.isArray(feedback) && feedback.length
     ? `\n\n[USER FEEDBACK — APPLY TO THIS NEXT RESPONSE ONLY]\n${feedback.map(item => `- ${typeof item === 'string' ? item : item?.text || ''}`).filter(Boolean).join('\n')}\nThis is not an in-world action. Never narrate it as dialogue or an event; use it only to improve output quality.`
     : '';
-  const systemPrompt = coreRules + playerGate + modeSection + rulebookSection + displayFormatSection + csaSection + contextSection + feedbackSection;
+  const finalFormatRules = `\n\n[FINAL OUTPUT CONTRACT — HIGHEST PRIORITY]\nThe response body contains exactly three sections: [1. 서사 및 행동], [2. 플레이어 상황판], [3. 선택지]. Never include a mind monitor, NPC stat table, character body information, or turn number in the body. Mind monitor belongs only to npc_emotion extraction and the sidebar UI.\nIf player.name or player.job is missing, propose one complete hospital-world character at once (name, age, gender, hospital job/major/rank, height, weight, speaking style, background), then offer ① approve ② edit parts ③ describe directly. Do not ask one field at a time. Do not repeat this after name and job are saved.\nDo not use formulaic first-impression or hypnosis-success calculations.\n`;
+  const systemPrompt = coreRules + playerGate + modeSection + rulebookSection + displayFormatSection + csaSection + contextSection + feedbackSection + finalFormatRules;
 
   return {
     mode,

@@ -472,7 +472,7 @@ ${typeof playerInput === 'string' && playerInput.trim() ? playerInput : '(없음
 ${narrativeText}
 
 [게임 설정 / 이전 저장값]
-${JSON.stringify({ master: cleanForLlm(master), save: cleanForLlm(save), turn_count: turnCount }, null, 2)}
+${JSON.stringify({ master: cleanForLlm(master), save: cleanForLlm(save), turn_count: turnCount, relationship_counter_rules: 'Return npc_relationship_state for the current main character only. Both values are absolute non-negative totals and never decrease. Increase player_ejaculation_count only after explicit completed player ejaculation; increase npc_orgasm_count only after explicit completed current NPC orgasm. Never increase for arousal, suggestion, attempt, plan, imagination, near-climax, failure, or possibility.' }, null, 2)}
 
 [이미지 라이브러리]
 ${JSON.stringify(imageCatalog)}
@@ -486,7 +486,7 @@ ${JSON.stringify(imageCatalog)}
   "player_patch": {"name": "", "age": 0, "gender": "", "height_cm": 0, "weight_kg": 0, "job": "", "background": "", "location": "", "style": "", "penis_length_cm": 0},
   "growth_event": "none | minor | standard | major (사건의 의미만 제안, 경험치 숫자는 결정하지 말 것)",
   "csa_action": null,
-  "npc_relationship_patch": {"sexual_experience_with_player": false, "orgasm_count_with_player": 0, "virgin_status": "unknown"},
+  "npc_relationship_state": {"player_ejaculation_count": 0, "npc_orgasm_count": 0},
   "turn_summary": "이번 턴에서 변한 핵심 사실 1~3문장",
   "is_sexual": false,
   "choices": ["서사의 선택지를 그대로 옮겨라"],
@@ -558,8 +558,8 @@ function buildSavePatch(extract, enginePatch = {}, summaryPlan = null, previousS
   if (characterId && characterId !== 'narrator') {
     patch.npc_stats = { [characterId]: sanitizeNpcStats(previousSave?.npc_stats?.[characterId], extract.npc_stats) };
     patch.npc_emotion = { [characterId]: extract.npc_emotion || {} };
-    if (isPlainObject(extract.npc_relationship_patch)) {
-      patch.npc_relationship_state = { [characterId]: normalizeRelationshipState(previousSave?.npc_relationship_state?.[characterId], extract.npc_relationship_patch) };
+    if (isPlainObject(extract.npc_relationship_state)) {
+      patch.npc_relationship_state = { [characterId]: normalizeRelationshipState(previousSave?.npc_relationship_state?.[characterId], extract.npc_relationship_state) };
     }
   }
   if (extract.player_patch && Object.keys(extract.player_patch).length > 0) {
@@ -599,7 +599,7 @@ function normalizeExtract(extract) {
   if (typeof normalized.turn_summary !== 'string') normalized.turn_summary = '';
   if (!['none', 'minor', 'standard', 'major'].includes(normalized.growth_event)) normalized.growth_event = 'none';
   if (!isPlainObject(normalized.csa_action)) normalized.csa_action = null;
-  if (!isPlainObject(normalized.npc_relationship_patch)) normalized.npc_relationship_patch = null;
+  if (!isPlainObject(normalized.npc_relationship_state)) normalized.npc_relationship_state = null;
   return normalized;
 }
 
@@ -619,9 +619,8 @@ function filterMainNpcDialogue(extract, characters) {
 
 function normalizeRelationshipState(previous = {}, patch = {}) {
   return {
-    sexual_experience_with_player: patch.sexual_experience_with_player === true || previous?.sexual_experience_with_player === true,
-    orgasm_count_with_player: Math.max(0, Number.isInteger(patch.orgasm_count_with_player) ? patch.orgasm_count_with_player : Number(previous?.orgasm_count_with_player) || 0),
-    virgin_status: ['yes', 'no', 'unknown'].includes(patch.virgin_status) ? patch.virgin_status : (previous?.virgin_status || 'unknown')
+    player_ejaculation_count: Math.max(0, Number(previous?.player_ejaculation_count) || 0, Number.isInteger(patch.player_ejaculation_count) ? patch.player_ejaculation_count : 0),
+    npc_orgasm_count: Math.max(0, Number(previous?.npc_orgasm_count) || 0, Number.isInteger(patch.npc_orgasm_count) ? patch.npc_orgasm_count : 0)
   };
 }
 

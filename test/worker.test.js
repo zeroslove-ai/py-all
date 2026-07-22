@@ -79,9 +79,27 @@ test('Extract keeps all unique dialogue from the main NPC only', () => {
   assert.deepEqual(lines, [{ speaker: 'Main', text: 'first', direction: 'softly' }, { speaker: 'Main', text: 'second', direction: 'firmly' }]);
 });
 
-test('NPC relationship state uses explicit fields and preserves unknown defaults', () => {
-  assert.deepEqual(normalizeRelationshipState({}, {}), { sexual_experience_with_player: false, orgasm_count_with_player: 0, virgin_status: 'unknown' });
-  assert.deepEqual(normalizeRelationshipState({ sexual_experience_with_player: true, orgasm_count_with_player: 2, virgin_status: 'no' }, { orgasm_count_with_player: 3 }), { sexual_experience_with_player: true, orgasm_count_with_player: 3, virgin_status: 'no' });
+test('NPC relationship state uses non-negative cumulative counters', () => {
+  assert.deepEqual(normalizeRelationshipState({}, {}), { player_ejaculation_count: 0, npc_orgasm_count: 0 });
+  assert.deepEqual(
+    normalizeRelationshipState(
+      { player_ejaculation_count: 2, npc_orgasm_count: 1 },
+      { player_ejaculation_count: 1, npc_orgasm_count: 3 }
+    ),
+    { player_ejaculation_count: 2, npc_orgasm_count: 3 }
+  );
+});
+
+test('relationship counters are saved for the current character only', () => {
+  const patch = buildSavePatch(
+    { character_id: 'heroine1', npc_relationship_state: { player_ejaculation_count: 1, npc_orgasm_count: 4 } },
+    {},
+    null,
+    { npc_relationship_state: { heroine1: { player_ejaculation_count: 2, npc_orgasm_count: 3 } } }
+  );
+  assert.deepEqual(patch.npc_relationship_state, {
+    heroine1: { player_ejaculation_count: 2, npc_orgasm_count: 4 }
+  });
 });
 
 test('Worker owns experience and level progression', () => {

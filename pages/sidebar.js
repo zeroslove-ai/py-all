@@ -38,13 +38,16 @@ const sidebar = {
     document.getElementById('npc-status-title').textContent = `${character.name || characterId} 상태`;
     document.getElementById('character-info').replaceChildren(...info.map(([label, value]) => this.row(label, value || '-')));
     const relationship = context?.save?.npc_relationship_state?.[characterId] || {};
-    const relationRows = [
-      ['플레이어와의 경험', relationship.sexual_experience_with_player === true ? '있음' : '없음'],
-      ['누적 기록', Number.isFinite(Number(relationship.orgasm_count_with_player)) ? `${relationship.orgasm_count_with_player}회` : '0회'],
-      ['상태', relationship.virgin_status === 'yes' ? 'yes' : relationship.virgin_status === 'no' ? 'no' : 'unknown']
-    ];
+    const playerEjaculationCount = Number.isInteger(relationship.player_ejaculation_count)
+      ? Math.max(0, relationship.player_ejaculation_count)
+      : 0;
+    const npcOrgasmCount = Number.isInteger(relationship.npc_orgasm_count)
+      ? Math.max(0, relationship.npc_orgasm_count)
+      : 0;
     document.getElementById('npc-relationship-title').textContent = `${character.name || characterId} 관계 기록`;
-    document.getElementById('npc-relationship').replaceChildren(...relationRows.map(([label, value]) => this.row(label, value)));
+    const relationshipRoot = document.getElementById('npc-relationship');
+    relationshipRoot.classList.add('relationship-inline');
+    relationshipRoot.textContent = `사정 ${playerEjaculationCount}회 · 오르가즘 ${npcOrgasmCount}회`;
   },
 
   updateMind(emotion = {}) {

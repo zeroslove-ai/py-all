@@ -262,6 +262,34 @@ const ui = {
   },
 
   // ─── 스크롤 ───
+  renderGameplayChoices(choices, onClick, { setup = false, onAppInfo = null } = {}) {
+    this.els.choiceButtons.replaceChildren();
+    const markers = ['①', '②', '③', '④', '⑤', '⑥'];
+    const all = (choices || []).map(choice => this.normalizeChoice(typeof choice === 'string' ? choice : choice?.text)).filter(Boolean);
+    const appChoice = all.find(text => /(?:어플|앱)\s*정보|📱/i.test(text));
+    const actions = setup ? all : all.filter(text => text !== appChoice).slice(0, 4);
+    actions.forEach((text, index) => {
+      const explicit = text.startsWith('❗');
+      const button = document.createElement('button');
+      button.className = `choice-btn ${explicit ? 'explicit' : ''}`;
+      const marker = document.createElement('span'); marker.className = 'marker'; marker.textContent = markers[index] || `${index + 1}.`;
+      button.append(marker, document.createTextNode(explicit ? ` ❗ ${text.slice(1).trim()}` : ` ${text}`));
+      button.addEventListener('click', () => {
+        this.els.choiceButtons.querySelectorAll('button').forEach(item => { item.disabled = true; item.classList.remove('selected'); });
+        button.classList.add('selected');
+        onClick(text);
+      }, { once: true });
+      this.els.choiceButtons.appendChild(button);
+    });
+    if (!setup) {
+      const appButton = document.createElement('button');
+      appButton.className = 'choice-btn app-info';
+      appButton.textContent = '📱 어플 정보 보기';
+      appButton.addEventListener('click', () => onAppInfo?.(), { once: true });
+      this.els.choiceButtons.appendChild(appButton);
+    }
+  },
+
   scrollToBottom() {
     this.els.storyStream.scrollTop = this.els.storyStream.scrollHeight;
   }

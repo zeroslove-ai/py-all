@@ -179,7 +179,7 @@
     /* Choice Buttons */
     .choice-buttons {
       display: grid;
-      grid-template-columns: repeat(2, minmax(0, 1fr));
+      grid-template-columns: 1fr;
       gap: 10px;
       margin-bottom: 12px;
     }
@@ -209,7 +209,7 @@
     }
     .choice-btn.selected { border-color: var(--accent); background: rgba(233, 69, 96, .18); }
     .choice-btn:disabled { cursor: not-allowed; opacity: .7; }
-    .choice-btn.app-info { grid-column: 1 / -1; padding: 9px 12px; font-size: .85rem; color: var(--text-secondary); border-style: dashed; }
+    .choice-btn.app-info { width: 100%; padding: 9px 12px; font-size: .85rem; color: var(--text-secondary); border-style: dashed; }
 
     /* Chat Input */
     .chat-input-row {
@@ -500,7 +500,7 @@
         await loadGameContext();
         restoreLastTurn();
         const choices = state.context?.save?.active_suggestions || [];
-        ui.renderChoices(choices.map((text, i) => ({ marker: ['①','②','③','④'][i] || '•', text, isExplicit: false })), submitChoice);
+        ui.renderGameplayChoices(choices, submitChoice, { onAppInfo: showAppInfo });
         ui.showSystemMessage('현재 게임을 이어서 진행합니다.');
       } else if (command === '/리셋') {
         showResetModal();
@@ -573,7 +573,7 @@
         state.turnCount = saved.turn_count; ui.updateMeta(null, state.turnCount);
         saveFeedback([]);
         sidebar.updateCharacter(pending.extract.character_id); sidebar.updateMind(pending.extract.npc_emotion); sidebar.renderStats(pending.extract.npc_stats);
-        ui.renderChoices(ui.parseChoices(pending.narrative), submitChoice);
+        ui.renderGameplayChoices(pending.extract.choices, submitChoice, { setup: pending.mode === 'player_setup', onAppInfo: showAppInfo });
         prepareMedia(pending.extract);
       } catch (error) {
         if (error.status === 409) {
@@ -626,6 +626,14 @@
         await new Promise((resolve, reject) => { audio.onended = resolve; audio.onerror = reject; audio.play().catch(reject); });
       } catch (_) { ui.showRetryNotice('음성 재생에 실패했습니다.', '음성 다시 재생', () => { playedTtsKeys.delete(key); enqueueTts({ dialogue_lines: [line] }); }, false); }
       finally { ui.setLoading(false); }
+    }
+
+    function showAppInfo() {
+      const save = state.context?.save || {};
+      const progress = save.player_progress || { level: 1, exp: 0, next_level_exp: 10 };
+      const csa = Array.isArray(save.csa_active) ? save.csa_active.filter(item => item?.active) : [];
+      const suggestions = Array.isArray(save.active_suggestions) ? save.active_suggestions : [];
+      ui.showSystemMessage(`📱 어플 정보\n레벨 ${progress.level || 1} · 경험치 ${progress.exp || 0}/${progress.next_level_exp || 10}\n기능: 개인 대상 일반 최면·암시 / 마인드 모니터 / 공간 범위 상식 개변\n활성 암시: ${suggestions.length ? suggestions.join(', ') : '없음'}\n상식 개변: ${csa.length ? csa.map(item => `${item.content} (${item.scope_label || item.scope_id})`).join(', ') : '없음'}`);
     }
 
     function submitChoice(choiceText) {

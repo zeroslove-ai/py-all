@@ -235,6 +235,45 @@ test('narrator stores no NPC state while registered location characters remain v
   assert.equal(narratorPatch.npc_relationship_state, undefined);
 });
 
+test('commit-turn re-sanitizes a manipulated unregistered character_id', async () => {
+  const originalFetch = globalThis.fetch;
+  let committedPatch;
+  globalThis.fetch = async (url, init = {}) => {
+    const requestUrl = String(url);
+    if (requestUrl.includes('/rpc/get_context')) {
+      return new Response(JSON.stringify({
+        turn_count: 2,
+        image_catalog: [],
+        master: { characters: { heroine1: { name: '한소영' } } },
+        save: { last_character_id: 'heroine1', npc_stats: { heroine1: { 호감도: 20 } } }
+      }), { headers: { 'content-type': 'application/json' } });
+    }
+    if (requestUrl.includes('/rpc/commit_turn')) {
+      committedPatch = JSON.parse(init.body).p_patch;
+      return new Response(JSON.stringify({ status: 'committed', turn_count: 3 }), { headers: { 'content-type': 'application/json' } });
+    }
+    throw new Error(`unexpected fetch: ${requestUrl}`);
+  };
+  try {
+    const response = await worker.fetch(apiRequest('/api/commit-turn', {
+      game_id: 'test-game', turn_number: 3, content: 'test',
+      extract: {
+        character_id: 'manipulated_npc', npcs_present: ['manipulated_npc'], image_id: 99,
+        npc_emotion: { surface: 'forged' }, npc_stat_changes: { 호감도: { delta: 5, reason: 'forged' } },
+        npc_relationship_state: { player_ejaculation_count: 5 }
+      }
+    }), { SUPABASE_SECRET_KEY: 'test' });
+    assert.equal(response.status, 200);
+    assert.equal(committedPatch.last_character_id, 'heroine1');
+    assert.equal(committedPatch.last_image_id, null);
+    assert.equal(committedPatch.npc_stats, undefined);
+    assert.equal(committedPatch.npc_emotion, undefined);
+    assert.equal(committedPatch.npc_relationship_state, undefined);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
 test('ordinary favorable, trust, and voluntary acceptance reactions apply plus-one deltas', () => {
   const cases = [
     ['호감도', '호의와 편안함', { 호감도: 10 }, { 호감도: 11 }],

@@ -1,0 +1,444 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>게임빌더 v2</title>
+  <style>
+    /* ─── CSS Variables (Dark Theme) ─── */
+    :root {
+      --bg-primary: #0f0f1a;
+      --bg-secondary: #1a1a2e;
+      --bg-tertiary: #16213e;
+      --text-primary: #e0e0e0;
+      --text-secondary: #a0a0b0;
+      --accent: #e94560;
+      --accent-hover: #ff6b6b;
+      --border: #2a2a4a;
+      --success: #4ecca3;
+      --warning: #f4d03f;
+      --danger: #e74c3c;
+      --font-mono: 'Courier New', monospace;
+      --font-sans: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+      --radius: 8px;
+      --shadow: 0 4px 12px rgba(0,0,0,0.3);
+    }
+
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+
+    body {
+      background: var(--bg-primary);
+      color: var(--text-primary);
+      font-family: var(--font-sans);
+      height: 100vh;
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+    }
+
+    /* ─── Header ─── */
+    .header {
+      background: var(--bg-secondary);
+      border-bottom: 1px solid var(--border);
+      padding: 12px 20px;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      flex-shrink: 0;
+    }
+    .header h1 { font-size: 1.2rem; color: var(--accent); }
+    .header .meta { font-size: 0.8rem; color: var(--text-secondary); }
+    .header .meta span { margin-left: 12px; }
+
+    /* ─── Main Layout ─── */
+    .main {
+      flex: 1;
+      display: flex;
+      overflow: hidden;
+    }
+
+    /* ─── Story Stream (Left/Center) ─── */
+    .story-panel {
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+    }
+
+    .story-stream {
+      flex: 1;
+      overflow-y: auto;
+      padding: 20px;
+      line-height: 1.8;
+      font-size: 1rem;
+      white-space: pre-wrap;
+      word-break: keep-all;
+    }
+
+    .story-stream .narrative { margin-bottom: 16px; }
+    .story-stream .divider {
+      border: none;
+      border-top: 1px solid var(--border);
+      margin: 16px 0;
+    }
+    .story-stream .typing-cursor {
+      display: inline-block;
+      width: 2px;
+      height: 1.2em;
+      background: var(--accent);
+      animation: blink 1s infinite;
+      vertical-align: text-bottom;
+      margin-left: 2px;
+    }
+    @keyframes blink { 0%, 50% { opacity: 1; } 51%, 100% { opacity: 0; } }
+
+    /* ─── Side Panel (Right) ─── */
+    .side-panel {
+      width: 320px;
+      background: var(--bg-secondary);
+      border-left: 1px solid var(--border);
+      display: flex;
+      flex-direction: column;
+      overflow-y: auto;
+      flex-shrink: 0;
+    }
+
+    .side-panel .panel-section {
+      padding: 16px;
+      border-bottom: 1px solid var(--border);
+    }
+    .side-panel .panel-title {
+      font-size: 0.85rem;
+      color: var(--text-secondary);
+      text-transform: uppercase;
+      letter-spacing: 1px;
+      margin-bottom: 12px;
+    }
+
+    /* Character Image */
+    .character-img {
+      width: 100%;
+      aspect-ratio: 16/9;
+      object-fit: cover;
+      border-radius: var(--radius);
+      background: var(--bg-tertiary);
+      display: block;
+    }
+    .character-img.hidden { display: none; }
+
+    /* Mind Monitor */
+    .mind-monitor {
+      font-family: var(--font-mono);
+      font-size: 0.85rem;
+      line-height: 1.6;
+      color: var(--text-secondary);
+      background: var(--bg-tertiary);
+      padding: 12px;
+      border-radius: var(--radius);
+      white-space: pre-wrap;
+    }
+
+    /* Player Status */
+    .player-status {
+      font-size: 0.85rem;
+    }
+    .player-status .stat-row {
+      display: flex;
+      justify-content: space-between;
+      padding: 4px 0;
+      border-bottom: 1px solid var(--border);
+    }
+    .player-status .stat-label { color: var(--text-secondary); }
+    .player-status .stat-value { color: var(--accent); }
+
+    /* Audio Player */
+    .audio-player {
+      display: none;
+    }
+    .audio-player.active {
+      display: block;
+      width: 100%;
+      margin-top: 8px;
+    }
+
+    /* ─── Bottom Bar ─── */
+    .bottom-bar {
+      background: var(--bg-secondary);
+      border-top: 1px solid var(--border);
+      padding: 16px 20px;
+      flex-shrink: 0;
+    }
+
+    /* Choice Buttons */
+    .choice-buttons {
+      display: flex;
+      gap: 10px;
+      flex-wrap: wrap;
+      margin-bottom: 12px;
+    }
+    .choice-btn {
+      background: var(--bg-tertiary);
+      border: 1px solid var(--border);
+      color: var(--text-primary);
+      padding: 10px 18px;
+      border-radius: var(--radius);
+      cursor: pointer;
+      font-size: 0.95rem;
+      transition: all 0.2s;
+      flex: 1;
+      min-width: 140px;
+      text-align: left;
+    }
+    .choice-btn:hover {
+      border-color: var(--accent);
+      background: var(--bg-primary);
+    }
+    .choice-btn .marker {
+      color: var(--accent);
+      font-weight: bold;
+      margin-right: 6px;
+    }
+    .choice-btn.explicit {
+      border-color: var(--warning);
+    }
+
+    /* Chat Input */
+    .chat-input-row {
+      display: flex;
+      gap: 10px;
+    }
+    .chat-input {
+      flex: 1;
+      background: var(--bg-tertiary);
+      border: 1px solid var(--border);
+      color: var(--text-primary);
+      padding: 12px 16px;
+      border-radius: var(--radius);
+      font-size: 1rem;
+      outline: none;
+    }
+    .chat-input:focus { border-color: var(--accent); }
+    .chat-send {
+      background: var(--accent);
+      border: none;
+      color: white;
+      padding: 12px 24px;
+      border-radius: var(--radius);
+      cursor: pointer;
+      font-size: 1rem;
+      transition: background 0.2s;
+    }
+    .chat-send:hover { background: var(--accent-hover); }
+    .chat-send:disabled {
+      background: var(--bg-tertiary);
+      color: var(--text-secondary);
+      cursor: not-allowed;
+    }
+
+    /* Loading */
+    .loading {
+      display: none;
+      text-align: center;
+      padding: 20px;
+      color: var(--text-secondary);
+    }
+    .loading.active { display: block; }
+    .loading::after {
+      content: '';
+      display: inline-block;
+      width: 20px;
+      height: 20px;
+      border: 2px solid var(--border);
+      border-top-color: var(--accent);
+      border-radius: 50%;
+      animation: spin 1s linear infinite;
+      margin-left: 10px;
+      vertical-align: middle;
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
+
+    /* Responsive */
+    @media (max-width: 768px) {
+      .side-panel { display: none; }
+      .choice-btn { min-width: 100%; }
+    }
+  </style>
+</head>
+<body>
+  <header class="header">
+    <h1>🎮 게임빌더 v2</h1>
+    <div class="meta">
+      <span id="game-title">게임 제목</span>
+      <span id="turn-count">턴: 0</span>
+      <span id="mode-badge">플레이</span>
+    </div>
+  </header>
+
+  <div class="main">
+    <div class="story-panel">
+      <div class="story-stream" id="story-stream">
+        <div class="loading" id="loading">서사를 불러오는 중</div>
+      </div>
+    </div>
+
+    <aside class="side-panel">
+      <div class="panel-section">
+        <div class="panel-title">캐릭터</div>
+        <img class="character-img hidden" id="character-img" alt="character">
+      </div>
+
+      <div class="panel-section">
+        <div class="panel-title">마인드 모니터</div>
+        <div class="mind-monitor" id="mind-monitor">(대기 중)</div>
+      </div>
+
+      <div class="panel-section">
+        <div class="panel-title">플레이어 상황</div>
+        <div class="player-status" id="player-status">
+          <div class="stat-row"><span class="stat-label">위치</span><span class="stat-value" id="stat-location">-</span></div>
+          <div class="stat-row"><span class="stat-label">순응도</span><span class="stat-value" id="stat-순응도">-</span></div>
+          <div class="stat-row"><span class="stat-label">호감도</span><span class="stat-value" id="stat-호감도">-</span></div>
+          <div class="stat-row"><span class="stat-label">최면깊이</span><span class="stat-value" id="stat-최면깊이">-</span></div>
+          <div class="stat-row"><span class="stat-label">상식개변</span><span class="stat-value" id="stat-csa">없음</span></div>
+        </div>
+      </div>
+
+      <div class="panel-section">
+        <audio class="audio-player" id="audio-player" controls></audio>
+      </div>
+    </aside>
+  </div>
+
+  <div class="bottom-bar">
+    <div class="choice-buttons" id="choice-buttons"></div>
+    <div class="chat-input-row">
+      <input type="text" class="chat-input" id="chat-input" placeholder="행동을 입력하거나 선택지를 클릭하세요..." autocomplete="off">
+      <button class="chat-send" id="chat-send">전송</button>
+    </div>
+  </div>
+
+  <script src="state.js"></script>
+  <script src="api.js"></script>
+  <script src="stream.js"></script>
+  <script src="ui.js"></script>
+  <script>
+    // ─── Entry Point ───
+    const GAME_ID = new URLSearchParams(location.search).get('game') || localStorage.getItem('gameId');
+    if (GAME_ID) {
+      state.gameId = GAME_ID;
+      localStorage.setItem('gameId', GAME_ID);
+      loadGameContext();
+    } else {
+      ui.showSystemMessage('게임 ID가 없습니다. URL에 ?game=GAME_ID를 추가하거나 /api/context로 게임을 로드하세요.');
+    }
+
+    async function loadGameContext() {
+      ui.setLoading(true);
+      try {
+        const ctx = await api.context(state.gameId);
+        state.turnCount = ctx.turn_count || 0;
+        state.imageCatalog = ctx.image_catalog || {};
+        ui.updateMeta(ctx.context?.title || '게임 제목', state.turnCount);
+        ui.setLoading(false);
+      } catch (e) {
+        ui.showSystemMessage('컨텍스트 로드 실패: ' + e.message);
+        ui.setLoading(false);
+      }
+    }
+
+    // ─── Event Listeners ───
+    document.getElementById('chat-send').addEventListener('click', handleInput);
+    document.getElementById('chat-input').addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') handleInput();
+    });
+
+    async function handleInput() {
+      const input = document.getElementById('chat-input').value.trim();
+      if (!input || !state.gameId || state.isStreaming) return;
+      document.getElementById('chat-input').value = '';
+
+      ui.addUserMessage(input);
+      ui.setLoading(true);
+      state.isStreaming = true;
+
+      try {
+        // ① 서사 스트리밍
+        const narrative = await stream.story(state.gameId, input, state.turnCount, (chunk) => {
+          ui.appendNarrative(chunk);
+        });
+
+        ui.finalizeNarrative();
+
+        // ② 상태 추출
+        const extract = await api.extract(state.gameId, narrative, state.turnCount);
+        state.lastExtract = extract;
+
+        // ③ 병렬: 이미지 + TTS + 저장
+        const promises = [];
+
+        // 이미지
+        if (extract.character_id && extract.character_id !== 'narrator') {
+          promises.push(
+            api.image(state.gameId, extract.character_id, extract.image_id)
+              .then(res => { if (res.image_url) ui.showImage(res.image_url); })
+              .catch(() => {})
+          );
+        }
+
+        // TTS (auto_tts ON이고 대사 있으면)
+        if (state.autoTts && extract.dialogue_lines && extract.dialogue_lines.length > 0) {
+          const line = extract.dialogue_lines[0];
+          const voiceId = getVoiceId(extract.character_id);
+          if (voiceId && line.text) {
+            promises.push(
+              api.tts(line.text, voiceId)
+                .then(res => { if (res.url) ui.playAudio(res.url); })
+                .catch(() => {})
+            );
+          }
+        }
+
+        // 저장 (병렬)
+        promises.push(
+          api.saveTurn(state.gameId, state.turnCount, narrative).catch(() => {})
+        );
+        promises.push(
+          api.setSave(state.gameId, extract, state.turnCount).catch(() => {})
+        );
+
+        await Promise.allSettled(promises);
+
+        // ④ 선택지 렌더링
+        const choices = ui.parseChoices(narrative);
+        ui.renderChoices(choices, (choiceText) => {
+          document.getElementById('chat-input').value = choiceText;
+          handleInput();
+        });
+
+        // ⑤ turn_count 갱신 (서버 응답값으로 덮어쓰기)
+        const saveRes = await api.setSave(state.gameId, extract, state.turnCount);
+        if (saveRes.turn_count !== undefined) {
+          state.turnCount = saveRes.turn_count;
+          ui.updateMeta(null, state.turnCount);
+        }
+
+      } catch (e) {
+        ui.showSystemMessage('오류: ' + e.message);
+      } finally {
+        state.isStreaming = false;
+        ui.setLoading(false);
+      }
+    }
+
+    function getVoiceId(characterId) {
+      // TODO: 컨텍스트에서 voice_id 조회
+      const voiceMap = {
+        heroine1: 'ko-KR-SunHiNeural',
+        heroine2: 'ko-KR-InJoonNeural',
+        // ... 실제 voice_id로 교체
+      };
+      return voiceMap[characterId] || null;
+    }
+  </script>
+</body>
+</html>

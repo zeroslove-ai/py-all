@@ -200,7 +200,7 @@
     .bottom-bar {
       background: var(--bg-secondary);
       border-top: 1px solid var(--border);
-      padding: 16px 20px;
+      padding: 8px 20px;
       flex-shrink: 0;
     }
 
@@ -208,20 +208,25 @@
     .choice-buttons {
       display: grid;
       grid-template-columns: 1fr;
-      gap: 10px;
-      margin-bottom: 12px;
+      gap: 8px;
+      margin-bottom: 8px;
     }
     .choice-btn {
       background: var(--bg-tertiary);
       border: 1px solid var(--border);
       color: var(--text-primary);
-      padding: 14px 16px;
+      height: 30px;
+      min-height: 30px;
+      padding: 4px 10px;
       border-radius: var(--radius);
       cursor: pointer;
       font-size: 0.95rem;
       transition: all 0.2s;
       text-align: left;
-      line-height: 1.5;
+      line-height: 20px;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
     }
     .choice-btn:hover {
       border-color: var(--accent);
@@ -237,7 +242,7 @@
     }
     .choice-btn.selected { border-color: var(--accent); background: rgba(233, 69, 96, .18); }
     .choice-btn:disabled { cursor: not-allowed; opacity: .7; }
-    .choice-btn.app-info { width: 100%; padding: 9px 12px; font-size: .85rem; color: var(--text-secondary); border-style: dashed; }
+    .choice-btn.app-info { width: 100%; height: auto; min-height: 30px; padding: 5px 10px; font-size: .85rem; color: var(--text-secondary); border-style: dashed; }
 
     /* Chat Input */
     .chat-input-row {
@@ -249,7 +254,7 @@
       background: var(--bg-tertiary);
       border: 1px solid var(--border);
       color: var(--text-primary);
-      padding: 12px 16px;
+      padding: 7px 12px;
       border-radius: var(--radius);
       font-size: 1rem;
       outline: none;
@@ -259,7 +264,7 @@
       background: var(--accent);
       border: none;
       color: white;
-      padding: 12px 24px;
+      padding: 7px 16px;
       border-radius: var(--radius);
       cursor: pointer;
       font-size: 1rem;
@@ -314,7 +319,8 @@
       .header-controls { margin-left: 0; width: 100%; }
       .tts-status { max-width: none; flex: 1 1 160px; }
       .choice-buttons { grid-template-columns: 1fr; gap: 9px; }
-      .choice-btn { width: 100%; min-width: 0; padding: 14px 16px; line-height: 1.5; text-align: left; }
+      .choice-btn { width: 100%; min-width: 0; height: 30px; min-height: 30px; padding: 4px 10px; line-height: 20px; text-align: left; }
+      .choice-btn.app-info { height: auto; min-height: 30px; padding: 5px 10px; }
     }
   </style>
 </head>
@@ -428,88 +434,6 @@
     tts.init();
     document.getElementById('command-toggle').addEventListener('click', () => handleCommand('/안내'));
     document.getElementById('resume-play-button').addEventListener('click', () => handleCommand('/플레이'));
-
-    async function handleInput() {
-      const input = document.getElementById('chat-input').value.trim();
-      if (!input || !state.gameId || state.isStreaming) return;
-      document.getElementById('chat-input').value = '';
-
-      ui.addUserMessage(input);
-      ui.setLoading(true);
-      state.isStreaming = true;
-
-      try {
-        const currentTurn = state.turnCount;
-        const nextTurn = currentTurn + 1;
-
-        // ① 서사 스트리밍
-        const storyResult = await stream.story(state.gameId, input, currentTurn, (chunk) => {
-          ui.appendNarrative(chunk);
-        });
-        const narrative = storyResult.text;
-
-        ui.finalizeNarrative();
-
-        // 재진입 응답은 현재 상태 안내이므로 새로운 턴으로 저장하지 않는다.
-        if (storyResult.mode === 'reentry') {
-          const choices = ui.parseChoices(narrative);
-          ui.renderChoices(choices, submitChoice);
-          return;
-        }
-
-        // ② 상태 추출
-        // 원본 입력을 별도 필드로 보내 이름·직업 등이 서사에서 생략돼도 저장한다.
-        const extract = await api.extract(state.gameId, narrative, nextTurn, input);
-        state.lastExtract = extract;
-
-        // ③ 이미지/TTS는 선택 작업으로 병렬 실행
-        const optionalTasks = [];
-
-        // 이미지
-        if (extract.character_id && extract.character_id !== 'narrator') {
-          optionalTasks.push(
-            api.image(state.gameId, extract.character_id, extract.image_id)
-              .then(res => { if (res.image_url) ui.showImage(res.image_url); })
-              .catch(() => {})
-          );
-        }
-
-        // TTS (auto_tts ON이고 대사 있으면)
-        if (state.autoTts && extract.dialogue_lines && extract.dialogue_lines.length > 0) {
-          tts.enqueue(extract, nextTurn);
-        }
-
-        // ④ 핵심 저장은 Worker의 단일 커밋 엔드포인트로 수행한다.
-        const enginePatch = storyResult.mode === 'opening'
-          ? { opening_started: true }
-          : {};
-        const saveRes = await retryRequest(() =>
-          api.commitTurn(state.gameId, nextTurn, narrative, extract, enginePatch)
-        );
-        state.turnCount = saveRes.turn_count;
-        ui.updateMeta(null, state.turnCount);
-        sidebar.updateCharacter(extract.character_id);
-        sidebar.updateMind(extract.npc_emotion);
-        sidebar.renderStats(extract.npc_stats);
-
-        // ⑤ 저장 성공 후 선택지를 활성화한다.
-        const choices = ui.parseChoices(narrative);
-        ui.renderChoices(choices, submitChoice);
-
-        await Promise.allSettled(optionalTasks);
-
-      } catch (e) {
-        if (e.status === 409) {
-          ui.showSystemMessage('다른 창에서 턴이 진행되었습니다. 최신 상태를 다시 불러옵니다.');
-          await loadGameContext();
-        } else {
-          ui.showSystemMessage('턴 저장 또는 처리 실패: ' + e.message + ' — 입력을 다시 시도해 주세요.');
-        }
-      } finally {
-        state.isStreaming = false;
-        ui.setLoading(false);
-      }
-    }
 
     function restoreLastTurn() {
       const memories = state.context?.recent_memories || [];

@@ -14,17 +14,15 @@
 
 ## 환경변수 (Secrets)
 
-`wrangler.toml`에는 일반 설정만 있고, **API Key는 secrets로 관리**합니다.
+`worker/wrangler.jsonc`에는 일반 설정만 있고, **API Key는 secrets로 관리**합니다.
 
 ```bash
-cd worker
-
 # Supabase Service Role Key
-wrangler secret put SUPABASE_SECRET_KEY
-# 입력: sb_secret_9b37UcA8EsLrjKuhEQ9dTw_2YddI-T4
+npx wrangler secret put SUPABASE_SECRET_KEY --cwd worker
+# 입력: 현재 Supabase에서 발급한 Service Role Key
 
 # DeepSeek API Key
-wrangler secret put DEEPSEEK_API_KEY
+npx wrangler secret put DEEPSEEK_API_KEY --cwd worker
 # 입력: your-deepseek-api-key
 ```
 
@@ -33,13 +31,12 @@ wrangler secret put DEEPSEEK_API_KEY
 ## 배포
 
 ```bash
-python scripts/deploy_game_proxy.py
+npm run deploy:worker
 ```
 
 또는 수동:
 ```bash
-cd worker
-wrangler deploy
+npx wrangler deploy --cwd worker --keep-vars
 ```
 
 ## 배포 후 확인

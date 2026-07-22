@@ -229,6 +229,7 @@ async function handleExtract(req, env) {
   }
 
   extract = normalizeExtract(extract);
+  extract.dialogue_lines = filterMainNpcDialogue(extract, ctx?.master?.characters || {});
   return jsonResponse({ extract, raw: rawText.slice(0, 200) });
 }
 
@@ -480,6 +481,7 @@ ${JSON.stringify(imageCatalog)}
   "player_patch": {"name": "", "age": 0, "gender": "", "height_cm": 0, "weight_kg": 0, "job": "", "background": "", "location": "", "style": "", "penis_length_cm": 0},
   "growth_event": "none | minor | standard | major (사건의 의미만 제안, 경험치 숫자는 결정하지 말 것)",
   "csa_action": null,
+  "npc_relationship_patch": {"sexual_experience_with_player": false, "orgasm_count_with_player": 0, "virgin_status": "unknown"},
   "turn_summary": "이번 턴에서 변한 핵심 사실 1~3문장",
   "is_sexual": false,
   "choices": ["서사의 선택지를 그대로 옮겨라"],
@@ -551,6 +553,9 @@ function buildSavePatch(extract, enginePatch = {}, summaryPlan = null, previousS
   if (characterId && characterId !== 'narrator') {
     patch.npc_stats = { [characterId]: sanitizeNpcStats(previousSave?.npc_stats?.[characterId], extract.npc_stats) };
     patch.npc_emotion = { [characterId]: extract.npc_emotion || {} };
+    if (isPlainObject(extract.npc_relationship_patch)) {
+      patch.npc_relationship_state = { [characterId]: normalizeRelationshipState(previousSave?.npc_relationship_state?.[characterId], extract.npc_relationship_patch) };
+    }
   }
   if (extract.player_patch && Object.keys(extract.player_patch).length > 0) {
     patch.player = extract.player_patch;
@@ -589,7 +594,30 @@ function normalizeExtract(extract) {
   if (typeof normalized.turn_summary !== 'string') normalized.turn_summary = '';
   if (!['none', 'minor', 'standard', 'major'].includes(normalized.growth_event)) normalized.growth_event = 'none';
   if (!isPlainObject(normalized.csa_action)) normalized.csa_action = null;
+  if (!isPlainObject(normalized.npc_relationship_patch)) normalized.npc_relationship_patch = null;
   return normalized;
+}
+
+function filterMainNpcDialogue(extract, characters) {
+  const character = characters?.[extract.character_id] || {};
+  const mainName = character.name || character['이름'];
+  if (!mainName) return [];
+  const seen = new Set();
+  return extract.dialogue_lines.filter(line => {
+    if (!isPlainObject(line) || line.speaker !== mainName || typeof line.text !== 'string' || !line.text.trim()) return false;
+    const key = `${line.speaker}:${line.text}`;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  }).map(line => ({ speaker: mainName, text: line.text.trim(), direction: typeof line.direction === 'string' ? line.direction.trim() : '' }));
+}
+
+function normalizeRelationshipState(previous = {}, patch = {}) {
+  return {
+    sexual_experience_with_player: patch.sexual_experience_with_player === true || previous?.sexual_experience_with_player === true,
+    orgasm_count_with_player: Math.max(0, Number.isInteger(patch.orgasm_count_with_player) ? patch.orgasm_count_with_player : Number(previous?.orgasm_count_with_player) || 0),
+    virgin_status: ['yes', 'no', 'unknown'].includes(patch.virgin_status) ? patch.virgin_status : (previous?.virgin_status || 'unknown')
+  };
 }
 
 const NPC_STAT_KEYS = ['호감도', '신뢰도', '최면깊이', '순응도', '최면저항력'];
@@ -701,5 +729,7 @@ export {
   sanitizeNpcStats,
   getCsaLimits,
   applyCsaAction,
-  isCsaApplicable
+  isCsaApplicable,
+  filterMainNpcDialogue,
+  normalizeRelationshipState
 };

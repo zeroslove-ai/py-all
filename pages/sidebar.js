@@ -10,6 +10,10 @@ const sidebar = {
       <section class="panel-section"><div class="panel-title">마인드 모니터</div><div class="mind-monitor" id="mind-monitor"><div><b>표면의식</b><span>-</span></div><div><b>잠재의식</b><span>-</span></div><div><b>신체적·행동적 반응</b><span>-</span></div></div></section>
       <section class="panel-section"><div class="panel-title" id="npc-status-title">NPC 상태</div><div class="npc-status" id="npc-status"></div></section>`;
     ui.init();
+    const relationship = document.createElement('section');
+    relationship.className = 'panel-section';
+    relationship.innerHTML = '<div class="panel-title" id="npc-relationship-title">관계 기록</div><div class="info-list" id="npc-relationship"></div>';
+    panel.appendChild(relationship);
     this.renderStats({});
   },
 
@@ -33,6 +37,14 @@ const sidebar = {
     document.getElementById('character-info-title').textContent = `${character.name || characterId} 기본정보`;
     document.getElementById('npc-status-title').textContent = `${character.name || characterId} 상태`;
     document.getElementById('character-info').replaceChildren(...info.map(([label, value]) => this.row(label, value || '-')));
+    const relationship = context?.save?.npc_relationship_state?.[characterId] || {};
+    const relationRows = [
+      ['플레이어와의 경험', relationship.sexual_experience_with_player === true ? '있음' : '없음'],
+      ['누적 기록', Number.isFinite(Number(relationship.orgasm_count_with_player)) ? `${relationship.orgasm_count_with_player}회` : '0회'],
+      ['상태', relationship.virgin_status === 'yes' ? 'yes' : relationship.virgin_status === 'no' ? 'no' : 'unknown']
+    ];
+    document.getElementById('npc-relationship-title').textContent = `${character.name || characterId} 관계 기록`;
+    document.getElementById('npc-relationship').replaceChildren(...relationRows.map(([label, value]) => this.row(label, value)));
   },
 
   updateMind(emotion = {}) {

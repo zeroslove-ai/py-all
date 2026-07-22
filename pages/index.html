@@ -604,8 +604,7 @@
     function enqueueTts(extract) {
       if (!state.autoTts) return;
       for (const line of (extract.dialogue_lines || [])) {
-        const characterId = Object.entries(state.context?.master?.characters || {}).find(([, character]) => character?.name === line.speaker)?.[0];
-        const voiceId = getVoiceId(characterId);
+        const voiceId = getVoiceId(extract.character_id);
         const key = ttsKey(line);
         if (!voiceId || !line.text || playedTtsKeys.has(key)) continue;
         playedTtsKeys.add(key); sessionStorage.setItem('playedTtsKeys', JSON.stringify([...playedTtsKeys]));

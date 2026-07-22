@@ -13,7 +13,9 @@ import {
   sanitizeNpcStats,
   getCsaLimits,
   applyCsaAction,
-  isCsaApplicable
+  isCsaApplicable,
+  filterMainNpcDialogue,
+  normalizeRelationshipState
 } from '../worker/game-proxy-v2.js';
 import worker from '../worker/game-proxy-v2.js';
 
@@ -65,6 +67,21 @@ test('image selection accepts only matching character and sexuality, then falls 
   assert.equal(selectImageId(catalog, 'heroine1', 2, 1, false), 1);
   assert.equal(selectImageId(catalog, 'heroine1', 3, 1, false), 1);
   assert.equal(selectImageId([], 'heroine1', 99, null, false), null);
+});
+
+test('Extract keeps all unique dialogue from the main NPC only', () => {
+  const lines = filterMainNpcDialogue({ character_id: 'heroine1', dialogue_lines: [
+    { speaker: 'Main', text: 'first', direction: 'softly' },
+    { speaker: 'Player', text: 'excluded' },
+    { speaker: 'Main', text: 'first', direction: 'duplicate' },
+    { speaker: 'Main', text: 'second', direction: 'firmly' }
+  ] }, { heroine1: { name: 'Main' } });
+  assert.deepEqual(lines, [{ speaker: 'Main', text: 'first', direction: 'softly' }, { speaker: 'Main', text: 'second', direction: 'firmly' }]);
+});
+
+test('NPC relationship state uses explicit fields and preserves unknown defaults', () => {
+  assert.deepEqual(normalizeRelationshipState({}, {}), { sexual_experience_with_player: false, orgasm_count_with_player: 0, virgin_status: 'unknown' });
+  assert.deepEqual(normalizeRelationshipState({ sexual_experience_with_player: true, orgasm_count_with_player: 2, virgin_status: 'no' }, { orgasm_count_with_player: 3 }), { sexual_experience_with_player: true, orgasm_count_with_player: 3, virgin_status: 'no' });
 });
 
 test('Worker owns experience and level progression', () => {

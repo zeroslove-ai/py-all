@@ -1,0 +1,12 @@
+# wrangler.toml — 게임빌더_v2 프록시 Worker
+name = "game-proxy-v2"
+main = "game-proxy-v2.js"
+compatibility_date = "2026-07-22"
+
+# Workers KV (속도 제한용 — 선택적)
+# [[kv_namespaces]]
+# binding = "RATE_LIMIT_KV"
+# id = "your-kv-namespace-id"
+
+# R2는 필요 없음 (이 Worker는 Supabase만 사용)
+# TTS는 기존 Worker(fancy-dust-7f8c) 호출

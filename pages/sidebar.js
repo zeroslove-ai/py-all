@@ -13,7 +13,7 @@ const sidebar = {
     panel.innerHTML = `
       <section class="panel-section"><img class="character-img hidden" id="character-img" alt="현재 캐릭터"></section>
       <section class="panel-section"><div class="panel-title" id="character-info-title">캐릭터 기본정보</div><div class="info-list" id="character-info"></div></section>
-      <section class="panel-section"><div class="panel-title">마인드 모니터</div><div class="mind-monitor" id="mind-monitor"><div><b>표면의식</b><span>-</span></div><div><b>잠재의식</b><span>-</span></div><div><b>신체적·행동적 반응</b><span>-</span></div></div></section>
+      <section class="panel-section"><div class="panel-title">마인드 모니터</div><div class="mind-monitor" id="mind-monitor"><div class="mind-item"><b>표면의식</b><blockquote id="mind-surface">-</blockquote></div><div class="mind-item"><b>잠재의식</b><blockquote id="mind-inner">-</blockquote></div><div class="mind-item"><b>신체적·행동적 반응</b><p id="mind-physical">-</p></div></div></section>
       <section class="panel-section"><div class="panel-title" id="npc-status-title">NPC 상태</div><div class="npc-status" id="npc-status"></div></section>`;
     ui.init();
     const relationship = document.createElement('section');
@@ -64,8 +64,9 @@ const sidebar = {
   },
 
   updateMind(emotion = {}) {
-    const values = [emotion.surface, emotion.inner, emotion.physical_reaction];
-    document.querySelectorAll('#mind-monitor span').forEach((node, index) => { node.textContent = values[index] || '-'; });
+    document.getElementById('mind-surface').textContent = emotion.surface || '-';
+    document.getElementById('mind-inner').textContent = emotion.inner || '-';
+    document.getElementById('mind-physical').textContent = emotion.physical_reaction || '-';
   },
 
   renderStats(stats = {}, characterId = this.activeCharacterId) {

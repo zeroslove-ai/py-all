@@ -18,7 +18,10 @@ import {
   normalizeRelationshipState,
   isSetupComplete,
   isApprovalInput,
-  mergeRecommendation
+  mergeRecommendation,
+  mindMonologueLength,
+  validateMindMonologue,
+  validateNpcEmotion
 } from '../worker/game-proxy-v2.js';
 import worker from '../worker/game-proxy-v2.js';
 
@@ -45,6 +48,25 @@ test('extract normalization converts numeric image IDs', () => {
   assert.equal(extract.npc_emotion.physical_reaction, '');
   assert.equal(extract.is_sexual, false);
   assert.equal(extract.turn_summary, '');
+});
+
+test('mind monitor requires quoted first-person monologues and two observable sentences', () => {
+  const valid = {
+    surface: '“갑자기 나타나 당황스럽지만 티를 내지 말자. 우선 침착하게 신분부터 확인하고 내 역할을 지키면 된다.”',
+    inner: '“나는 처음 보는 사람인데 시선이 자꾸 신경 쓰인다. 경계해야 하는데 왜 조금 더 말을 들어 보고 싶은 걸까.”',
+    physical_reaction: '그녀는 차트를 가슴 쪽으로 끌어안고 시선을 한 번 피한다. 숨을 고른 뒤 낮은 목소리로 신분을 묻는다.'
+  };
+  assert.equal(mindMonologueLength(valid.surface) >= 40, true);
+  assert.deepEqual(validateMindMonologue(valid.surface, 'surface'), []);
+  assert.deepEqual(validateNpcEmotion(valid, 'heroine1'), { ok: true, errors: [] });
+  const invalid = validateNpcEmotion({
+    surface: '약간 당황하고 의심스러운 상태다.',
+    inner: '낯선 남자에게 호기심과 경계심을 느끼고 있다.',
+    physical_reaction: '손을 움켜쥔다.'
+  }, 'heroine1');
+  assert.equal(invalid.ok, false);
+  assert.match(invalid.errors.join('\n'), /surface: .*minimum 40/);
+  assert.match(invalid.errors.join('\n'), /physical_reaction: 1 sentences/);
 });
 
 test('recent100 boundary is Worker-owned at turns 99, 100 and 101', () => {

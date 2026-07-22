@@ -29,3 +29,11 @@ test('reset clears the view and starts only the player setup prologue', () => {
   const startSetup = pageSource.match(/async function startPlayerSetup\(\)[\s\S]*?\n    }/)?.[0] || '';
   assert.match(startSetup, /__START_PLAYER_SETUP__/);
 });
+
+test('mind monitor preserves quoted monologues and separates observable reactions', () => {
+  assert.match(sidebarSource, /id="mind-surface"/);
+  assert.match(sidebarSource, /id="mind-inner"/);
+  assert.match(sidebarSource, /id="mind-physical"/);
+  assert.match(pageSource, /white-space: pre-wrap/);
+  assert.match(pageSource, /font-style: italic/);
+});

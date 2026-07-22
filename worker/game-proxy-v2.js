@@ -196,6 +196,39 @@ async function handleExtract(req, env) {
   const nextTurn = (ctx?.turn_count ?? 0) + 1;
   const prompt = buildExtractPrompt(narrative_text, player_input, withSetupCompatibility(ctx), images, nextTurn);
 
+  let result;
+  try {
+    result = await requestExtractModel(env, prompt);
+  } catch (error) {
+    return jsonResponse({ error: error.message }, 502);
+  }
+
+  let extract = result.extract;
+  let validation = validateNpcEmotion(extract.npc_emotion, extract.character_id);
+  let retriedMindMonitor = false;
+  if (!validation.ok) {
+    retriedMindMonitor = true;
+    const retryPrompt = `${prompt}\n\n[MIND MONITOR VALIDATION FAILED — RETRY ONCE]\nThe previous npc_emotion failed: ${validation.errors.join('; ')}. Return the complete JSON again. Fix every listed npc_emotion field; do not shorten the other JSON fields.`;
+    try {
+      result = await requestExtractModel(env, retryPrompt);
+      extract = result.extract;
+      validation = validateNpcEmotion(extract.npc_emotion, extract.character_id);
+    } catch (error) {
+      validation = { ok: false, errors: [...validation.errors, `retry request failed: ${error.message}`] };
+    }
+  }
+  if (!validation.ok) {
+    const characterId = extract.character_id;
+    const existing = ctx?.save?.npc_emotion?.[characterId];
+    extract.npc_emotion = characterId && characterId !== 'narrator' && isPlainObject(existing) ? existing : {};
+    extract.mind_monitor_error = validation.errors;
+    console.error('Mind monitor validation failed after retry:', { characterId, errors: validation.errors });
+  }
+  extract.dialogue_lines = filterMainNpcDialogue(extract, ctx?.master?.characters || {});
+  return jsonResponse({ extract, raw: result.rawText.slice(0, 200), mind_monitor_retried: retriedMindMonitor, mind_monitor_errors: validation.ok ? [] : validation.errors });
+}
+
+async function requestExtractModel(env, prompt) {
   const res = await fetch('https://api.deepseek.com/v1/chat/completions', {
     method: 'POST',
     headers: {
@@ -209,28 +242,16 @@ async function handleExtract(req, env) {
       max_tokens: 10000
     })
   });
-
-  if (!res.ok) {
-    const text = await res.text();
-    return jsonResponse({ error: `DeepSeek error: ${res.status} ${text}` }, 502);
-  }
-
+  if (!res.ok) throw new Error(`DeepSeek error: ${res.status} ${(await res.text()).slice(0, 500)}`);
   const data = await res.json();
   const rawText = data.choices?.[0]?.message?.content || '';
-
-  let extract = {};
   try {
     const jsonMatch = rawText.match(/```json\s*([\s\S]*?)\s*```/i);
-    const jsonStr = jsonMatch ? jsonMatch[1] : rawText;
-    extract = JSON.parse(jsonStr);
-  } catch (e) {
-    console.error('Extract JSON parse failed:', e, rawText.slice(0, 200));
-    return jsonResponse({ error: 'JSON parse failed', raw: rawText.slice(0, 500) }, 502);
+    return { extract: normalizeExtract(JSON.parse(jsonMatch ? jsonMatch[1] : rawText)), rawText };
+  } catch (error) {
+    console.error('Extract JSON parse failed:', error, rawText.slice(0, 200));
+    throw new Error('JSON parse failed');
   }
-
-  extract = normalizeExtract(extract);
-  extract.dialogue_lines = filterMainNpcDialogue(extract, ctx?.master?.characters || {});
-  return jsonResponse({ extract, raw: rawText.slice(0, 200) });
 }
 
 // ─────────────────────────────────────────────
@@ -511,6 +532,12 @@ narrator는 정말로 주변에 NPC가 단 한 명도 없는 장면에만 써라
 {"speaker": "캐릭터명", "text": "대사 내용", "direction": "연기지시"}
 대사가 없으면 빈 배열 []로 둬라.
 
+[마인드 모니터 — 엄격한 추출 계약]
+npc_emotion.surface는 현재 NPC가 의식적으로 인정하는 생각과 감정이다. 반드시 해당 캐릭터의 말투를 반영한 1인칭 직접 독백으로 쓰고, 한국어 큰따옴표 “…”로 감싼다. 공백과 따옴표를 제외한 실질 길이는 최소 40자다. 자기합리화, 현재 판단, 겉으로 유지하려는 태도를 포함한다. 해설문·상태 분석문·제3자 설명문은 금지한다.
+npc_emotion.inner는 현재 NPC가 의식적으로 인정하지 못하는 욕구, 불안, 위화감, 저항 또는 본능이다. 반드시 1인칭 직접 독백으로 쓰고, 한국어 큰따옴표 “…”로 감싼다. 공백과 따옴표를 제외한 실질 길이는 최소 40자다. 표면의식과 속내가 다르면 그 충돌을 드러낸다. 해설문·상태 분석문·제3자 설명문은 금지한다.
+npc_emotion.physical_reaction은 표정, 시선, 자세, 목소리, 손동작, 호흡 등 외부에서 관찰 가능한 반응만 객관적으로 쓴다. 독백을 넣지 말고 최소 두 문장으로 쓴다.
+"상태다", "느끼고 있다", "생각한다" 같은 분석문만으로 surface 또는 inner를 채우지 마라.
+
 [이미지 선택]
 1. image_reasoning으로 is_sexual 판단: 실제 성행위/삽입/성기노출/오르가즘이 구체적이면 true. 키스/포옹/스킨십/분위기만으로는 false. 애매하면 반드시 false.
 2. image_library에서 character_id+is_sexual 일치 항목 필터 → situation 매칭 → image_id 선택. 후보 없으면 null.
@@ -531,7 +558,7 @@ ${JSON.stringify(imageCatalog)}
 {
   "npcs_present": ["등장 NPC heroine ID 전부. 없으면 []"],
   "character_id": "npcs_present 안에서만 선택. 비어있을 때만 narrator.",
-  "npc_emotion": {"surface": "겉 감정", "inner": "속마음", "physical_reaction": "관찰 가능한 신체적·행동적 반응"},
+  "npc_emotion": {"surface": "“따옴표로 감싼 1인칭 내면 독백, 실질 길이 최소 40자”", "inner": "“따옴표로 감싼 1인칭 내면 독백, 실질 길이 최소 40자”", "physical_reaction": "관찰 가능한 신체적·행동적 반응, 최소 2문장"},
   "npc_stats": {"호감도": 0, "신뢰도": 0, "최면깊이": 0, "순응도": 0, "최면저항력": 0},
   "player_patch": {"name": "", "age": 0, "gender": "", "height_cm": 0, "weight_kg": 0, "job": "", "background": "", "location": "", "style": "", "penis_length_cm": 0},
   "player_recommendation": {"name": "", "age": 0, "gender": "", "job": "", "major": "", "rank": "", "height_cm": 0, "weight_kg": 0, "style": "", "background": ""},
@@ -589,6 +616,33 @@ function flattenImageCatalog(catalog) {
 
 function isPlainObject(value) {
   return value !== null && typeof value === 'object' && !Array.isArray(value);
+}
+
+function mindMonologueLength(value = '') {
+  return String(value).replace(/[\s"“”'‘’]/g, '').length;
+}
+
+function validateMindMonologue(value, label) {
+  const text = typeof value === 'string' ? value.trim() : '';
+  const errors = [];
+  if (!/^“[\s\S]+”$/.test(text)) errors.push(`${label}: quoted first-person monologue required`);
+  if (mindMonologueLength(text) < 40) errors.push(`${label}: ${mindMonologueLength(text)} characters (minimum 40)`);
+  if (!/(?:나|난|나는|내가|내 |저|제가|내게|내가)/.test(text)) errors.push(`${label}: first-person voice required`);
+  const withoutQuotes = text.replace(/["“”]/g, '').trim();
+  if (/^(?:[^.。!?]*?(?:상태다|느끼고 있다|생각한다|상태입니다))[.。!?]*$/.test(withoutQuotes)) errors.push(`${label}: analysis-only text is not allowed`);
+  return errors;
+}
+
+function validateNpcEmotion(emotion = {}, characterId = null) {
+  if (!characterId || characterId === 'narrator') return { ok: true, errors: [] };
+  const errors = [
+    ...validateMindMonologue(emotion?.surface, 'surface'),
+    ...validateMindMonologue(emotion?.inner, 'inner')
+  ];
+  const physical = typeof emotion?.physical_reaction === 'string' ? emotion.physical_reaction.trim() : '';
+  const sentenceCount = physical.split(/[.。!?]+/).map(part => part.trim()).filter(Boolean).length;
+  if (sentenceCount < 2) errors.push(`physical_reaction: ${sentenceCount} sentences (minimum 2)`);
+  return { ok: errors.length === 0, errors };
 }
 
 function buildSavePatch(extract, enginePatch = {}, summaryPlan = null, previousSave = {}, turnNumber = 0, playerInput = '') {
@@ -799,6 +853,9 @@ export {
   isCsaApplicable,
   filterMainNpcDialogue,
   normalizeRelationshipState,
+  mindMonologueLength,
+  validateMindMonologue,
+  validateNpcEmotion,
   isSetupComplete,
   isApprovalInput,
   mergeRecommendation,

@@ -116,7 +116,7 @@ create table game_save (
   "csa_active": [],
   "csa_daily_used": 0,
   "player_location": "",
-  "player_progress": {},
+  "player_progress": { "level": 1, "exp": 0, "leveled_up": false, "next_level_exp": 10 },
   "active_suggestions": []
 }
 ```

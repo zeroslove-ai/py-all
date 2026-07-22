@@ -6,9 +6,14 @@ import {
   buildExtractPrompt,
   buildStoryPrompt,
   buildRecent100Plan,
+  calculateProgress,
   normalizeExtract,
   normalizeImageCatalog,
-  selectImageId
+  selectImageId,
+  sanitizeNpcStats,
+  getCsaLimits,
+  applyCsaAction,
+  isCsaApplicable
 } from '../worker/game-proxy-v2.js';
 import worker from '../worker/game-proxy-v2.js';
 
@@ -62,6 +67,28 @@ test('image selection accepts only matching character and sexuality, then falls 
   assert.equal(selectImageId([], 'heroine1', 99, null, false), null);
 });
 
+test('Worker owns experience and level progression', () => {
+  assert.deepEqual(calculateProgress({ level: 1, exp: 9 }, 'minor'), { level: 2, exp: 0, leveled_up: true, next_level_exp: 20 });
+  assert.deepEqual(calculateProgress({ level: 10, exp: 8 }, 'major'), { level: 10, exp: 13, leveled_up: false, next_level_exp: 0 });
+});
+
+test('NPC stats are bounded, limited per turn, and keep hypnosis resistance fixed', () => {
+  const stats = sanitizeNpcStats({ 호감도: 50, 신뢰도: 2, 최면저항력: 77 }, { 호감도: 99, 신뢰도: -50, 최면저항력: 0 });
+  assert.equal(stats.호감도, 55);
+  assert.equal(stats.신뢰도, 0);
+  assert.equal(stats.최면저항력, 77);
+});
+
+test('CSA uses level limits, stores spatial scope, and filters current scene only', () => {
+  assert.deepEqual(getCsaLimits(1), { scope_type: 'ward', max_active: 1, daily_limit: 1 });
+  assert.deepEqual(getCsaLimits(9), { scope_type: 'building', max_active: 3, daily_limit: 5 });
+  const patch = applyCsaAction({ csa_active: [], csa_daily_used: 0 }, { action: 'activate', content: 'test rule', scope_type: 'ward', scope_id: 'ward-3', scope_label: 'Ward 3' }, 1, 12);
+  assert.equal(patch.csa_active[0].scope_id, 'ward-3');
+  assert.equal(patch.csa_daily_used, 1);
+  assert.equal(isCsaApplicable(patch.csa_active[0], { ward: 'ward-3' }), true);
+  assert.equal(isCsaApplicable(patch.csa_active[0], { ward: 'ward-2' }), false);
+});
+
 test('extract prompt receives raw player input separately from the narrative', () => {
   const prompt = buildExtractPrompt(
     '진행자가 플레이어의 답을 되묻는다.',
@@ -88,7 +115,8 @@ test('save patch nests NPC state under character ID', () => {
     choices: ['계속한다']
   }, { opening_started: true });
 
-  assert.deepEqual(patch.npc_stats, { heroine3: { 호감도: 20 } });
+  assert.equal(patch.npc_stats.heroine3.호감도, 5);
+  assert.equal(patch.npc_stats.heroine3.최면저항력, 0);
   assert.deepEqual(patch.npc_emotion, {
     heroine3: { surface: '침착', inner: '긴장' }
   });

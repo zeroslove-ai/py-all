@@ -284,7 +284,7 @@ async function handleCommitTurn(req, env) {
   safeExtract.image_id = selectImageId(flattenImageCatalog(ctx?.image_catalog || []), safeExtract.character_id, safeExtract.image_id, ctx?.save?.last_image_id, safeExtract.is_sexual);
   const summaryPlan = buildRecent100Plan(ctx?.save || {}, turn_number, safeExtract.turn_summary);
   if (summaryPlan.isBoundary) summaryPlan.overallSummary = await summarizeRecent100(env, ctx?.save?.story_summary_overall, summaryPlan.completedWindow);
-  const patch = buildSavePatch(safeExtract, engine_patch, summaryPlan);
+  const patch = buildSavePatch(safeExtract, engine_patch, summaryPlan, ctx?.save || {}, turn_number);
   const result = await supabaseRpc(env, 'commit_turn', {
     p_game_id: game_id,
     p_turn_number: turn_number,
@@ -359,6 +359,9 @@ function buildStoryPrompt(ctx, playerInput, currentTurn) {
   }
 
   // ─── 섹션 3: 첫 턴/재진입 (조걸) ───
+  if (!hasPlayer) {
+    playerGate += `\n\n[PLAYER CREATION - REQUIRED]\nDo not ask for one field at a time. First present one complete, world-appropriate recommendation including name, age, gender, job, height, weight, speaking style, and background. Offer exactly: ① Start with this recommendation ② Change some settings ③ Describe a character directly. When the player approves, store every recommended field in player_patch. For partial edits keep the other recommendation values. Once saved player.name and player.job exist, never repeat this creation flow unless the player explicitly asks to edit them.`;
+  }
   let modeSection = '';
   if (isReentry) {
     modeSection = `
@@ -401,7 +404,8 @@ ${JSON.stringify(cleanForLlm(save), null, 2).slice(0, 1500)}
 ${recentMemories.slice(-3).map(m => m.content?.slice(0, 200) || '').join('\n---\n')}`;
 
   // ─── 조립 ───
-  const systemPrompt = coreRules + playerGate + modeSection + rulebookSection + displayFormatSection + contextSection;
+  const csaSection = buildApplicableCsaSection(save);
+  const systemPrompt = coreRules + playerGate + modeSection + rulebookSection + displayFormatSection + csaSection + contextSection;
 
   return {
     mode,
@@ -470,6 +474,8 @@ ${JSON.stringify(imageCatalog)}
   "npc_emotion": {"surface": "겉 감정", "inner": "속마음", "physical_reaction": "관찰 가능한 신체적·행동적 반응"},
   "npc_stats": {"호감도": 0, "신뢰도": 0, "최면깊이": 0, "순응도": 0, "최면저항력": 0},
   "player_patch": {"name": "", "age": 0, "gender": "", "height_cm": 0, "weight_kg": 0, "job": "", "background": "", "location": "", "style": "", "penis_length_cm": 0},
+  "growth_event": "none | minor | standard | major (사건의 의미만 제안, 경험치 숫자는 결정하지 말 것)",
+  "csa_action": null,
   "turn_summary": "이번 턴에서 변한 핵심 사실 1~3문장",
   "is_sexual": false,
   "choices": ["서사의 선택지를 그대로 옮겨라"],
@@ -523,7 +529,7 @@ function isPlainObject(value) {
   return value !== null && typeof value === 'object' && !Array.isArray(value);
 }
 
-function buildSavePatch(extract, enginePatch = {}, summaryPlan = null) {
+function buildSavePatch(extract, enginePatch = {}, summaryPlan = null, previousSave = {}, turnNumber = 0) {
   const characterId = typeof extract.character_id === 'string'
     ? extract.character_id
     : null;
@@ -539,7 +545,7 @@ function buildSavePatch(extract, enginePatch = {}, summaryPlan = null) {
   }
 
   if (characterId && characterId !== 'narrator') {
-    patch.npc_stats = { [characterId]: extract.npc_stats || {} };
+    patch.npc_stats = { [characterId]: sanitizeNpcStats(previousSave?.npc_stats?.[characterId], extract.npc_stats) };
     patch.npc_emotion = { [characterId]: extract.npc_emotion || {} };
   }
   if (extract.player_patch && Object.keys(extract.player_patch).length > 0) {
@@ -548,6 +554,9 @@ function buildSavePatch(extract, enginePatch = {}, summaryPlan = null) {
   if (enginePatch?.opening_started === true) {
     patch.opening_started = true;
   }
+  patch.player_progress = calculateProgress(previousSave?.player_progress, extract.growth_event);
+  const csaState = applyCsaAction(previousSave, extract.csa_action, patch.player_progress.level, turnNumber);
+  if (csaState) Object.assign(patch, csaState);
   return patch;
 }
 
@@ -565,7 +574,70 @@ function normalizeExtract(extract) {
   if (!normalized.player_patch || typeof normalized.player_patch !== 'object') normalized.player_patch = {};
   normalized.is_sexual = normalized.is_sexual === true;
   if (typeof normalized.turn_summary !== 'string') normalized.turn_summary = '';
+  if (!['none', 'minor', 'standard', 'major'].includes(normalized.growth_event)) normalized.growth_event = 'none';
+  if (!isPlainObject(normalized.csa_action)) normalized.csa_action = null;
   return normalized;
+}
+
+const NPC_STAT_KEYS = ['호감도', '신뢰도', '최면깊이', '순응도', '최면저항력'];
+const CSA_SCOPE_RANK = { ward: 1, floor: 2, building: 3, world: 4 };
+
+function expForNextLevel(level) { return Math.max(1, level) * 10; }
+function calculateProgress(previous = {}, event = 'none') {
+  let level = Math.max(1, Number(previous.level) || 1);
+  let exp = Math.max(0, Number(previous.exp) || 0);
+  exp += ({ none: 0, minor: 1, standard: 2, major: 5 })[event] || 0;
+  let leveledUp = false;
+  while (level < 10 && exp >= expForNextLevel(level)) { exp -= expForNextLevel(level); level += 1; leveledUp = true; }
+  return { level, exp, leveled_up: leveledUp, next_level_exp: level >= 10 ? 0 : expForNextLevel(level) };
+}
+
+function sanitizeNpcStats(previous = {}, proposed = {}) {
+  const result = {};
+  for (const key of NPC_STAT_KEYS) {
+    const before = Number(previous?.[key]);
+    const current = Number.isFinite(before) ? Math.max(0, Math.min(100, before)) : 0;
+    if (key === '최면저항력') { result[key] = current; continue; }
+    const target = Number(proposed?.[key]);
+    result[key] = Number.isFinite(target) ? Math.max(0, Math.min(100, current + Math.max(-5, Math.min(5, target - current)))) : current;
+  }
+  return result;
+}
+
+function getCsaLimits(level) {
+  if (level >= 10) return { scope_type: 'world', max_active: 4, daily_limit: 5 };
+  if (level >= 7) return { scope_type: 'building', max_active: 3, daily_limit: level >= 9 ? 5 : 4 };
+  if (level >= 4) return { scope_type: 'floor', max_active: 2, daily_limit: level >= 5 ? 3 : 2 };
+  return { scope_type: 'ward', max_active: 1, daily_limit: level >= 3 ? 2 : 1 };
+}
+
+function applyCsaAction(save, action, level, turnNumber) {
+  if (!action || !['activate', 'deactivate'].includes(action.action)) return null;
+  const active = Array.isArray(save?.csa_active) ? save.csa_active : [];
+  if (action.action === 'deactivate') {
+    if (typeof action.id !== 'string') return null;
+    return { csa_active: active.map(item => item.id === action.id ? { ...item, active: false } : item) };
+  }
+  const limits = getCsaLimits(level);
+  const scope = action.scope_type;
+  if (!CSA_SCOPE_RANK[scope] || CSA_SCOPE_RANK[scope] > CSA_SCOPE_RANK[limits.scope_type] || typeof action.content !== 'string' || !action.content.trim() || typeof action.scope_id !== 'string' || !action.scope_id.trim()) return null;
+  const activeCount = active.filter(item => item?.active).length;
+  const used = Math.max(0, Number(save?.csa_daily_used) || 0);
+  if (activeCount >= limits.max_active || used >= limits.daily_limit) return null;
+  return { csa_active: [...active, { id: `csa_${turnNumber}`, content: action.content.trim(), scope_type: scope, scope_id: action.scope_id.trim(), scope_label: typeof action.scope_label === 'string' ? action.scope_label : action.scope_id.trim(), created_turn: turnNumber, active: true }], csa_daily_used: used + 1 };
+}
+
+function isCsaApplicable(csa, worldState = {}) {
+  if (!csa?.active) return false;
+  if (csa.scope_type === 'world') return true;
+  return csa.scope_id === worldState[csa.scope_type];
+}
+
+function buildApplicableCsaSection(save) {
+  const world = save?.world_state || save?.player_location || {};
+  const applicable = (Array.isArray(save?.csa_active) ? save.csa_active : []).filter(csa => isCsaApplicable(csa, world));
+  if (!applicable.length) return '';
+  return `\n\n[CURRENT SCENE CSA RULES]\n${applicable.map(csa => `- ${csa.content}\n  This is accepted common sense by everyone in the current scene.`).join('\n')}`;
 }
 
 function appendSummary(previous, addition, limit = 1000) {
@@ -611,5 +683,10 @@ export {
   normalizeExtract,
   normalizeImageCatalog,
   buildRecent100Plan,
-  selectImageId
+  selectImageId,
+  calculateProgress,
+  sanitizeNpcStats,
+  getCsaLimits,
+  applyCsaAction,
+  isCsaApplicable
 };

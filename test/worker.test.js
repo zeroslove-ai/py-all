@@ -649,7 +649,8 @@ test('player setup phase (no candidates saved yet) asks for exactly 4 role-locke
   assert.match(setup.messages[0].content, /병원 장면이나 등록 NPC는 아직 등장시키지 않는다/);
   assert.match(setup.messages[0].content, /플레이어 캐릭터 후보 4개를 전부 확정해서 만든다/);
   assert.match(setup.messages[0].content, /\[REMINDER — PLAYER SETUP PHASE\]/);
-  assert.match(setup.messages[0].content, /"캐릭터 생성 대기 중"처럼 결정을 미루는 대기 화면이나 사용자에게 방향을 먼저 묻는 질문형 선택지를 만들지 않는다/);
+  assert.match(setup.messages[0].content, /"대기 중"처럼 결정을 미루는 표현이나 사용자에게 방향을 먼저 묻는 질문형 선택지를 만들지 않는다/);
+  assert.match(setup.messages[0].content, /\[3\. 선택지\]는 반드시 방금 만든 4개 플레이어 후보의 선택 문장이어야 하며, 등록 NPC를 고르는 선택지가 되어서는 안 된다/);
   assert.match(setup.messages[0].content, /1번\(hospital_worker\): 병원에서 근무하는 성인/);
   assert.match(setup.messages[0].content, /2번\(patient\): 현재 입원 중이거나 외래 진료를 받는 성인 환자/);
   assert.match(setup.messages[0].content, /의식불명이나 심각한 인지장애 등 플레이가 어려운 설정은 금지한다/);

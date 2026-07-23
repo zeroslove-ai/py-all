@@ -126,7 +126,6 @@ Worker는 다음 값을 프롬프트에 직접 삽입한다.
   "dialogue_lines": [
     {"speaker": "최유리", "text": "대사", "direction": "연기지시"}
   ],
-  "image_reasoning": "is_sexual 판단 근거 한 문장",
   "image_id": 123
 }
 ```

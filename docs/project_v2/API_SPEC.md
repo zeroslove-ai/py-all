@@ -115,7 +115,6 @@ data: [DONE]
     "dialogue_lines": [
       {"speaker": "최유리", "text": "대사", "direction": "작게 웃으며"}
     ],
-    "image_reasoning": "...",
     "image_id": 123
   },
   "raw": "모델 원문 앞부분"

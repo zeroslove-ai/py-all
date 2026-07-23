@@ -432,7 +432,7 @@ async function handleExtract(req, env) {
       messages: [{ role: 'system', content: prompt }],
       response_format: { type: 'json_object' },
       stream: false,
-      max_tokens: 4000
+      max_tokens: 3000
     }, { timeoutMs: 60000 });
     timing.deepseek_total_ms = Date.now() - t3;
   } catch (error) {
@@ -707,6 +707,50 @@ function mergeRecommendation(previous = {}, patch = {}) {
   return { ...normalizeRecommendation(previous), ...normalizeRecommendation(patch) };
 }
 
+// Only the current main NPC's core facts, injected as an established-fact
+// block so the model can't drift into a wrong rank/age/relationship once the
+// [게임 설정] block's 2000-char slice truncates master.characters before it
+// reaches this heroine's entry. Deliberately excludes 은밀정보/신음타입 and
+// every other heroine's profile.
+function buildCurrentNpcProfileSection(save = {}, characters = {}) {
+  const characterId = save?.last_character_id;
+  if (!characterId || characterId === 'narrator') return '';
+  const character = isPlainObject(characters) ? characters[characterId] : null;
+  if (!isPlainObject(character)) return '';
+  const name = character.name || character['이름'];
+  if (!name) return '';
+
+  const lines = [`ID: ${characterId}`, `이름: ${name}`];
+  const age = character['나이'];
+  if (age !== undefined && age !== null && age !== '') lines.push(`나이: ${age}`);
+  const pushField = (label, key) => {
+    const value = character[key];
+    if (typeof value === 'string' && value.trim()) lines.push(`${label}: ${value.trim()}`);
+  };
+  pushField('소속/직급', '소속');
+  pushField('성격', '성격');
+  pushField('말투', '말투');
+  pushField('연인관계', '연인관계');
+  pushField('취향(비노출 참고용)', '취향');
+  pushField('숨겨진설정(비노출 참고용)', '숨겨진설정');
+  pushField('관찰 가능 특징', '외형');
+  pushField('체형', '체형');
+
+  return `\n\n[CURRENT NPC PROFILE — ESTABLISHED FACT]\n\n${lines.join('\n')}\n\n규칙:\n- 위 정보는 최근 기억·선택지·요약에 섞인 잘못된 이름, 나이, 직급, 말투보다 우선한다.\n- 소속이 간호사인데 근거 없이 실장·과장·수간호사 등으로 승격시키지 않는다.\n- 숨겨진설정과 취향은 행동 일관성에만 사용하고 NPC가 직접 고백하거나 플레이어가 아는 사실처럼 노출하지 않는다.\n- 플레이어가 잘못된 호칭을 사용하면 NPC 성격에 맞게 자연스럽게 정정하거나 호칭을 흘려넘길 수 있지만, 서술자와 선택지는 잘못된 직급을 확정 사실로 반복하지 않는다.`;
+}
+
+function buildNarrativeLengthSection() {
+  return `\n\n[NARRATIVE LENGTH AND PACING CONTRACT — HIGH PRIORITY]\n\n- 먼저 이번 턴을 A/B/C 중 하나로 내부 판단하되 분류명을 출력하지 않는다.\n  A: 확인, 짧은 질문, 가벼운 반응처럼 위치·관계·상태 전환이 거의 없는 턴\n  B: 의미 있는 부탁, 대화, 신뢰 형성, 갈등 조정, 조사, 신체 행동이 진행되는 일반 턴\n  C: 이동, 새 NPC 합류, 최면/암시/상식 개변, 관계의 결정적 변화, 중요한 성공·실패·폭로가 있는 턴\n- [1. 서사 및 행동]만 다음 목표 길이로 작성한다. [1] 헤더, [2. 플레이어 상황판], [3. 선택지]는 이 글자 수에 포함하지 않는다.\n  A: 800~1,000자\n  B: 1,000~1,500자\n  C: 1,200~2,000자\n- 길이를 채우기 위한 같은 의미의 반복, 장황한 요약, 과거 회상 재복사는 금지한다.\n- 서사는 최소 3개의 진행 단위를 가진다:\n  1. 플레이어 입력에 대한 즉각적이고 구체적인 반응\n  2. 공간·행동·대화가 실제로 전개되는 중간 과정\n  3. 이번 턴의 명확한 결과, 결정, 새 정보, 변화 또는 다음 갈등\n- 매 턴 최소 하나의 구체적인 변화가 있어야 한다. 이는 위치, 행동 완료, 새 정보, 결정, 관계의 분위기, 새 장애물 중 하나일 수 있다.\n- 구체적인 변화가 반드시 NPC 수치 delta를 의미하지는 않는다. 수치를 억지로 올리거나 내리지 않는다.\n- 플레이어의 행동을 무효화한 채 이전 상태로 되돌아가거나, 같은 거절과 망설임만 반복해서 제자리걸음하지 않는다.`;
+}
+
+function buildNpcDialogueMinimumSection() {
+  return `\n\n[NPC DIALOGUE MINIMUM CONTRACT]\n\n- 등록 NPC가 실제 장면에 있고 플레이어와 대화·상호작용하는 일반 턴이라면 의미 있는 NPC 발언을 최소 3회 포함한다. 형식은 기존과 동일하게 **캐릭터명** (연기지시): "대사 내용"이다.\n- "의미 있는 발언"은 다음 중 하나를 새로 수행해야 한다: 입력에 직접 답변 / 새 정보 제공 / 질문 또는 확인 / 결정·수락·거절·조건 제시 / 감정이나 관계 변화 표현 / 행동을 시작하거나 중단시키는 말 / 다른 NPC와의 실제 상호작용.\n- 한 문장을 세 조각으로 나누거나 같은 의미를 반복해서 3회를 채우는 것은 금지한다.\n- 다음 경우에는 최소 3회를 강제하지 않는다: NPC가 없는 narrator 장면 / 플레이어가 말없이 관찰만 하겠다고 명시한 장면 / NPC가 잠들었거나 의식을 잃었거나 말할 수 없는 장면 / 대사보다 즉각적인 물리 행동이 중심이고 발언 3회가 부자연스러운 순간 / 재진입 모드 / player_setup 모드. 다만 NPC가 있는 일반 대화 장면에서 단순히 짧게 끝내기 위해 이 예외를 쓰지 않는다.\n- 여러 NPC가 등장하면 장면 전체 등록 NPC 발언 합계가 최소 3회이면 되고, NPC마다 3회씩 강제하지 않는다. 메인 NPC가 대화의 중심을 유지하고, 다른 NPC의 짧은 발언만으로 메인 NPC를 자동 전환하지 않는 기존 계약을 유지한다.\n- 플레이어가 입력하지 않은 새 플레이어 발언을 임의로 만들어 대화 횟수를 채우지 않는다. 플레이어 입력은 이미 발생한 말 또는 행동으로 취급하고, 이후 NPC 반응과 장면 전개만 쓴다.`;
+}
+
+function buildAntiRepetitionSection() {
+  return `\n\n[ANTI-REPETITION NARRATIVE CONTRACT]\n\n- 최근 기억 3턴과 같은 문장 구조와 동작을 연속 반복하지 않는다.\n- '암시가 작동 중이다'를 해설로 반복하지 말고, 선택·행동·말투·자기합리화로 보여준다.\n- 다음 표현을 매 턴 습관적으로 재사용하지 않는다: '눈동자가 흔들렸다', '손가락을 만지작거렸다', '살짝 붉어졌다', '경계와 호기심이 섞였다', '무의식적으로 반응했다'.\n- 표정만 바꾸고 끝내지 말고 공간 사용, 자세 변화, 소도구, 실제 행동, 질문, 결정, 정보 공개를 다양하게 조합한다.\n- 직전 턴에서 이미 끝난 손 내밀기, 자리 이동, 입장, 암시 성공을 다시 실행하지 않는다.`;
+}
+
 function buildStoryPrompt(ctx, playerInput, currentTurn, feedback = []) {
   ctx = withSetupCompatibility(ctx);
   const master = ctx?.master || {};
@@ -773,16 +817,18 @@ ${JSON.stringify(rulebook, null, 2).slice(0, 8000)}`;
   const playerStatusPanel = `
 
 [PLAYER STATUS PANEL CONTRACT — HIGHEST PRIORITY FOR SECTION 2]
-[2. 플레이어 상황판]은 단순 키·값 나열표가 아니라 게임 속 최면 어플의 현재 화면처럼 작성한다. 이모지와 짧은 구분을 사용하되, 매 턴 문구와 배치를 기계적으로 복제하지 말고 현재 장면에 맞춰 자연스럽게 구성한다.
+[2. 플레이어 상황판]은 단순 키·값 나열표가 아니라 게임 속 최면 어플의 현재 화면처럼 작성한다. 이모지와 짧은 구분을 사용하되, 매 턴 문구와 배치를 기계적으로 복제하지 말고 현재 장면에 맞춰 자연스럽게 구성한다. 전체 길이는 250~400자를 목표로 한다.
 저장값과 현재 장면에서 확인 가능한 정보를 우선 사용하며, 알 수 없는 값은 지어내지 않는다. 가능한 범위에서 다음 정보를 포함한다:
 - 🧑 플레이어: 이름, 나이, 성별, 직업 또는 역할
-- 📍 현재 상태와 위치, 저장된 게임 일자·시각이 있으면 함께 표시
-- 📱 최면 어플: 레벨, 현재 EXP/다음 레벨 필요 EXP, 현재 레벨과 룰북이 허용하는 최면 강도
+- 📍 현재 상태와 위치, 저장된 게임 일자·시각이 있으면 함께 표시. 저장되지 않은 시각을 새로 지어내지 않는다.
+- 📱 최면 어플: 이전 저장값 기준 현재 레벨, 현재 EXP/다음 레벨 필요 EXP, 현재 레벨과 룰북이 허용하는 최면 강도
 - 🌀 활성 암시 목록
 - 🌐 상식 개변: 활성 개수/최대 개수, 현재 적용 가능 범위, 오늘 사용 횟수/한도
-- 🎯 접근 대상: 현재 접근 중인 NPC의 이름과 진행에 유용한 최소 정보(예: 순응·저항). NPC 5개 스탯 전체 표는 절대 출력하지 않는다.
+- 🎯 접근 대상: 현재 접근 중인 NPC의 이름과 이전 저장값 기준 진행에 유용한 최소 정보(예: 순응·신뢰). NPC 5개 스탯 전체 표는 절대 출력하지 않는다.
 - 💭 플레이어 상황 독백: 플레이어 자신의 말투·성격·현재 목표와 판단을 반영한 1인칭 직접 독백. 반드시 한국어 큰따옴표 “…”로 감싸고, 공백과 따옴표를 제외한 실질 길이 40자 이상으로 쓴다. 해설문·제3자 분석문·NPC의 표면의식/잠재의식과 혼동하는 내용은 금지하며, 이 독백은 [2]에만 출력한다.
-- 📌 현재 목표와 🔄 이번 턴에 실제로 발생한 중요 변화. 수치 변동은 0이 아닌 항목과 서사에서 확인되는 이유만 적는다.
+- 📌 현재 목표
+- 🔄 이번 턴: 실제로 일어난 사건을 정성적으로 한 줄 요약한다. 예: "🔄 이번 턴: 박소현이 손을 잡는 것을 수락함". 순응 +1, 저항 -1, 최면깊이 +1처럼 숫자·기호로 된 수치 변화는 절대 쓰지 않는다.
+Story는 Commit 이전이므로 다음을 절대 쓰지 않는다: 이번 턴 예상 stat delta 숫자, (+1)·(-2) 같은 미래 변화 표기, 최면저항력 증감 추측, 아직 저장되지 않은 EXP와 레벨업 결과, 저장되지 않은 시각의 임의 생성.
 턴 번호, 일반 최면의 하루 횟수 제한, 동시 최면 인원 제한, 1인당 중첩 암시 제한, NPC 5개 스탯 전체 표, 사정·오르가즘 누적값은 절대 출력하지 않는다.`;
 
   // ─── 섹션 5: 컨텍스트 ───
@@ -801,18 +847,22 @@ ${recentMemorySlice.map((m, index) => clipHeadTail(m.content || '', index === re
 
   // ─── 조립 ───
   const currentSceneSection = buildCurrentSceneSection(save, master.characters || {});
+  const npcProfileSection = buildCurrentNpcProfileSection(save, master.characters || {});
   const explicitMentionSection = buildExplicitNpcMentionSection(playerInput, master.characters || {});
   const csaSection = buildApplicableCsaSection(save);
   const suggestionSection = buildActiveSuggestionSection(save, master.characters || {});
+  const narrativeLengthSection = buildNarrativeLengthSection();
+  const npcDialogueSection = buildNpcDialogueMinimumSection();
+  const antiRepetitionSection = buildAntiRepetitionSection();
   const feedbackSection = Array.isArray(feedback) && feedback.length
     ? `\n\n[USER FEEDBACK — APPLY TO THIS NEXT RESPONSE ONLY]\n${feedback.map(item => `- ${typeof item === 'string' ? item : item?.text || ''}`).filter(Boolean).join('\n')}\nThis is not an in-world action. Never narrate it as dialogue or an event; use it only to improve output quality.`
     : '';
   const continuitySection = `\n\n[TURN CONTINUITY CONTRACT]\n- 직전 턴에서 완료된 행동을 다시 실행하지 않는다.\n- 이미 성공한 암시를 다시 시도하지 않는다.\n- NPC가 확정 암시를 매 턴 이유 없이 의심하거나 거부하지 않는다.\n- 현재 장면을 한 단계 앞으로 진행한다.\n- 저장된 확정 사실과 충돌하는 쪽지, 과거 사건, 시간, 인물 관계를 새로 만들지 않는다.`;
-  const finalFormatRules = `\n\n[FINAL OUTPUT CONTRACT — HIGHEST PRIORITY]\nThe response body contains exactly three sections: [1. 서사 및 행동], [2. 플레이어 상황판], [3. 선택지]. Never include a mind monitor, NPC stat table, character body information, or turn number in the body. Mind monitor belongs only to npc_emotion extraction and the sidebar UI. The Player Status Panel Contract overrides any legacy display-format text. In normal play, [3] contains exactly four in-world action choices; never include an app-information choice.\nDo not use formulaic first-impression or hypnosis-success calculations.\n`;
+  const finalFormatRules = `\n\n[FINAL OUTPUT CONTRACT — HIGHEST PRIORITY]\nThe response body contains exactly three sections: [1. 서사 및 행동], [2. 플레이어 상황판], [3. 선택지]. Never include a mind monitor, NPC stat table, character body information, or turn number in the body. Mind monitor belongs only to npc_emotion extraction and the sidebar UI. The Player Status Panel Contract overrides any legacy display-format text. In normal play, [3] contains exactly four in-world action choices; never include an app-information choice.\nDo not use formulaic first-impression or hypnosis-success calculations.\n지침이 서로 충돌하면 다음 우선순위를 따른다: 확정 상태·NPC 프로필 정확성 > 사용자 입력의 실제 의도 > 장면 연속성 > 서사 길이 목표 > 문체 다양성. 길이를 채우기 위해 확정 사실을 깨거나 플레이어 행동을 임의로 추가하지 않는다.\n`;
   const openingFlow = mode === 'opening'
     ? `\n\n[OPENING PHASE — AFTER PLAYER SETUP]\nThe player setup is confirmed. Generate only the first hospital scene and first NPC encounter now. Do not repeat the app discovery, app feature explanation, player questions, or character recommendation. Never claim that the player has already used the app to change the hospital in the past.\n`
     : '';
-  const systemPrompt = coreRules + playerGate + modeSection + rulebookSection + playerStatusPanel + buildNpcLocationRules() + currentSceneSection + explicitMentionSection + csaSection + suggestionSection + contextSection + feedbackSection + continuitySection + finalFormatRules + openingFlow;
+  const systemPrompt = coreRules + playerGate + modeSection + rulebookSection + buildNpcLocationRules() + currentSceneSection + npcProfileSection + explicitMentionSection + csaSection + suggestionSection + narrativeLengthSection + npcDialogueSection + antiRepetitionSection + playerStatusPanel + contextSection + feedbackSection + continuitySection + finalFormatRules + openingFlow;
 
   return {
     mode,
@@ -901,7 +951,7 @@ npc_stat_changes만 반환한다. 서사에 숫자가 없어도 대사·행동·
 현재 장소 범위 안에서 플레이어가 상식개변을 실제로 성공시켰을 때만 csa_action.action="activate"로 content(바뀐 상식 문장)와 scope_type(ward/floor/building/world 중 현재 상황에 맞는 범위)을 반환한다. scope_id는 채우지 마라. Worker가 현재 world_state로 결정한다. 시도·계획·상상만으로는 저장하지 마라. 플레이어가 기존 상식개변을 명확히 해제했을 때만 action="deactivate"와 해제 대상 id를 반환한다. 변화가 없으면 csa_action은 null이다.
 
 [이미지 선택]
-1. image_reasoning으로 is_sexual 판단: 실제 성행위/삽입/성기노출/오르가즘이 구체적이면 true. 키스/포옹/스킨십/분위기만으로는 false. 애매하면 반드시 false.
+1. is_sexual 판단: 실제 성행위/삽입/성기노출/오르가즘이 구체적이면 true. 키스/포옹/스킨십/분위기만으로는 false. 애매하면 반드시 false.
 2. image_library에서 character_id+is_sexual(또는 image_pool) 일치 항목만 후보로 본다. short_description과 tags가 있으면 situation보다 먼저 참고해 현재 장면에 가장 맞는 이미지를 고르고, 없으면 기존처럼 situation으로만 매칭한다. 후보 없으면 null.
 3. scene_role=hypnosis_onset 이미지는 실제 최면 반응·암시 성공이 발생한 장면 전용이다. scene_role=heart_eyes 이미지는 높은 호감이나 깊은 최면·순응 상태의 애정·황홀 반응 전용이다. 단순 계획이나 평범한 대화에는 고르지 마라.
 
@@ -914,6 +964,14 @@ npc_stat_changes만 반환한다. 서사에 숫자가 없어도 대사·행동·
 - situation, short_description, tags가 현재 장면과 가장 가까운 후보를 고른다.
 - 완전히 적절한 후보가 없으면 image_id=null을 반환한다.
 - scene_role 특수 이미지는 Worker가 Commit 단계에서 별도로 결정하므로 여기서 추측하지 않는다.
+
+[CONCISE JSON CONTRACT]
+- JSON 밖의 설명은 절대 출력하지 않는다.
+- reason 필드는 각각 짧은 한 문장으로 쓰고 60자를 넘기지 않는다.
+- turn_summary는 핵심 변화만 1~2문장, 최대 200자로 쓴다.
+- npc_emotion은 기존 최소 길이와 2문장 physical_reaction 계약을 충족하는 범위에서만 작성하고 불필요하게 늘리지 않는다.
+- choices와 dialogue_lines는 Story에서 실제 존재하는 항목만 옮긴다.
+- 같은 근거를 여러 필드에 반복 설명하지 않는다.
 
 [플레이어의 이번 원본 입력]
 ${typeof playerInput === 'string' && playerInput.trim() ? playerInput : '(없음)'}
@@ -945,7 +1003,6 @@ ${JSON.stringify(imageCatalog)}
   "is_sexual": false,
   "choices": ["서사의 선택지를 그대로 옮겨라"],
   "dialogue_lines": [{"speaker": "", "text": "", "direction": ""}],
-  "image_reasoning": "is_sexual 판단 근거 1문장",
   "image_id": "후보 목록 안의 image_id 또는 null"
 }`;
 }
@@ -1229,6 +1286,7 @@ function normalizeExtract(extract) {
   if (!isPlainObject(normalized.first_encounter_stats)) normalized.first_encounter_stats = null;
   if (!isPlainObject(normalized.suggestion_action)) normalized.suggestion_action = null;
   if (!isPlainObject(normalized.world_state_patch)) normalized.world_state_patch = null;
+  delete normalized.image_reasoning;
   return normalized;
 }
 
@@ -1969,6 +2027,10 @@ export {
   buildStoryStateSnapshot,
   clipHeadTail,
   buildCurrentSceneSection,
+  buildCurrentNpcProfileSection,
+  buildNarrativeLengthSection,
+  buildNpcDialogueMinimumSection,
+  buildAntiRepetitionSection,
   detectExplicitRegisteredNpcMentions,
   buildExplicitNpcMentionSection,
   buildImageSceneText,

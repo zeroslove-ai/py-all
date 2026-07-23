@@ -43,6 +43,10 @@ import {
   buildStoryStateSnapshot,
   clipHeadTail,
   buildCurrentSceneSection,
+  buildCurrentNpcProfileSection,
+  buildNarrativeLengthSection,
+  buildNpcDialogueMinimumSection,
+  buildAntiRepetitionSection,
   detectExplicitRegisteredNpcMentions,
   buildExplicitNpcMentionSection,
   buildImageSceneText,
@@ -1203,7 +1207,7 @@ test('/api/story requests get_story_context, disables DeepSeek thinking, and ret
 
 test('/api/extract requests get_extract_context, fetches images only for detected registered NPCs, and uses disabled thinking + JSON response_format', async () => {
   const originalFetch = globalThis.fetch;
-  let deepseekBody;
+  const deepseekBodies = [];
   let imageCatalogParams;
   globalThis.fetch = async (url, init = {}) => {
     const requestUrl = String(url);
@@ -1219,7 +1223,7 @@ test('/api/extract requests get_extract_context, fetches images only for detecte
       return new Response(JSON.stringify([]), { headers: { 'content-type': 'application/json' } });
     }
     if (requestUrl.includes('api.deepseek.com')) {
-      deepseekBody = JSON.parse(init.body);
+      deepseekBodies.push(JSON.parse(init.body));
       return new Response(JSON.stringify({
         choices: [{ message: { content: JSON.stringify({ character_id: 'heroine9', npcs_present: ['heroine9'] }) }, finish_reason: 'stop' }]
       }), { headers: { 'content-type': 'application/json' } });
@@ -1235,8 +1239,10 @@ test('/api/extract requests get_extract_context, fetches images only for detecte
     const body = await response.json();
     assert.equal(typeof body.request_id, 'string');
     assert.ok(body.timing);
+    const deepseekBody = deepseekBodies[0];
     assert.deepEqual(deepseekBody.thinking, { type: 'disabled' });
     assert.deepEqual(deepseekBody.response_format, { type: 'json_object' });
+    assert.equal(deepseekBody.max_tokens, 3000);
     assert.deepEqual(imageCatalogParams, ['heroine9']);
   } finally {
     globalThis.fetch = originalFetch;
@@ -1909,4 +1915,144 @@ test('/api/commit-turn: a triggered scene_role image always wins over the recomp
   } finally {
     globalThis.fetch = originalFetch;
   }
+});
+
+// ─────────────────────────────────────────────
+// CURRENT NPC PROFILE injection
+// ─────────────────────────────────────────────
+
+const NPC_PROFILE_CHARACTERS = {
+  heroine9: {
+    name: '박소현', '나이': 35, '말투': '꼼꼼하고 신중, 약간 느린 말투',
+    '성격': '꼼꼼·신중·안경 착용·유부녀', '소속': '3병동 간호사',
+    '외형': '뿔테 안경, 흑발 단발펌, 골드 결혼반지', '체형': '통통+탄력',
+    '연인관계': '기혼 (남편과 매너리즘, 권태기)',
+    '취향': '일상에서 벗어난 자극. 자신을 깨워주는 사람에게 약함',
+    '숨겨진설정': '남편과 매너리즘. 일상에 지루함.',
+    '은밀정보': '유두: 적당 | 유륜: 큼', '신음타입': 'A형(수치심 순응)'
+  }
+};
+
+test('buildCurrentNpcProfileSection includes name, age, affiliation, and speech style for the current main NPC', () => {
+  const section = buildCurrentNpcProfileSection({ last_character_id: 'heroine9' }, NPC_PROFILE_CHARACTERS);
+  assert.match(section, /\[CURRENT NPC PROFILE — ESTABLISHED FACT\]/);
+  assert.match(section, /이름: 박소현/);
+  assert.match(section, /나이: 35/);
+  assert.match(section, /소속\/직급: 3병동 간호사/);
+  assert.match(section, /말투: 꼼꼼하고 신중, 약간 느린 말투/);
+});
+
+test('buildCurrentNpcProfileSection never leaks 은밀정보 or 신음타입', () => {
+  const section = buildCurrentNpcProfileSection({ last_character_id: 'heroine9' }, NPC_PROFILE_CHARACTERS);
+  assert.doesNotMatch(section, /은밀정보/);
+  assert.doesNotMatch(section, /유두/);
+  assert.doesNotMatch(section, /신음타입/);
+  assert.doesNotMatch(section, /수치심 순응/);
+});
+
+test('buildCurrentNpcProfileSection is empty for narrator, an unregistered ID, or a missing/empty ID', () => {
+  assert.equal(buildCurrentNpcProfileSection({ last_character_id: 'narrator' }, NPC_PROFILE_CHARACTERS), '');
+  assert.equal(buildCurrentNpcProfileSection({ last_character_id: 'heroine99' }, NPC_PROFILE_CHARACTERS), '');
+  assert.equal(buildCurrentNpcProfileSection({}, NPC_PROFILE_CHARACTERS), '');
+  assert.equal(buildCurrentNpcProfileSection({ last_character_id: 'heroine9' }, {}), '');
+});
+
+test('buildCurrentNpcProfileSection states that it overrides misremembered names/ages/ranks/speech from memory', () => {
+  const section = buildCurrentNpcProfileSection({ last_character_id: 'heroine9' }, NPC_PROFILE_CHARACTERS);
+  assert.match(section, /최근 기억·선택지·요약에 섞인 잘못된 이름, 나이, 직급, 말투보다 우선한다/);
+  assert.match(section, /근거 없이 실장·과장·수간호사 등으로 승격시키지 않는다/);
+});
+
+test('CURRENT NPC PROFILE sits right after CURRENT SCENE and before EXPLICIT REGISTERED NPC MENTIONS', () => {
+  const characters = { ...NPC_PROFILE_CHARACTERS, heroine1: { name: '한소영' } };
+  const prompt = buildStoryPrompt({
+    master: { characters },
+    save: { last_character_id: 'heroine9', world_state: { location_label: '면회실' } },
+    recent_memories: []
+  }, '한소영 수간호사님, 잠깐 말씀 좀 나눌 수 있을까요?', 5);
+  const content = prompt.messages[0].content;
+  const sceneIndex = content.indexOf('[CURRENT SCENE');
+  const profileIndex = content.indexOf('[CURRENT NPC PROFILE');
+  const mentionIndex = content.indexOf('[EXPLICIT REGISTERED NPC MENTIONS');
+  assert.ok(sceneIndex >= 0 && profileIndex > sceneIndex && mentionIndex > profileIndex);
+});
+
+// ─────────────────────────────────────────────
+// Narrative length, pacing, NPC dialogue minimum
+// ─────────────────────────────────────────────
+
+test('the narrative length contract states the exact A/B/C character ranges and applies only to [1]', () => {
+  const prompt = buildStoryPrompt({ master: { characters: {} }, save: { player: {} }, recent_memories: [] }, '계속', 1);
+  const content = prompt.messages[0].content;
+  assert.match(content, /800~1,000자/);
+  assert.match(content, /1,000~1,500자/);
+  assert.match(content, /1,200~2,000자/);
+  assert.match(content, /\[1\. 서사 및 행동\]만 다음 목표 길이로 작성한다/);
+});
+
+test('the narrative length contract requires three progress beats, at least one concrete change, and forbids padding/stat-forcing', () => {
+  const section = buildNarrativeLengthSection();
+  assert.match(section, /최소 3개의 진행 단위/);
+  assert.match(section, /매 턴 최소 하나의 구체적인 변화가 있어야 한다/);
+  assert.match(section, /수치를 억지로 올리거나 내리지 않는다/);
+  assert.match(section, /길이를 채우기 위한 같은 의미의 반복, 장황한 요약, 과거 회상 재복사는 금지한다/);
+});
+
+test('the NPC dialogue minimum contract requires 3 meaningful lines, sums across multi-NPC scenes, and lists its exceptions', () => {
+  const section = buildNpcDialogueMinimumSection();
+  assert.match(section, /최소 3회/);
+  assert.match(section, /장면 전체 등록 NPC 발언 합계가 최소 3회이면 되고, NPC마다 3회씩 강제하지 않는다/);
+  assert.match(section, /narrator 장면/);
+  assert.match(section, /재진입 모드/);
+  assert.match(section, /player_setup 모드/);
+  assert.match(section, /플레이어가 입력하지 않은 새 플레이어 발언을 임의로 만들어 대화 횟수를 채우지 않는다/);
+});
+
+test('the anti-repetition contract names the overused stock phrases and forbids re-running finished actions', () => {
+  const section = buildAntiRepetitionSection();
+  assert.match(section, /눈동자가 흔들렸다/);
+  assert.match(section, /손가락을 만지작거렸다/);
+  assert.match(section, /암시가 작동 중이다/);
+  assert.match(section, /직전 턴에서 이미 끝난 손 내밀기, 자리 이동, 입장, 암시 성공을 다시 실행하지 않는다/);
+});
+
+// ─────────────────────────────────────────────
+// Player status panel: no pre-Commit numeric guessing
+// ─────────────────────────────────────────────
+
+test('the player status panel contract targets 250~400 characters and forbids future stat deltas and invented timestamps', () => {
+  const prompt = buildStoryPrompt({ master: { characters: {} }, save: { player: {} }, recent_memories: [] }, '계속', 1);
+  const content = prompt.messages[0].content;
+  assert.match(content, /전체 길이는 250~400자를 목표로 한다/);
+  assert.match(content, /이번 턴 예상 stat delta 숫자/);
+  assert.match(content, /\(\+1\)·\(-2\) 같은 미래 변화 표기/);
+  assert.match(content, /최면저항력 증감 추측/);
+  assert.match(content, /아직 저장되지 않은 EXP와 레벨업 결과/);
+  assert.match(content, /저장되지 않은 시각의 임의 생성/);
+});
+
+test('the 🔄 turn-change line is specified as qualitative-only, never a numeric delta', () => {
+  const prompt = buildStoryPrompt({ master: { characters: {} }, save: { player: {} }, recent_memories: [] }, '계속', 1);
+  const content = prompt.messages[0].content;
+  assert.match(content, /🔄 이번 턴: 실제로 일어난 사건을 정성적으로 한 줄 요약한다/);
+  assert.match(content, /순응 \+1, 저항 -1, 최면깊이 \+1처럼 숫자·기호로 된 수치 변화는 절대 쓰지 않는다/);
+});
+
+// ─────────────────────────────────────────────
+// Extract: concise JSON contract, image_reasoning removal, max_tokens
+// ─────────────────────────────────────────────
+
+test('Extract prompt carries the CONCISE JSON CONTRACT with the reason/turn_summary length limits', () => {
+  const prompt = buildExtractPrompt('서사', '입력', { master: {}, save: {} }, [], 1);
+  assert.match(prompt, /\[CONCISE JSON CONTRACT\]/);
+  assert.match(prompt, /reason 필드는 각각 짧은 한 문장으로 쓰고 60자를 넘기지 않는다/);
+  assert.match(prompt, /turn_summary는 핵심 변화만 1~2문장, 최대 200자로 쓴다/);
+  assert.match(prompt, /같은 근거를 여러 필드에 반복 설명하지 않는다/);
+});
+
+test('image_reasoning is fully removed: not in the JSON schema, and stripped from normalizeExtract output even if the model still sends it', () => {
+  const prompt = buildExtractPrompt('서사', '입력', { master: {}, save: {} }, [], 1);
+  assert.doesNotMatch(prompt, /image_reasoning/);
+  const normalized = normalizeExtract({ character_id: 'heroine9', image_reasoning: '모델이 어쨌든 보낸 값' });
+  assert.equal('image_reasoning' in normalized, false);
 });

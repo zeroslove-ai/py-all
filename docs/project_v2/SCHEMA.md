@@ -211,7 +211,7 @@ Worker의 `buildSavePatch()`는 추출 결과를 DB 구조에 맞게 바꾼다.
 | 요약 필드 | 같은 이름의 `data` 필드 |
 | 첫 오프닝 완료 | `data.opening_started=true` |
 
-`dialogue_lines`와 `image_reasoning`은 렌더링·판단 보조값이며 그대로 세이브 JSON에 넣지 않는다.
+`dialogue_lines`는 렌더링 보조값이며 그대로 세이브 JSON에 넣지 않는다.
 
 ## `reset_game_progress` 규칙
 

@@ -44,7 +44,16 @@ import {
   clipHeadTail,
   buildCurrentSceneSection,
   detectExplicitRegisteredNpcMentions,
-  buildExplicitNpcMentionSection
+  buildExplicitNpcMentionSection,
+  buildImageSceneText,
+  hasObviousSexualSceneSignals,
+  scoreImageCandidate,
+  hasMismatchedRegisteredCharacterName,
+  allocateImageCandidateSlots,
+  allocateImagePoolSlots,
+  selectCharacterImageCandidates,
+  selectTopImageCandidates,
+  selectValidatedShortlistImageId
 } from '../worker/game-proxy-v2.js';
 import worker from '../worker/game-proxy-v2.js';
 
@@ -1549,4 +1558,355 @@ test('Extract prompt carries the MAIN NPC / MULTI NPC CONTRACT ahead of the imag
   assert.match(prompt, /캐릭터 매핑 목록 순서, 이미지 후보 순서, master 객체 순서로 character_id를 고르지 않는다/);
   assert.match(prompt, /메인 NPC는 한 명만 고른다/);
   assert.ok(prompt.indexOf('MAIN NPC / MULTI NPC CONTRACT') < prompt.indexOf('[이미지 선택]'));
+});
+
+// ─────────────────────────────────────────────
+// Extract image candidate shortlist (max 12)
+// ─────────────────────────────────────────────
+
+function makeShortlistImages(characterId, count, startId, overrides = {}) {
+  const images = [];
+  for (let i = 0; i < count; i++) {
+    images.push({
+      image_id: startId + i,
+      character_id: characterId,
+      image_pool: 'general',
+      tags: [],
+      curation_rank: i,
+      short_description: '',
+      situation: '',
+      ...overrides
+    });
+  }
+  return images;
+}
+
+test('allocateImageCandidateSlots splits totalLimit 12 across 0/1/2/3 candidates per the spec table', () => {
+  assert.deepEqual(allocateImageCandidateSlots([], 12), []);
+  assert.deepEqual(allocateImageCandidateSlots(['heroine1'], 12), [{ characterId: 'heroine1', slots: 12 }]);
+  assert.deepEqual(allocateImageCandidateSlots(['heroine1', 'heroine9'], 12), [
+    { characterId: 'heroine1', slots: 8 },
+    { characterId: 'heroine9', slots: 4 }
+  ]);
+  assert.deepEqual(allocateImageCandidateSlots(['heroine1', 'heroine9', 'heroine4'], 12), [
+    { characterId: 'heroine1', slots: 6 },
+    { characterId: 'heroine9', slots: 3 },
+    { characterId: 'heroine4', slots: 3 }
+  ]);
+});
+
+test('allocateImagePoolSlots matches the spec general/sex ratio table for default and obvious-sexual-signal scenes', () => {
+  assert.deepEqual(allocateImagePoolSlots(12, false), { generalSlots: 8, sexSlots: 4 });
+  assert.deepEqual(allocateImagePoolSlots(8, false), { generalSlots: 5, sexSlots: 3 });
+  assert.deepEqual(allocateImagePoolSlots(6, false), { generalSlots: 4, sexSlots: 2 });
+  assert.deepEqual(allocateImagePoolSlots(4, false), { generalSlots: 3, sexSlots: 1 });
+  assert.deepEqual(allocateImagePoolSlots(3, false), { generalSlots: 2, sexSlots: 1 });
+  assert.deepEqual(allocateImagePoolSlots(12, true), { generalSlots: 4, sexSlots: 8 });
+  assert.deepEqual(allocateImagePoolSlots(8, true), { generalSlots: 3, sexSlots: 5 });
+  assert.deepEqual(allocateImagePoolSlots(6, true), { generalSlots: 2, sexSlots: 4 });
+  assert.deepEqual(allocateImagePoolSlots(4, true), { generalSlots: 1, sexSlots: 3 });
+  assert.deepEqual(allocateImagePoolSlots(3, true), { generalSlots: 1, sexSlots: 2 });
+});
+
+test('buildImageSceneText lowercases, strips punctuation to spaces, and collapses whitespace', () => {
+  const text = buildImageSceneText('그녀는 "정말?!" 하고 웃었다.', 'Hello, World!');
+  assert.equal(text, text.toLowerCase());
+  assert.doesNotMatch(text, /[!?".,]/);
+  assert.doesNotMatch(text, /\s{2,}/);
+  assert.match(text, /hello/);
+});
+
+test('hasObviousSexualSceneSignals is true only for explicit sexual-action words, never for affection/blush/smile/closeness alone', () => {
+  assert.equal(hasObviousSexualSceneSignals('그가 그녀의 몸에 삽입했다', ''), true);
+  assert.equal(hasObviousSexualSceneSignals('그녀가 오르가즘을 느꼈다', ''), true);
+  assert.equal(hasObviousSexualSceneSignals('', '자위를 시작한다'), true);
+  assert.equal(hasObviousSexualSceneSignals('그녀는 얼굴을 붉히며 미소지었다', '가까이 다가가 끌어안는다'), false);
+  assert.equal(hasObviousSexualSceneSignals('', ''), false);
+  assert.equal(hasObviousSexualSceneSignals(undefined, undefined), false);
+});
+
+test('selectCharacterImageCandidates ranks an exact tag match above a low curation_rank image with no relevance', () => {
+  const sceneText = buildImageSceneText('그녀가 활짝 웃었다', '');
+  const catalog = [
+    { image_id: 1, character_id: 'heroine9', image_pool: 'general', tags: ['기쁨'], curation_rank: 5, short_description: '', situation: '' },
+    { image_id: 2, character_id: 'heroine9', image_pool: 'general', tags: [], curation_rank: 1, short_description: '', situation: '' }
+  ];
+  const result = selectCharacterImageCandidates(catalog, { characterId: 'heroine9', slots: 1, sexualSignal: false, sceneText, characters: {}, lastImageId: null });
+  assert.equal(result.selected[0].image_id, 1);
+});
+
+test('selectCharacterImageCandidates treats description-token matches as a weaker secondary signal than tags', () => {
+  const sceneText = buildImageSceneText('복도에서 조용히 서있는 장면', '');
+  const catalog = [
+    { image_id: 1, character_id: 'heroine9', image_pool: 'general', tags: ['기쁨'], curation_rank: 9, short_description: '', situation: '' },
+    { image_id: 2, character_id: 'heroine9', image_pool: 'general', tags: [], curation_rank: 9, short_description: '복도에서 조용히 서있는 모습', situation: '' }
+  ];
+  const result = selectCharacterImageCandidates(catalog, { characterId: 'heroine9', slots: 1, sexualSignal: false, sceneText, characters: {}, lastImageId: null });
+  assert.equal(result.selected[0].image_id, 2);
+});
+
+test('selectCharacterImageCandidates breaks equal-relevance ties by the lower curation_rank', () => {
+  const catalog = [
+    { image_id: 10, character_id: 'heroine9', image_pool: 'general', tags: [], curation_rank: 5, short_description: '', situation: '' },
+    { image_id: 11, character_id: 'heroine9', image_pool: 'general', tags: [], curation_rank: 2, short_description: '', situation: '' }
+  ];
+  const result = selectCharacterImageCandidates(catalog, { characterId: 'heroine9', slots: 1, sexualSignal: false, sceneText: '', characters: {}, lastImageId: null });
+  assert.equal(result.selected[0].image_id, 11);
+});
+
+test('selectCharacterImageCandidates prefers a competing image over the last-shown image at equal tag relevance', () => {
+  const sceneText = buildImageSceneText('그녀가 활짝 웃었다', '');
+  const catalog = [
+    { image_id: 20, character_id: 'heroine9', image_pool: 'general', tags: ['기쁨'], curation_rank: 3, short_description: '', situation: '' },
+    { image_id: 21, character_id: 'heroine9', image_pool: 'general', tags: ['기쁨'], curation_rank: 3, short_description: '', situation: '' }
+  ];
+  const result = selectCharacterImageCandidates(catalog, { characterId: 'heroine9', slots: 1, sexualSignal: false, sceneText, characters: {}, lastImageId: 20 });
+  assert.equal(result.selected[0].image_id, 21);
+});
+
+test('selectCharacterImageCandidates can still pick the last-shown image when no competitor exists', () => {
+  const sceneText = buildImageSceneText('그녀가 활짝 웃었다', '');
+  const catalog = [
+    { image_id: 30, character_id: 'heroine9', image_pool: 'general', tags: ['기쁨'], curation_rank: 1, short_description: '', situation: '' }
+  ];
+  const result = selectCharacterImageCandidates(catalog, { characterId: 'heroine9', slots: 1, sexualSignal: false, sceneText, characters: {}, lastImageId: 30 });
+  assert.equal(result.selected[0].image_id, 30);
+});
+
+test('selectTopImageCandidates never exceeds totalLimit, has no duplicate image_id, and only includes candidate characters', () => {
+  const catalog = [
+    ...makeShortlistImages('heroine1', 40, 1000),
+    ...makeShortlistImages('heroine9', 40, 2000),
+    ...makeShortlistImages('heroine4', 40, 3000),
+    ...makeShortlistImages('heroine2', 10, 4000)
+  ];
+  const result = selectTopImageCandidates(catalog, {
+    candidateCharacterIds: ['heroine1', 'heroine9', 'heroine4'],
+    narrativeText: '평범한 하루였다', playerInput: '', lastImageId: null, characters: {}, totalLimit: 12
+  });
+  assert.ok(result.length <= 12);
+  const ids = result.map(img => img.image_id);
+  assert.equal(new Set(ids).size, ids.length);
+  assert.ok(result.every(img => ['heroine1', 'heroine9', 'heroine4'].includes(img.character_id)));
+});
+
+test('selectTopImageCandidates is deterministic for identical input', () => {
+  const catalog = [...makeShortlistImages('heroine1', 40, 1000), ...makeShortlistImages('heroine9', 40, 2000)];
+  const options = { candidateCharacterIds: ['heroine1', 'heroine9'], narrativeText: '평범한 하루였다', playerInput: '', lastImageId: null, characters: {}, totalLimit: 12 };
+  assert.deepEqual(selectTopImageCandidates(catalog, options), selectTopImageCandidates(catalog, options));
+});
+
+test('selectCharacterImageCandidates guarantees at least one general image for slots=1 even under an obvious sexual signal', () => {
+  const catalog = [
+    { image_id: 1, character_id: 'heroine9', image_pool: 'general', tags: [], curation_rank: 1, short_description: '', situation: '' },
+    { image_id: 2, character_id: 'heroine9', image_pool: 'sex', tags: [], curation_rank: 1, short_description: '', situation: '' }
+  ];
+  const result = selectCharacterImageCandidates(catalog, { characterId: 'heroine9', slots: 1, sexualSignal: true, sceneText: '', characters: {}, lastImageId: null });
+  assert.equal(result.selected.length, 1);
+  assert.equal(result.selected[0].image_pool, 'general');
+});
+
+test('image_pool is the source of truth over legacy is_sexual when bucketing general vs sex candidates', () => {
+  const catalog = [
+    { image_id: 1, character_id: 'heroine9', image_pool: 'sex', is_sexual: false, tags: [], curation_rank: 1, short_description: '', situation: '' },
+    { image_id: 2, character_id: 'heroine9', image_pool: 'general', is_sexual: true, tags: [], curation_rank: 1, short_description: '', situation: '' }
+  ];
+  const result = selectCharacterImageCandidates(catalog, { characterId: 'heroine9', slots: 1, sexualSignal: false, sceneText: '', characters: {}, lastImageId: null });
+  assert.equal(result.selected[0].image_id, 2);
+});
+
+test('selectCharacterImageCandidates excludes hypnosis_onset/heart_eyes scene_role images even when they would otherwise score highest', () => {
+  const sceneText = buildImageSceneText('그녀가 최면에 빠져들며 활짝 웃었다', '');
+  const catalog = [
+    { image_id: 1, character_id: 'heroine9', image_pool: 'general', tags: ['기쁨'], curation_rank: 1, scene_role: 'hypnosis_onset', short_description: '', situation: '' },
+    { image_id: 2, character_id: 'heroine9', image_pool: 'general', tags: [], curation_rank: 9, scene_role: null, short_description: '', situation: '' }
+  ];
+  const result = selectCharacterImageCandidates(catalog, { characterId: 'heroine9', slots: 1, sexualSignal: false, sceneText, characters: {}, lastImageId: null });
+  assert.equal(result.selected.length, 1);
+  assert.equal(result.selected[0].image_id, 2);
+});
+
+test('hasMismatchedRegisteredCharacterName flags a row whose description contains a different registered NPC\'s full name', () => {
+  const characters = { heroine1: { name: '한소영' }, heroine4: { name: '배수진' } };
+  const badRow = { character_id: 'heroine1', short_description: '배수진과 함께 있는 모습', situation: '' };
+  assert.equal(hasMismatchedRegisteredCharacterName(badRow, characters), true);
+});
+
+test('hasMismatchedRegisteredCharacterName keeps a row that only mentions its own character name', () => {
+  const characters = { heroine1: { name: '한소영' }, heroine4: { name: '배수진' } };
+  const ownRow = { character_id: 'heroine1', short_description: '한소영이 웃고 있는 모습', situation: '' };
+  assert.equal(hasMismatchedRegisteredCharacterName(ownRow, characters), false);
+});
+
+test('hasMismatchedRegisteredCharacterName does not exclude unregistered plain-person mentions', () => {
+  const characters = { heroine1: { name: '한소영' } };
+  const row = { character_id: 'heroine1', short_description: '지나가는 행인이 그녀를 바라본다', situation: '' };
+  assert.equal(hasMismatchedRegisteredCharacterName(row, characters), false);
+});
+
+test('selectCharacterImageCandidates excludes a row whose metadata contains another registered NPC\'s name (the heroine1/배수진 case)', () => {
+  const characters = { heroine1: { name: '한소영' }, heroine4: { name: '배수진' } };
+  const catalog = [
+    { image_id: 1, character_id: 'heroine1', image_pool: 'general', short_description: '배수진과 함께 있는 모습', situation: '', tags: [], curation_rank: 1 },
+    { image_id: 2, character_id: 'heroine1', image_pool: 'general', short_description: '한소영이 웃고 있는 모습', situation: '', tags: [], curation_rank: 9 }
+  ];
+  const result = selectCharacterImageCandidates(catalog, { characterId: 'heroine1', slots: 2, sexualSignal: false, sceneText: '', characters, lastImageId: null });
+  const ids = result.selected.map(img => img.image_id);
+  assert.ok(!ids.includes(1));
+  assert.ok(ids.includes(2));
+});
+
+test('buildExtractPrompt includes the IMAGE CANDIDATE CONTRACT section and the bounded image_id schema line', () => {
+  const prompt = buildExtractPrompt('서사', '입력', { master: {}, save: {} }, [], 1);
+  assert.match(prompt, /\[IMAGE CANDIDATE CONTRACT\]/);
+  assert.match(prompt, /후보 목록에 없는 image_id를 만들거나 추측하지 않는다/);
+  assert.match(prompt, /scene_role 특수 이미지는 Worker가 Commit 단계에서 별도로 결정하므로 여기서 추측하지 않는다/);
+  assert.match(prompt, /"image_id": "후보 목록 안의 image_id 또는 null"/);
+});
+
+test('/api/extract shortlists a large curated catalog to at most 12 images and logs a separate gamebuilder_image_shortlist diagnostic without mixing into timing', async () => {
+  const originalFetch = globalThis.fetch;
+  const originalLog = console.log;
+  const logs = [];
+  console.log = (...args) => { logs.push(args.join(' ')); };
+  let deepseekImagesSent;
+  globalThis.fetch = async (url, init = {}) => {
+    const requestUrl = String(url);
+    if (requestUrl.includes('/rpc/get_extract_context')) {
+      return new Response(JSON.stringify({
+        turn_count: 5,
+        master: { characters: { heroine1: { name: '한소영' }, heroine9: { name: '박소현' } } },
+        save: { last_image_id: null }
+      }), { headers: { 'content-type': 'application/json' } });
+    }
+    if (requestUrl.includes('/rpc/get_image_catalog_for_characters')) {
+      const images = [
+        ...makeShortlistImages('heroine1', 35, 1000, { image_pool: undefined, is_sexual: false }),
+        ...makeShortlistImages('heroine9', 30, 2000, { image_pool: undefined, is_sexual: false })
+      ];
+      return new Response(JSON.stringify(images), { headers: { 'content-type': 'application/json' } });
+    }
+    if (requestUrl.includes('api.deepseek.com')) {
+      const body = JSON.parse(init.body);
+      const content = body.messages[0].content;
+      const startMarker = '[이미지 라이브러리]\n';
+      const start = content.indexOf(startMarker) + startMarker.length;
+      const end = content.indexOf('\n\n[JSON', start);
+      deepseekImagesSent = JSON.parse(content.slice(start, end));
+      return new Response(JSON.stringify({
+        choices: [{ message: { content: JSON.stringify({ character_id: 'heroine1', npcs_present: ['heroine1', 'heroine9'] }) }, finish_reason: 'stop' }]
+      }), { headers: { 'content-type': 'application/json' } });
+    }
+    throw new Error(`unexpected fetch: ${requestUrl}`);
+  };
+  try {
+    const response = await worker.fetch(apiRequest('/api/extract', {
+      game_id: 'test-game', narrative_text: '한소영과 박소현이 함께 있었다.', player_input: ''
+    }), { DEEPSEEK_API_KEY: 'test' });
+    assert.equal(response.status, 200);
+    assert.ok(deepseekImagesSent.length <= 12);
+
+    const shortlistLog = logs
+      .map(line => { try { return JSON.parse(line); } catch { return null; } })
+      .find(entry => entry && entry.event === 'gamebuilder_image_shortlist');
+    assert.ok(shortlistLog);
+    assert.equal(shortlistLog.image_catalog_count, 65);
+    assert.ok(shortlistLog.image_shortlist_count <= 12);
+    assert.equal(shortlistLog.image_shortlist_count, deepseekImagesSent.length);
+    assert.ok(shortlistLog.image_shortlist_by_character.heroine1 >= 1);
+    assert.equal(shortlistLog.timing, undefined);
+  } finally {
+    globalThis.fetch = originalFetch;
+    console.log = originalLog;
+  }
+});
+
+test('selectValidatedShortlistImageId approves a requested ID that is inside the shortlist with a matching pool', () => {
+  const shortlist = [
+    { image_id: 1, character_id: 'heroine9', image_pool: 'general' },
+    { image_id: 2, character_id: 'heroine9', image_pool: 'general' }
+  ];
+  const result = selectValidatedShortlistImageId(shortlist, shortlist, { characterId: 'heroine9', requestedId: 2, previousId: null, isSexual: false });
+  assert.equal(result, 2);
+});
+
+test('selectValidatedShortlistImageId never approves an ID that exists in the full catalog but not the shortlist, falling back to the shortlist pool leader', () => {
+  const shortlist = [
+    { image_id: 1, character_id: 'heroine9', image_pool: 'general' },
+    { image_id: 2, character_id: 'heroine9', image_pool: 'general' }
+  ];
+  const fullCatalog = [...shortlist, { image_id: 3, character_id: 'heroine9', image_pool: 'general' }];
+  const result = selectValidatedShortlistImageId(shortlist, fullCatalog, { characterId: 'heroine9', requestedId: 3, previousId: null, isSexual: false });
+  assert.equal(result, 1);
+});
+
+test('selectValidatedShortlistImageId falls back to the shortlist pool leader for a nonexistent requested ID', () => {
+  const shortlist = [{ image_id: 5, character_id: 'heroine9', image_pool: 'sex' }];
+  const result = selectValidatedShortlistImageId(shortlist, shortlist, { characterId: 'heroine9', requestedId: 999999, previousId: null, isSexual: true });
+  assert.equal(result, 5);
+});
+
+test('selectValidatedShortlistImageId returns null for narrator or a missing characterId', () => {
+  assert.equal(selectValidatedShortlistImageId([], [], { characterId: 'narrator', requestedId: 1, previousId: null, isSexual: false }), null);
+  assert.equal(selectValidatedShortlistImageId([], [], { characterId: null, requestedId: 1, previousId: null, isSexual: false }), null);
+});
+
+test('selectValidatedShortlistImageId rejects a requested ID belonging to a different character', () => {
+  const shortlist = [{ image_id: 1, character_id: 'heroine1', image_pool: 'general' }];
+  const result = selectValidatedShortlistImageId(shortlist, shortlist, { characterId: 'heroine9', requestedId: 1, previousId: null, isSexual: false });
+  assert.equal(result, null);
+});
+
+test('selectValidatedShortlistImageId falls back to the matching pool leader when the requested ID is in the shortlist but its pool does not match', () => {
+  const shortlist = [
+    { image_id: 1, character_id: 'heroine9', image_pool: 'sex' },
+    { image_id: 2, character_id: 'heroine9', image_pool: 'general' }
+  ];
+  const result = selectValidatedShortlistImageId(shortlist, shortlist, { characterId: 'heroine9', requestedId: 1, previousId: null, isSexual: false });
+  assert.equal(result, 2);
+});
+
+test('selectValidatedShortlistImageId falls back to selectImageId(fullCatalog...) when the shortlist is empty', () => {
+  const fullCatalog = [{ image_id: 7, character_id: 'heroine9', image_pool: 'general', curation_rank: 1 }];
+  const result = selectValidatedShortlistImageId([], fullCatalog, { characterId: 'heroine9', requestedId: 999, previousId: null, isSexual: false });
+  assert.equal(result, 7);
+});
+
+test('/api/commit-turn: a triggered scene_role image always wins over the recomputed shortlist', async () => {
+  const originalFetch = globalThis.fetch;
+  let committedPatch;
+  globalThis.fetch = async (url, init = {}) => {
+    const requestUrl = String(url);
+    if (requestUrl.includes('/rpc/get_commit_context')) {
+      return new Response(JSON.stringify({
+        turn_count: 10,
+        master: { characters: { heroine1: { name: '한소영' } } },
+        save: {}
+      }), { headers: { 'content-type': 'application/json' } });
+    }
+    if (requestUrl.includes('/rpc/get_image_catalog_for_characters')) {
+      return new Response(JSON.stringify([
+        { id: 501, character_id: 'heroine1', image_pool: 'general', scene_role: 'hypnosis_onset', curation_rank: 1, tags: ['기쁨'] },
+        { id: 502, character_id: 'heroine1', image_pool: 'general', scene_role: null, curation_rank: 1, tags: ['기쁨'] }
+      ]), { headers: { 'content-type': 'application/json' } });
+    }
+    if (requestUrl.includes('/rpc/commit_turn')) {
+      committedPatch = JSON.parse(init.body).p_patch;
+      return new Response(JSON.stringify({ status: 'committed', turn_count: 11 }), { headers: { 'content-type': 'application/json' } });
+    }
+    throw new Error(`unexpected fetch: ${requestUrl}`);
+  };
+  try {
+    const response = await worker.fetch(apiRequest('/api/commit-turn', {
+      game_id: 'test-game', turn_number: 11, content: '한소영이 활짝 웃었다.', player_input: '',
+      extract: {
+        character_id: 'heroine1', npcs_present: ['heroine1'], is_sexual: false, image_id: 502,
+        suggestion_action: { action: 'activate', character_id: 'heroine1', content: '최면 유도', strength: 'surface' }
+      }
+    }), { SUPABASE_SECRET_KEY: 'test' });
+    assert.equal(response.status, 200);
+    assert.equal(committedPatch.last_image_id, 501);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
 });

@@ -395,10 +395,33 @@ async function handleExtract(req, env) {
   }
   timing.image_catalog_rpc_ms = Date.now() - t1;
 
+  const fullImageCatalog = flattenImageCatalog(images);
+  const shortlistedImages = selectTopImageCandidates(fullImageCatalog, {
+    candidateCharacterIds: candidateIds,
+    narrativeText: narrative_text,
+    playerInput: player_input,
+    lastImageId: ctx?.save?.last_image_id,
+    characters: ctx?.master?.characters || {},
+    totalLimit: 12
+  });
+
   const nextTurn = (ctx?.turn_count ?? 0) + 1;
   const t2 = Date.now();
-  const prompt = buildExtractPrompt(narrative_text, player_input, withSetupCompatibility(ctx), flattenImageCatalog(images), nextTurn);
+  const prompt = buildExtractPrompt(narrative_text, player_input, withSetupCompatibility(ctx), shortlistedImages, nextTurn);
   timing.prompt_build_ms = Date.now() - t2;
+
+  const shortlistByCharacter = {};
+  for (const img of shortlistedImages) {
+    shortlistByCharacter[img.character_id] = (shortlistByCharacter[img.character_id] || 0) + 1;
+  }
+  console.log(JSON.stringify({
+    event: 'gamebuilder_image_shortlist',
+    request_id: requestId,
+    game_id,
+    image_catalog_count: fullImageCatalog.length,
+    image_shortlist_count: shortlistedImages.length,
+    image_shortlist_by_character: shortlistByCharacter
+  }));
 
   let result;
   try {
@@ -562,7 +585,31 @@ async function handleCommitTurn(req, env) {
   const specialImageId = imageSceneRole
     ? selectSceneRoleImageId(imageCatalog, safeExtract.character_id, imageSceneRole)
     : null;
-  safeExtract.image_id = specialImageId ?? selectImageId(imageCatalog, safeExtract.character_id, safeExtract.image_id, ctx?.save?.last_image_id, safeExtract.is_sexual);
+
+  // Never trust extract.image_id directly: recompute the same NPC's shortlist
+  // with the same candidateIds/slot rules used at Extract time, and only
+  // approve a requested ID that lands inside it with a matching pool.
+  const candidateIds = detectRegisteredCharacterIds(content, player_input, ctx?.master?.characters, ctx?.save?.last_character_id);
+  const commitSceneText = buildImageSceneText(content, player_input);
+  const commitSexualSignal = hasObviousSexualSceneSignals(content, player_input);
+  const targetAllocation = allocateImageCandidateSlots(candidateIds, 12).find(a => a.characterId === safeExtract.character_id);
+  const characterShortlist = targetAllocation
+    ? selectCharacterImageCandidates(imageCatalog, {
+        characterId: safeExtract.character_id,
+        slots: targetAllocation.slots,
+        sexualSignal: commitSexualSignal,
+        sceneText: commitSceneText,
+        characters: ctx?.master?.characters || {},
+        lastImageId: ctx?.save?.last_image_id
+      }).selected
+    : [];
+
+  safeExtract.image_id = specialImageId ?? selectValidatedShortlistImageId(characterShortlist, imageCatalog, {
+    characterId: safeExtract.character_id,
+    requestedId: safeExtract.image_id,
+    previousId: ctx?.save?.last_image_id,
+    isSexual: safeExtract.is_sexual
+  });
   patch.last_image_id = safeExtract.image_id ?? null;
 
   const t2 = Date.now();
@@ -858,6 +905,16 @@ npc_stat_changes만 반환한다. 서사에 숫자가 없어도 대사·행동·
 2. image_library에서 character_id+is_sexual(또는 image_pool) 일치 항목만 후보로 본다. short_description과 tags가 있으면 situation보다 먼저 참고해 현재 장면에 가장 맞는 이미지를 고르고, 없으면 기존처럼 situation으로만 매칭한다. 후보 없으면 null.
 3. scene_role=hypnosis_onset 이미지는 실제 최면 반응·암시 성공이 발생한 장면 전용이다. scene_role=heart_eyes 이미지는 높은 호감이나 깊은 최면·순응 상태의 애정·황홀 반응 전용이다. 단순 계획이나 평범한 대화에는 고르지 마라.
 
+[IMAGE CANDIDATE CONTRACT]
+- 아래 이미지 라이브러리는 Worker가 현재 장면과 등록 NPC 기준으로 최대 12장까지 축소한 후보 목록이다.
+- 후보 목록에 없는 image_id를 만들거나 추측하지 않는다.
+- character_id와 같은 캐릭터의 이미지만 고른다.
+- is_sexual=false이면 general 후보만 고른다.
+- is_sexual=true이면 sex 후보만 고른다.
+- situation, short_description, tags가 현재 장면과 가장 가까운 후보를 고른다.
+- 완전히 적절한 후보가 없으면 image_id=null을 반환한다.
+- scene_role 특수 이미지는 Worker가 Commit 단계에서 별도로 결정하므로 여기서 추측하지 않는다.
+
 [플레이어의 이번 원본 입력]
 ${typeof playerInput === 'string' && playerInput.trim() ? playerInput : '(없음)'}
 
@@ -889,7 +946,7 @@ ${JSON.stringify(imageCatalog)}
   "choices": ["서사의 선택지를 그대로 옮겨라"],
   "dialogue_lines": [{"speaker": "", "text": "", "direction": ""}],
   "image_reasoning": "is_sexual 판단 근거 1문장",
-  "image_id": "is_sexual 판단 유지 → image_library 후보 중 situation 매칭 → image_id. 없으면 null."
+  "image_id": "후보 목록 안의 image_id 또는 null"
 }`;
 }
 
@@ -1590,6 +1647,282 @@ function selectImageId(catalog, characterId, requestedId, previousId, isSexual) 
   return previous ? Number(previous.image_id ?? previous.id) : null;
 }
 
+// ─────────────────────────────────────────────
+// Extract 이미지 후보 축소 (최대 12장 shortlist)
+// ─────────────────────────────────────────────
+
+// Only explicit, unambiguous sexual-action words — never emotion/affection
+// words — so a warm or blushing scene never gets misread as a sex scene.
+const EXPLICIT_SEXUAL_ACTION_KEYWORDS = [
+  '삽입', '펠라티오', '커닐링구스', '애널', '항문섹스', '질내사정', '사정',
+  '오르가즘', '절정', '딥스로트', '피스톤', '자위', '성기'
+];
+
+// Small, curated alias map matched to this project's actual curated tags —
+// not a general emotion engine. Extend only when new curated tags appear.
+const IMAGE_TAG_ALIASES = {
+  '기쁨': ['기쁨', '기뻐', '미소', '웃'],
+  '당황': ['당황', '놀라', '황급', '어쩔 줄'],
+  '수줍음': ['수줍', '부끄', '머뭇'],
+  '홍조': ['홍조', '얼굴을 붉', '뺨을 붉', '볼이 붉'],
+  '분노': ['분노', '화내', '노려', '짜증', '토라'],
+  '슬픔': ['슬프', '눈물', '울먹', '겁에 질', '두려'],
+  '업무': ['업무', '차트', '데스크', '진료', '간호'],
+  '밀착': ['밀착', '가까이', '끌어안', '포옹', '몸을 붙']
+};
+
+const IMAGE_DESCRIPTION_STOPWORDS = new Set([
+  '모습', '장면', '표정', '느낌', '상태', '있다', '하는', '있는', '이다',
+  '한다', '되어', '것이다', '것', '수', '등', '중이다', '채로'
+]);
+
+// Search-only normalization: lowercase, strip punctuation to spaces, collapse
+// whitespace. The original narrative/input text is never altered elsewhere.
+function buildImageSceneText(narrativeText, playerInput) {
+  const raw = `${typeof narrativeText === 'string' ? narrativeText : ''}\n${typeof playerInput === 'string' ? playerInput : ''}`;
+  return raw.toLowerCase().replace(/[^\p{L}\p{N}\s]/gu, ' ').replace(/\s+/g, ' ').trim();
+}
+
+// Deliberately narrow: true only on explicit sexual-action vocabulary.
+// Affection, blushing, smiling, or closeness alone must stay false.
+function hasObviousSexualSceneSignals(narrativeText, playerInput) {
+  const sceneText = buildImageSceneText(narrativeText, playerInput);
+  if (!sceneText) return false;
+  return EXPLICIT_SEXUAL_ACTION_KEYWORDS.some(keyword => sceneText.includes(keyword));
+}
+
+function tokenizeImageDescription(text, characterName) {
+  if (typeof text !== 'string' || !text.trim()) return [];
+  const cleaned = text.toLowerCase().replace(/[^\p{L}\p{N}\s]/gu, ' ');
+  return cleaned.split(/\s+/)
+    .map(token => token.trim())
+    .filter(token => token.length >= 2)
+    .filter(token => !IMAGE_DESCRIPTION_STOPWORDS.has(token))
+    .filter(token => !characterName || token !== characterName.toLowerCase());
+}
+
+function scoreImageTags(tags, sceneText) {
+  if (!Array.isArray(tags) || !tags.length || !sceneText) return 0;
+  let score = 0;
+  for (const tag of tags) {
+    if (typeof tag !== 'string' || !tag) continue;
+    const aliases = IMAGE_TAG_ALIASES[tag] || [tag];
+    if (aliases.some(alias => sceneText.includes(alias.toLowerCase()))) score += 30;
+  }
+  return Math.min(90, score);
+}
+
+function scoreImageDescription(image, sceneText, characterName) {
+  if (!sceneText) return 0;
+  const tokens = new Set([
+    ...tokenizeImageDescription(image?.short_description, characterName),
+    ...tokenizeImageDescription(image?.situation, characterName)
+  ]);
+  let score = 0;
+  for (const token of tokens) {
+    if (sceneText.includes(token)) score += 3;
+  }
+  return Math.min(18, score);
+}
+
+// Tags are the primary relevance signal, description tokens a lighter
+// secondary signal, and repeating the last-shown image is discouraged (but
+// not forbidden — a strong tag match can still bring it back).
+function scoreImageCandidate(image, { sceneText = '', lastImageId = null, characterName = '' } = {}) {
+  let score = 0;
+  score += scoreImageTags(image?.tags, sceneText);
+  score += scoreImageDescription(image, sceneText, characterName);
+  if (lastImageId !== null && lastImageId !== undefined && Number(image?.image_id ?? image?.id) === Number(lastImageId)) {
+    score -= 25;
+  }
+  return score;
+}
+
+// A row whose own metadata mentions another registered heroine's exact name
+// is almost certainly mis-tagged/shared data; excluding it here protects the
+// single-heroine side panel from showing a different character's image.
+function hasMismatchedRegisteredCharacterName(image, characters = {}) {
+  const ownId = image?.character_id;
+  const text = `${typeof image?.short_description === 'string' ? image.short_description : ''} ${typeof image?.situation === 'string' ? image.situation : ''}`;
+  if (!text.trim()) return false;
+  for (const [id, character] of Object.entries(isPlainObject(characters) ? characters : {})) {
+    if (id === ownId) continue;
+    const name = character?.name || character?.['이름'];
+    if (typeof name === 'string' && name && text.includes(name)) return true;
+  }
+  return false;
+}
+
+function compareScoredImages(a, b, lastImageId) {
+  if (b.score !== a.score) return b.score - a.score;
+  const aRepeat = Number(a.img.image_id ?? a.img.id) === Number(lastImageId) ? 1 : 0;
+  const bRepeat = Number(b.img.image_id ?? b.img.id) === Number(lastImageId) ? 1 : 0;
+  if (aRepeat !== bRepeat) return aRepeat - bRepeat;
+  const aRank = Number.isInteger(a.img.curation_rank) ? a.img.curation_rank : Infinity;
+  const bRank = Number.isInteger(b.img.curation_rank) ? b.img.curation_rank : Infinity;
+  if (aRank !== bRank) return aRank - bRank;
+  return Number(a.img.image_id ?? a.img.id) - Number(b.img.image_id ?? b.img.id);
+}
+
+// 1 candidate -> all slots; 2 -> ~2/3, 1/3; 3 -> 1/2 first, remainder split
+// evenly — the first (highest-priority, e.g. explicitly-addressed) NPC gets
+// the most slots, everyone else keeps a guaranteed minimum.
+function allocateImageCandidateSlots(candidateCharacterIds, totalLimit = 12) {
+  const ids = Array.isArray(candidateCharacterIds) ? candidateCharacterIds.filter(Boolean).slice(0, 3) : [];
+  if (!ids.length) return [];
+  if (ids.length === 1) {
+    return [{ characterId: ids[0], slots: totalLimit }];
+  }
+  if (ids.length === 2) {
+    const first = Math.round(totalLimit * 2 / 3);
+    return [
+      { characterId: ids[0], slots: first },
+      { characterId: ids[1], slots: totalLimit - first }
+    ];
+  }
+  const first = Math.round(totalLimit / 2);
+  const remaining = totalLimit - first;
+  const base = Math.floor(remaining / 2);
+  const extra = remaining - base * 2;
+  return [
+    { characterId: ids[0], slots: first },
+    { characterId: ids[1], slots: base + (extra > 0 ? 1 : 0) },
+    { characterId: ids[2], slots: base }
+  ];
+}
+
+function allocateImagePoolSlots(slots, sexualSignal) {
+  if (slots <= 0) return { generalSlots: 0, sexSlots: 0 };
+  const generalRatio = sexualSignal ? 1 / 3 : 2 / 3;
+  const generalSlots = Math.max(0, Math.min(slots, Math.round(slots * generalRatio)));
+  return { generalSlots, sexSlots: slots - generalSlots };
+}
+
+// Selects one NPC's shortlist: excludes scene_role images (those are
+// Commit-only deterministic picks) and mismatched-metadata rows, applies the
+// general/sex slot split, then borrows across pools/candidates on shortfall.
+function selectCharacterImageCandidates(catalog, options = {}) {
+  const { characterId, slots = 0, sexualSignal = false, sceneText = '', characters = {}, lastImageId = null } = options;
+  if (!characterId || characterId === 'narrator' || slots <= 0) return { selected: [], leftover: [] };
+
+  const characterName = characters?.[characterId]?.name || characters?.[characterId]?.['이름'] || '';
+  const ownImages = flattenImageCatalog(catalog).filter(img => img?.character_id === characterId
+    && normalizeSceneRole(img?.scene_role) === null
+    && !hasMismatchedRegisteredCharacterName(img, characters));
+
+  const scored = ownImages.map(img => ({ img, score: scoreImageCandidate(img, { sceneText, lastImageId, characterName }) }));
+  const sortList = (list) => [...list].sort((a, b) => compareScoredImages(a, b, lastImageId));
+
+  const generalPool = sortList(scored.filter(s => resolveIsSexual(s.img) !== true));
+  const sexPool = sortList(scored.filter(s => resolveIsSexual(s.img) === true));
+
+  let { generalSlots, sexSlots } = allocateImagePoolSlots(slots, sexualSignal);
+  if (generalSlots === 0 && generalPool.length > 0) {
+    generalSlots = 1;
+    sexSlots = Math.max(0, slots - 1);
+  }
+
+  const takenIds = new Set();
+  const takeFrom = (pool, count) => {
+    const taken = [];
+    for (const item of pool) {
+      if (taken.length >= count) break;
+      const key = Number(item.img.image_id ?? item.img.id);
+      if (takenIds.has(key)) continue;
+      taken.push(item);
+      takenIds.add(key);
+    }
+    return taken;
+  };
+
+  const takenGeneral = takeFrom(generalPool, generalSlots);
+  const takenSex = takeFrom(sexPool, sexSlots);
+  let selected = [...takenGeneral, ...takenSex];
+
+  const deficit = slots - selected.length;
+  if (deficit > 0) {
+    const remainder = sortList([...generalPool, ...sexPool].filter(item => !takenIds.has(Number(item.img.image_id ?? item.img.id))));
+    selected = selected.concat(takeFrom(remainder, deficit));
+  }
+
+  const leftover = sortList([...generalPool, ...sexPool].filter(item => !takenIds.has(Number(item.img.image_id ?? item.img.id))));
+  return { selected: selected.map(s => s.img), leftover };
+}
+
+// Orchestrates the full shortlist: per-candidate slot allocation, then a
+// second pass that fills any remaining slots (an NPC simply lacking enough
+// images) from other candidates' highest-scoring unused images. Deterministic
+// for identical inputs — no randomness anywhere in the selection.
+function selectTopImageCandidates(fullCatalog, options = {}) {
+  const {
+    candidateCharacterIds = [],
+    narrativeText = '',
+    playerInput = '',
+    lastImageId = null,
+    characters = {},
+    totalLimit = 12
+  } = options;
+
+  const ids = Array.isArray(candidateCharacterIds) ? candidateCharacterIds.filter(Boolean) : [];
+  if (!ids.length) return [];
+
+  const sceneText = buildImageSceneText(narrativeText, playerInput);
+  const sexualSignal = hasObviousSexualSceneSignals(narrativeText, playerInput);
+  const allocations = allocateImageCandidateSlots(ids, totalLimit);
+
+  const perCharacter = allocations.map(({ characterId, slots }) =>
+    selectCharacterImageCandidates(fullCatalog, { characterId, slots, sexualSignal, sceneText, characters, lastImageId })
+  );
+
+  const takenIds = new Set();
+  const combined = [];
+  for (const result of perCharacter) {
+    for (const img of result.selected) {
+      const key = Number(img.image_id ?? img.id);
+      if (!takenIds.has(key)) {
+        combined.push(img);
+        takenIds.add(key);
+      }
+    }
+  }
+
+  if (combined.length < totalLimit) {
+    const pooledLeftover = perCharacter
+      .flatMap(result => result.leftover)
+      .filter(item => !takenIds.has(Number(item.img.image_id ?? item.img.id)))
+      .sort((a, b) => compareScoredImages(a, b, lastImageId));
+    for (const item of pooledLeftover) {
+      if (combined.length >= totalLimit) break;
+      const key = Number(item.img.image_id ?? item.img.id);
+      if (takenIds.has(key)) continue;
+      combined.push(item.img);
+      takenIds.add(key);
+    }
+  }
+
+  return combined.slice(0, totalLimit);
+}
+
+// Commit never trusts extract.image_id at face value: it recomputes the same
+// NPC's shortlist from scratch (same scoring/slot rules) and only approves a
+// requested ID that lands inside it with a matching pool.
+function selectValidatedShortlistImageId(shortlist, fullCatalog, options = {}) {
+  const { characterId, requestedId, previousId, isSexual } = options;
+  if (!characterId || characterId === 'narrator') return null;
+
+  const shortlistForCharacter = (Array.isArray(shortlist) ? shortlist : []).filter(img => img?.character_id === characterId);
+
+  const requested = shortlistForCharacter.find(img => Number(img.image_id ?? img.id) === Number(requestedId));
+  if (requested && resolveIsSexual(requested) === (isSexual === true)) {
+    return Number(requested.image_id ?? requested.id);
+  }
+
+  const poolMatch = shortlistForCharacter.find(img => resolveIsSexual(img) === (isSexual === true));
+  if (poolMatch) return Number(poolMatch.image_id ?? poolMatch.id);
+
+  return selectImageId(fullCatalog, characterId, requestedId, previousId, isSexual);
+}
+
 export {
   buildSavePatch,
   buildExtractPrompt,
@@ -1637,5 +1970,14 @@ export {
   clipHeadTail,
   buildCurrentSceneSection,
   detectExplicitRegisteredNpcMentions,
-  buildExplicitNpcMentionSection
+  buildExplicitNpcMentionSection,
+  buildImageSceneText,
+  hasObviousSexualSceneSignals,
+  scoreImageCandidate,
+  hasMismatchedRegisteredCharacterName,
+  allocateImageCandidateSlots,
+  allocateImagePoolSlots,
+  selectCharacterImageCandidates,
+  selectTopImageCandidates,
+  selectValidatedShortlistImageId
 };

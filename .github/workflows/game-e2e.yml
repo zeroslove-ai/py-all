@@ -29,7 +29,7 @@ on:
         type: string
         default: 'https://game-proxy-v2.zeroslove.workers.dev'
       smoke_game_id:
-        description: '읽기 전용 페이지·context 확인용 게임 ID'
+        description: '읽기 전용 페이지·context 확인용 운영 게임 ID'
         required: true
         type: string
         default: '9ed5b835-9948-4cad-ac25-3ebff7348574'
@@ -37,6 +37,7 @@ on:
         description: 'one_turn 전용 게임 ID. 운영 게임과 같으면 실행이 차단됩니다.'
         required: false
         type: string
+        default: 'c792613f-dc27-4835-9403-dc87d51b9e91'
       player_input:
         description: 'one_turn에서 전송할 입력'
         required: false
@@ -77,7 +78,7 @@ jobs:
       E2E_BASE_URL: ${{ inputs.base_url || 'https://gamebuilder-v2.zeroslove.workers.dev' }}
       E2E_API_BASE: ${{ inputs.api_base || 'https://game-proxy-v2.zeroslove.workers.dev' }}
       E2E_SMOKE_GAME_ID: ${{ inputs.smoke_game_id || '9ed5b835-9948-4cad-ac25-3ebff7348574' }}
-      E2E_TEST_GAME_ID: ${{ inputs.test_game_id || '' }}
+      E2E_TEST_GAME_ID: ${{ inputs.test_game_id || 'c792613f-dc27-4835-9403-dc87d51b9e91' }}
       E2E_PLAYER_INPUT: ${{ inputs.player_input || '현재 상황을 확인하고 차분하게 대화를 이어간다.' }}
       E2E_EXPECTED_VERSION_ID: ${{ inputs.expected_worker_version_id || '' }}
       E2E_VERSION_WAIT_MINUTES: ${{ inputs.version_wait_minutes || '0' }}

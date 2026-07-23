@@ -469,11 +469,18 @@ async function handleExtract(req, env) {
         const repaired = await repairMindMonitor(env, character.name || character['이름'], character['말투'], narrative_text, extract.npc_emotion, validation.errors);
         if (isPlainObject(repaired)) {
           const repairedValidation = validateNpcEmotion(repaired, characterId);
-          if (repairedValidation.ok) {
-            extract.npc_emotion = repaired;
-            validation = repairedValidation;
-            mindMonitorRepaired = true;
+          // Adopt whichever fields the repair actually fixed even if the
+          // repair didn't fully pass — one still-failing field must not
+          // discard a sibling field that already validates cleanly.
+          for (const field of ['surface', 'inner', 'physical_reaction']) {
+            if (!repairedValidation.fieldErrors[field].length) {
+              extract.npc_emotion[field] = repaired[field];
+              validation.fieldErrors[field] = [];
+            }
           }
+          validation.errors = [...validation.fieldErrors.surface, ...validation.fieldErrors.inner, ...validation.fieldErrors.physical_reaction];
+          validation.ok = validation.errors.length === 0;
+          mindMonitorRepaired = true;
         }
       } catch (error) {
         console.error('Mind monitor repair failed:', { request_id: requestId, error: error.message });
@@ -484,7 +491,14 @@ async function handleExtract(req, env) {
   if (!validation.ok) {
     const characterId = extract.character_id;
     const existing = ctx?.save?.npc_emotion?.[characterId];
-    extract.npc_emotion = characterId && characterId !== 'narrator' && isPlainObject(existing) ? existing : {};
+    const fallbackAvailable = Boolean(characterId) && characterId !== 'narrator' && isPlainObject(existing);
+    // Only the field(s) that actually failed fall back — a valid surface
+    // must survive even when inner (or vice versa) still fails.
+    for (const field of ['surface', 'inner', 'physical_reaction']) {
+      if (validation.fieldErrors[field].length) {
+        extract.npc_emotion[field] = fallbackAvailable && typeof existing[field] === 'string' ? existing[field] : '';
+      }
+    }
     extract.mind_monitor_error = validation.errors;
     console.error('Mind monitor validation failed after repair:', { request_id: requestId, characterId, errors: validation.errors });
   }
@@ -1285,27 +1299,40 @@ function mindMonologueLength(value = '') {
   return String(value).replace(/[\s"“”'‘’]/g, '').length;
 }
 
+// Korean regularly drops the subject in genuine first-person speech ("믿긴
+// 하는데, 걱정되네요" needs no 나/저 to read as the speaker's own voice), so
+// requiring an explicit pronoun rejected perfectly natural monologues. The
+// real signal for "this is the narrator describing the NPC, not the NPC
+// speaking" is an explicit third-person subject/object marker.
+const THIRD_PERSON_MONOLOGUE_MARKER = /(?:^|[\s"“”'‘’(（])(?:그는|그녀는|그를|그녀를|그의|그녀의|NPC는|NPC의)(?=[\s.,!?)）]|$)/;
+const ANALYSIS_ONLY_MONOLOGUE = /^(?:[^.。!?]*?(?:상태다|느끼고 있다|생각한다|상태입니다))[.。!?]*$/;
+
 function validateMindMonologue(value, label) {
-  const text = typeof value === 'string' ? value.trim() : '';
+  const raw = typeof value === 'string' ? value.trim() : '';
+  // Quotes are normalized for evaluation, never required — a monologue the
+  // model wrote without wrapping quotes must not be rejected just for that,
+  // and stripping them must never delete the underlying content.
+  const text = raw.replace(/^["“]+/, '').replace(/["”]+$/, '').trim();
   const errors = [];
-  if (!/^“[\s\S]+”$/.test(text)) errors.push(`${label}: quoted first-person monologue required`);
-  if (mindMonologueLength(text) < 40) errors.push(`${label}: ${mindMonologueLength(text)} characters (minimum 40)`);
-  if (!/(?:나|난|나는|내가|내 |저|제가|내게|내가)/.test(text)) errors.push(`${label}: first-person voice required`);
-  const withoutQuotes = text.replace(/["“”]/g, '').trim();
-  if (/^(?:[^.。!?]*?(?:상태다|느끼고 있다|생각한다|상태입니다))[.。!?]*$/.test(withoutQuotes)) errors.push(`${label}: analysis-only text is not allowed`);
+  const length = mindMonologueLength(text);
+  if (length < 40) errors.push(`${label}: ${length} characters (minimum 40)`);
+  if (THIRD_PERSON_MONOLOGUE_MARKER.test(text)) errors.push(`${label}: third-person narration is not allowed, write it as the character's own monologue`);
+  if (ANALYSIS_ONLY_MONOLOGUE.test(text)) errors.push(`${label}: analysis-only text is not allowed`);
   return errors;
 }
 
 function validateNpcEmotion(emotion = {}, characterId = null) {
-  if (!characterId || characterId === 'narrator') return { ok: true, errors: [] };
-  const errors = [
-    ...validateMindMonologue(emotion?.surface, 'surface'),
-    ...validateMindMonologue(emotion?.inner, 'inner')
-  ];
+  const emptyFieldErrors = { surface: [], inner: [], physical_reaction: [] };
+  if (!characterId || characterId === 'narrator') return { ok: true, errors: [], fieldErrors: emptyFieldErrors };
   const physical = typeof emotion?.physical_reaction === 'string' ? emotion.physical_reaction.trim() : '';
   const sentenceCount = physical.split(/[.。!?]+/).map(part => part.trim()).filter(Boolean).length;
-  if (sentenceCount < 2) errors.push(`physical_reaction: ${sentenceCount} sentences (minimum 2)`);
-  return { ok: errors.length === 0, errors };
+  const fieldErrors = {
+    surface: validateMindMonologue(emotion?.surface, 'surface'),
+    inner: validateMindMonologue(emotion?.inner, 'inner'),
+    physical_reaction: sentenceCount < 2 ? [`physical_reaction: ${sentenceCount} sentences (minimum 2)`] : []
+  };
+  const errors = [...fieldErrors.surface, ...fieldErrors.inner, ...fieldErrors.physical_reaction];
+  return { ok: errors.length === 0, errors, fieldErrors };
 }
 
 function buildSavePatch(extract, enginePatch = {}, summaryPlan = null, previousSave = {}, turnNumber = 0, playerInput = '') {

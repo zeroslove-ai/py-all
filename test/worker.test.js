@@ -174,7 +174,9 @@ test('mind monitor requires quoted first-person monologues and two observable se
   };
   assert.equal(mindMonologueLength(valid.surface) >= 40, true);
   assert.deepEqual(validateMindMonologue(valid.surface, 'surface'), []);
-  assert.deepEqual(validateNpcEmotion(valid, 'heroine1'), { ok: true, errors: [] });
+  assert.deepEqual(validateNpcEmotion(valid, 'heroine1'), {
+    ok: true, errors: [], fieldErrors: { surface: [], inner: [], physical_reaction: [] }
+  });
   const invalid = validateNpcEmotion({
     surface: '약간 당황하고 의심스러운 상태다.',
     inner: '낯선 남자에게 호기심과 경계심을 느끼고 있다.',
@@ -183,6 +185,168 @@ test('mind monitor requires quoted first-person monologues and two observable se
   assert.equal(invalid.ok, false);
   assert.match(invalid.errors.join('\n'), /surface: .*minimum 40/);
   assert.match(invalid.errors.join('\n'), /physical_reaction: 1 sentences/);
+});
+
+// ─────────────────────────────────────────────
+// Mind monitor: Korean pro-drop first person, per-field independence
+// ─────────────────────────────────────────────
+
+const NATURAL_DROPPED_SUBJECT_MONOLOGUES = [
+  '“믿긴 하는데, 무슨 일 있는 건 아닌지 걱정되네요. 평소보다 대답이 느리고 눈빛도 약간 흐릿해서 계속 신경이 쓰인다.”',
+  '“갑자기 왜 저러지? 조금 신경 쓰이네. 아까까지는 멀쩡했는데 갑자기 표정이 굳어서 무슨 일인가 싶다.”',
+  '“괜히 신경 쓰이잖아. 그냥 지나가면 될 텐데, 자꾸 눈이 가는 걸 보면 어쩔 수 없나 보다 싶고 마음이 쓰인다.”',
+  '“조금 이상했지만 별일 아니겠지. 요즘 다들 피곤하니까 그런 걸로 예민하게 굴 필요는 없을 것 같다.”'
+];
+
+const THIRD_PERSON_NARRATIONS = [
+  '한소영은 그를 의심하고 있다. 표정에서 그 경계심이 뚜렷하게 드러난다.',
+  '그녀는 잠시 불안함을 느꼈다. 이유는 스스로도 명확히 알지 못했다.',
+  'NPC의 잠재의식이 흔들리기 시작했다. 겉으로는 침착함을 유지하려 애썼다.',
+  '그를 처음 본 순간부터 뭔가 이상하다고 생각했다. 하지만 티는 내지 않았다.'
+];
+
+test('validateMindMonologue accepts natural Korean monologues with a dropped subject (no explicit 나/저 needed)', () => {
+  for (const line of NATURAL_DROPPED_SUBJECT_MONOLOGUES) {
+    assert.deepEqual(validateMindMonologue(line, 'surface'), [], `should pass: ${line}`);
+  }
+});
+
+test('validateMindMonologue still accepts an explicit first-person monologue (나/저 present)', () => {
+  const line = '“나는 이 상황이 낯설지만 침착하게 대응해야 한다고 계속 스스로에게 정말 다짐하듯 되뇌는 중이다.”';
+  assert.deepEqual(validateMindMonologue(line, 'surface'), []);
+});
+
+test('validateMindMonologue rejects narrator/third-person prose even without the old analysis-phrase wording', () => {
+  for (const line of THIRD_PERSON_NARRATIONS) {
+    const errors = validateMindMonologue(line, 'surface');
+    assert.notDeepEqual(errors, [], `should fail: ${line}`);
+    assert.ok(errors.some(e => /third-person|analysis-only/.test(e)), `should reject as third-person/analysis: ${line} -> ${errors}`);
+  }
+});
+
+test('validateMindMonologue normalizes surrounding quotes without requiring or deleting content', () => {
+  const unquoted = NATURAL_DROPPED_SUBJECT_MONOLOGUES[0].replace(/^"|"$/g, '');
+  assert.deepEqual(validateMindMonologue(unquoted, 'surface'), []);
+});
+
+test('validateNpcEmotion keeps surface/inner independent: a bad inner does not fail a valid surface, and vice versa', () => {
+  const surfaceOnly = validateNpcEmotion({
+    surface: NATURAL_DROPPED_SUBJECT_MONOLOGUES[0],
+    inner: '그녀는 잠시 불안함을 느꼈다.',
+    physical_reaction: '그녀가 손을 살짝 움켜쥐었다. 시선을 피하며 옅은 한숨을 내쉬었다.'
+  }, 'heroine1');
+  assert.equal(surfaceOnly.ok, false);
+  assert.deepEqual(surfaceOnly.fieldErrors.surface, []);
+  assert.notDeepEqual(surfaceOnly.fieldErrors.inner, []);
+
+  const innerOnly = validateNpcEmotion({
+    surface: '한소영은 그를 의심하고 있다.',
+    inner: NATURAL_DROPPED_SUBJECT_MONOLOGUES[1],
+    physical_reaction: '그녀가 손을 살짝 움켜쥐었다. 시선을 피하며 옅은 한숨을 내쉬었다.'
+  }, 'heroine1');
+  assert.equal(innerOnly.ok, false);
+  assert.notDeepEqual(innerOnly.fieldErrors.surface, []);
+  assert.deepEqual(innerOnly.fieldErrors.inner, []);
+});
+
+test('handleExtract preserves a validly-generated field when only its sibling field fails validation, instead of blanking both', async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (url, init = {}) => {
+    const requestUrl = String(url);
+    if (requestUrl.includes('/rpc/get_extract_context')) {
+      return new Response(JSON.stringify({
+        turn_count: 1,
+        master: { characters: { heroine1: { name: '한소영', '말투': '차분함' } } },
+        save: {}
+      }), { headers: { 'content-type': 'application/json' } });
+    }
+    if (requestUrl.includes('/rpc/get_image_catalog_for_characters')) {
+      return new Response(JSON.stringify([]), { headers: { 'content-type': 'application/json' } });
+    }
+    if (requestUrl.includes('api.deepseek.com')) {
+      // Extract's own attempt: surface is a naturally-dropped-subject
+      // monologue (must pass), inner is third-person narration (must fail
+      // and fall back), so the repair call fires — return an equally
+      // "surface-good, inner-bad" body from the repair endpoint too, to
+      // confirm the repair path also preserves the already-good field.
+      return new Response(JSON.stringify({
+        choices: [{
+          message: {
+            content: JSON.stringify({
+              character_id: 'heroine1', npcs_present: ['heroine1'],
+              npc_emotion: {
+                surface: NATURAL_DROPPED_SUBJECT_MONOLOGUES[0],
+                inner: '그녀는 잠시 불안함을 느꼈다.',
+                physical_reaction: '그녀가 손을 살짝 움켜쥐었다. 시선을 피하며 옅은 한숨을 내쉬었다.'
+              }
+            })
+          },
+          finish_reason: 'stop'
+        }]
+      }), { headers: { 'content-type': 'application/json' } });
+    }
+    throw new Error(`unexpected fetch: ${requestUrl}`);
+  };
+  try {
+    const response = await worker.fetch(apiRequest('/api/extract', {
+      game_id: 'test-game', narrative_text: '한소영이 대답했다.', player_input: '한소영에게 말을 건다'
+    }), { DEEPSEEK_API_KEY: 'test' });
+    const body = await response.json();
+    assert.equal(response.status, 200);
+    assert.equal(body.extract.npc_emotion.surface, NATURAL_DROPPED_SUBJECT_MONOLOGUES[0]);
+    assert.equal(body.extract.npc_emotion.inner, '');
+    assert.ok(Array.isArray(body.mind_monitor_errors) && body.mind_monitor_errors.some(e => e.startsWith('inner:')));
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('an active-suggestion-free registered NPC turn still keeps all three npc_emotion fields (no active suggestions required)', async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (url, init = {}) => {
+    const requestUrl = String(url);
+    if (requestUrl.includes('/rpc/get_extract_context')) {
+      return new Response(JSON.stringify({
+        turn_count: 1,
+        master: { characters: { heroine1: { name: '한소영', '말투': '차분함' } } },
+        save: {} // no active_suggestions at all
+      }), { headers: { 'content-type': 'application/json' } });
+    }
+    if (requestUrl.includes('/rpc/get_image_catalog_for_characters')) {
+      return new Response(JSON.stringify([]), { headers: { 'content-type': 'application/json' } });
+    }
+    if (requestUrl.includes('api.deepseek.com')) {
+      return new Response(JSON.stringify({
+        choices: [{
+          message: {
+            content: JSON.stringify({
+              character_id: 'heroine1', npcs_present: ['heroine1'],
+              npc_emotion: {
+                surface: NATURAL_DROPPED_SUBJECT_MONOLOGUES[2],
+                inner: NATURAL_DROPPED_SUBJECT_MONOLOGUES[3],
+                physical_reaction: '그녀가 손을 살짝 움켜쥐었다. 시선을 피하며 옅은 한숨을 내쉬었다.'
+              }
+            })
+          },
+          finish_reason: 'stop'
+        }]
+      }), { headers: { 'content-type': 'application/json' } });
+    }
+    throw new Error(`unexpected fetch: ${requestUrl}`);
+  };
+  try {
+    const response = await worker.fetch(apiRequest('/api/extract', {
+      game_id: 'test-game', narrative_text: '한소영이 대답했다.', player_input: '한소영에게 말을 건다'
+    }), { DEEPSEEK_API_KEY: 'test' });
+    const body = await response.json();
+    assert.equal(response.status, 200);
+    assert.equal(body.extract.npc_emotion.surface, NATURAL_DROPPED_SUBJECT_MONOLOGUES[2]);
+    assert.equal(body.extract.npc_emotion.inner, NATURAL_DROPPED_SUBJECT_MONOLOGUES[3]);
+    assert.ok(body.extract.npc_emotion.physical_reaction.length > 0);
+    assert.deepEqual(body.mind_monitor_errors, []);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
 });
 
 test('recent100 boundary is Worker-owned at turns 99, 100 and 101', () => {

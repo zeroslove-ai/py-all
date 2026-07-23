@@ -2075,8 +2075,16 @@ test('the player status panel contract keeps the player monologue mandatory and 
 test('the player status panel contract drops current-target and NPC compliance/resistance display since the sidebar already shows them', () => {
   const prompt = buildStoryPrompt({ master: { characters: {} }, save: { player: {} }, recent_memories: [] }, '계속', 1);
   const content = prompt.messages[0].content;
-  assert.doesNotMatch(content, /🎯 접근 대상/);
+  // 🎯 접근 대상 legitimately appears once, inside the "don't copy the old
+  // layout from recent memories" warning — but never as an active bullet.
+  assert.doesNotMatch(content, /- 🎯 접근 대상/);
   assert.match(content, /현재 접근 대상, NPC 순응도·저항력 등 NPC 수치 요약\(우측 사이드바에 이미 표시되므로 중복이다\)/);
+});
+
+test('the final output contract explicitly forbids copying the old 🎯/📌 panel layout from recent memories of earlier turns', () => {
+  const prompt = buildStoryPrompt({ master: { characters: {} }, save: { player: {} }, recent_memories: [] }, '계속', 1);
+  const content = prompt.messages[0].content;
+  assert.match(content, /past turns may still show 🎯 접근 대상 or 📌 현재 목표 from an older contract; never copy that old layout/);
 });
 
 test('the 🔄 turn-change line is specified as qualitative-only, never a numeric delta', () => {

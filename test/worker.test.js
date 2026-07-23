@@ -34,7 +34,10 @@ import {
   resolveIsSexual,
   normalizeImagePool,
   normalizeTags,
-  parseCurationRank
+  parseCurationRank,
+  normalizeSceneRole,
+  resolveSpecialSceneRole,
+  selectSceneRoleImageId
 } from '../worker/game-proxy-v2.js';
 import worker from '../worker/game-proxy-v2.js';
 
@@ -70,7 +73,7 @@ test('normalizeImageCatalog keeps curated metadata alongside legacy fields', () 
     image_id: 123, situation: '기존 원본 설명',
     short_description: '면회실에서 긴장한 표정으로 앉아 있는 장면',
     tags: ['긴장', '착석', '면회실', '상반신'],
-    image_pool: 'general', is_sexual: false, curation_rank: 1, image_url: null
+    image_pool: 'general', is_sexual: false, curation_rank: 1, scene_role: null, image_url: null
   });
 });
 
@@ -491,6 +494,7 @@ test('extract prompt image library includes curated tags/short_description and e
       short_description: '면회실에서 긴장한 표정으로 앉아 있는 장면',
       tags: ['긴장', '착석', '면회실', '상반신'],
       image_pool: 'general', is_sexual: false, curation_rank: 1,
+      scene_role: 'hypnosis_onset',
       image_url: 'https://example.com/should-not-leak/sujin_slender_malepov.png'
     }],
     1
@@ -499,6 +503,7 @@ test('extract prompt image library includes curated tags/short_description and e
   assert.match(prompt, /"긴장"/);
   assert.match(prompt, /"tags"/);
   assert.match(prompt, /"curation_rank":1/);
+  assert.match(prompt, /"scene_role":"hypnosis_onset"/);
   assert.doesNotMatch(prompt, /image_url/);
   assert.doesNotMatch(prompt, /should-not-leak/);
   assert.doesNotMatch(prompt, /sujin_slender_malepov/);
@@ -935,4 +940,83 @@ test('commit-turn persists first_encounter_stats, suggestion_action, and world_s
   } finally {
     globalThis.fetch = originalFetch;
   }
+});
+
+
+// ─────────────────────────────────────────────
+// Special image scene roles
+// ─────────────────────────────────────────────
+
+test('scene_role accepts only hypnosis_onset and heart_eyes', () => {
+  assert.equal(normalizeSceneRole('hypnosis_onset'), 'hypnosis_onset');
+  assert.equal(normalizeSceneRole('heart_eyes'), 'heart_eyes');
+  assert.equal(normalizeSceneRole('other'), null);
+  assert.equal(normalizeSceneRole(undefined), null);
+});
+
+test('normalizeImageCatalog preserves a valid scene_role and drops an invalid one', () => {
+  const catalog = normalizeImageCatalog([
+    { id: 1, character_id: 'heroine1', scene_role: 'hypnosis_onset' },
+    { id: 2, character_id: 'heroine1', scene_role: 'unknown' }
+  ]);
+  assert.equal(catalog.heroine1[0].scene_role, 'hypnosis_onset');
+  assert.equal(catalog.heroine1[1].scene_role, null);
+});
+
+test('actual suggestion activation or applied hypnosis-depth increase forces hypnosis_onset', () => {
+  const suggestion = resolveSpecialSceneRole({}, {
+    character_id: 'heroine1', is_sexual: false,
+    suggestion_action: { action: 'activate', character_id: 'heroine1' }
+  }, {}, {});
+  assert.equal(suggestion, 'hypnosis_onset');
+
+  const depth = resolveSpecialSceneRole({}, { character_id: 'heroine1', is_sexual: false }, {}, {
+    최면깊이: { delta: 2 }
+  });
+  assert.equal(depth, 'hypnosis_onset');
+});
+
+test('sexual scenes never get replaced by a general special-role image', () => {
+  const role = resolveSpecialSceneRole({}, {
+    character_id: 'heroine1', is_sexual: true,
+    suggestion_action: { action: 'activate', character_id: 'heroine1' }
+  }, {}, { 최면깊이: { delta: 2 } });
+  assert.equal(role, null);
+});
+
+test('heart_eyes is forced only when affinity or deep hypnosis crosses the threshold', () => {
+  const affinity = resolveSpecialSceneRole(
+    { npc_stats: { heroine1: { 호감도: 69, 최면깊이: 10, 순응도: 10 } } },
+    { character_id: 'heroine1', is_sexual: false },
+    { 호감도: 70, 최면깊이: 10, 순응도: 10 },
+    {}
+  );
+  assert.equal(affinity, 'heart_eyes');
+
+  const deep = resolveSpecialSceneRole(
+    { npc_stats: { heroine1: { 호감도: 20, 최면깊이: 69, 순응도: 72 } } },
+    { character_id: 'heroine1', is_sexual: false },
+    { 호감도: 20, 최면깊이: 70, 순응도: 72 },
+    {}
+  );
+  assert.equal(deep, 'heart_eyes');
+
+  const alreadyHigh = resolveSpecialSceneRole(
+    { npc_stats: { heroine1: { 호감도: 75, 최면깊이: 80, 순응도: 80 } } },
+    { character_id: 'heroine1', is_sexual: false },
+    { 호감도: 76, 최면깊이: 81, 순응도: 81 },
+    {}
+  );
+  assert.equal(alreadyHigh, null);
+});
+
+test('selectSceneRoleImageId keeps character and general-pool boundaries and prefers curation rank', () => {
+  const catalog = [
+    { id: 1, character_id: 'heroine1', image_pool: 'general', scene_role: 'hypnosis_onset', curation_rank: 5 },
+    { id: 2, character_id: 'heroine1', image_pool: 'general', scene_role: 'hypnosis_onset', curation_rank: 1 },
+    { id: 3, character_id: 'heroine2', image_pool: 'general', scene_role: 'hypnosis_onset', curation_rank: 0 },
+    { id: 4, character_id: 'heroine1', image_pool: 'sex', scene_role: 'hypnosis_onset', curation_rank: 0 }
+  ];
+  assert.equal(selectSceneRoleImageId(catalog, 'heroine1', 'hypnosis_onset'), 2);
+  assert.equal(selectSceneRoleImageId(catalog, 'heroine1', 'heart_eyes'), null);
 });

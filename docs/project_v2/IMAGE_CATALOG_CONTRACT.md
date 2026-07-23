@@ -70,3 +70,13 @@ Worker(`worker/game-proxy-v2.js`)가 `image_library`/`get_context().image_catalo
 
 - 현재 NPC 이미지 후보를 8~12장으로 줄이는 최종 축소 (Extract 경량화 단계에서 처리)
 - Story/Extract 토큰 상한 조정
+
+
+## 특수 장면 역할(scene_role)
+
+DB는 각 캐릭터의 일반 이미지 중 최대 한 장씩 다음 역할을 지정할 수 있다.
+
+- `hypnosis_onset`: 실제 최면 반응이 시작되거나 암시가 성공한 턴에 1회 우선 표시
+- `heart_eyes`: 호감도 70 최초 도달 또는 최면깊이·순응도 70 동시 최초 도달 시 1회 우선 표시
+
+성행위 장면은 sex 풀 이미지가 항상 우선하며 일반 특수 이미지로 대체하지 않는다. Worker가 Commit 시 최종 이미지 ID를 결정해 `last_image_id`에 저장하고, 프론트와 `/api/image`는 그 저장값을 사용한다. 임계값을 이미 넘은 이후의 일반 턴에는 특수 이미지를 계속 강제하지 않고 Extract의 장면 매칭을 따른다.

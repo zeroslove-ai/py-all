@@ -265,13 +265,18 @@ async function handleImage(req, env) {
     return jsonResponse({ error: 'game_id and character_id required' }, 400);
   }
   const ctx = await supabaseRpc(env, 'get_context', { p_game_id: game_id, p_recent_count: 1 });
-  const safeImageId = selectImageId(flattenImageCatalog(ctx?.image_catalog || []), character_id, image_id, ctx?.save?.last_image_id, false);
+  const catalog = flattenImageCatalog(ctx?.image_catalog || []);
+  const persistedImageId = ctx?.save?.last_character_id === character_id ? ctx?.save?.last_image_id : null;
+  const preferredImageId = persistedImageId ?? image_id;
+  const preferred = catalog.find(img => img?.character_id === character_id && Number(img.image_id ?? img.id) === Number(preferredImageId));
+  const preferredSexual = preferred ? resolveIsSexual(preferred) : false;
+  const safeImageId = selectImageId(catalog, character_id, preferredImageId, persistedImageId, preferredSexual);
   const result = await supabaseRpc(env, 'get_character_image', {
     p_game_id: game_id,
     p_character_id: character_id,
     p_image_id: safeImageId
   });
-  return jsonResponse({ image_url: result });
+  return jsonResponse({ image_url: result, image_id: safeImageId });
 }
 
 async function handleTts(req, env) {
@@ -310,10 +315,21 @@ async function handleCommitTurn(req, env) {
   const rawCtx = await supabaseRpc(env, 'get_context', { p_game_id: game_id, p_recent_count: 1 });
   const ctx = withSetupCompatibility(rawCtx);
   const safeExtract = normalizeRegisteredNpcExtract({ ...extract, is_sexual: extract.is_sexual === true }, ctx?.master?.characters, ctx?.save?.last_character_id);
-  safeExtract.image_id = selectImageId(flattenImageCatalog(ctx?.image_catalog || []), safeExtract.character_id, safeExtract.image_id, ctx?.save?.last_image_id, safeExtract.is_sexual);
+  const imageCatalog = flattenImageCatalog(ctx?.image_catalog || []);
   const summaryPlan = buildRecent100Plan(ctx?.save || {}, turn_number, safeExtract.turn_summary);
   if (summaryPlan.isBoundary) summaryPlan.overallSummary = await summarizeRecent100(env, ctx?.save?.story_summary_overall, summaryPlan.completedWindow);
   const patch = buildSavePatch(safeExtract, engine_patch, summaryPlan, ctx?.save || {}, turn_number, player_input);
+  const imageSceneRole = resolveSpecialSceneRole(
+    ctx?.save || {},
+    safeExtract,
+    patch.npc_stats?.[safeExtract.character_id],
+    patch.npc_stat_changes?.[safeExtract.character_id]
+  );
+  const specialImageId = imageSceneRole
+    ? selectSceneRoleImageId(imageCatalog, safeExtract.character_id, imageSceneRole)
+    : null;
+  safeExtract.image_id = specialImageId ?? selectImageId(imageCatalog, safeExtract.character_id, safeExtract.image_id, ctx?.save?.last_image_id, safeExtract.is_sexual);
+  patch.last_image_id = safeExtract.image_id ?? null;
   const result = await supabaseRpc(env, 'commit_turn', {
     p_game_id: game_id,
     p_turn_number: turn_number,
@@ -333,6 +349,8 @@ async function handleCommitTurn(req, env) {
     ok: true,
     turn_count: result?.turn_count ?? turn_number,
     replay: result?.status === 'replay',
+    image_id: safeExtract.image_id ?? null,
+    image_scene_role: imageSceneRole,
     npc_stats: patch.npc_stats?.[safeExtract.character_id] || null,
     npc_stat_changes: patch.npc_stat_changes?.[safeExtract.character_id] || null
   });
@@ -526,7 +544,8 @@ function buildExtractPrompt(narrativeText, playerInput, ctx, images, turnCount) 
     tags: normalizeTags(img.tags),
     image_pool: normalizeImagePool(img.image_pool),
     is_sexual: resolveIsSexual(img),
-    curation_rank: parseCurationRank(img.curation_rank)
+    curation_rank: parseCurationRank(img.curation_rank),
+    scene_role: normalizeSceneRole(img.scene_role)
   }));
 
   return `너는 플레이 LLM이 방금 쓴 서사와 플레이어의 원본 입력을 읽고, 저장/이미지/음성에 필요한 값만 구조화하는 역할이다. NPC 수치만은 아래 delta 계약에 따라 이번 턴의 실제 변화와 근거를 판단한다. JSON 코드블록 하나만 출력하고 다른 말은 절대 하지 마라.
@@ -576,6 +595,7 @@ npc_stat_changes만 반환한다. 서사에 숫자가 없어도 대사·행동·
 [이미지 선택]
 1. image_reasoning으로 is_sexual 판단: 실제 성행위/삽입/성기노출/오르가즘이 구체적이면 true. 키스/포옹/스킨십/분위기만으로는 false. 애매하면 반드시 false.
 2. image_library에서 character_id+is_sexual(또는 image_pool) 일치 항목만 후보로 본다. short_description과 tags가 있으면 situation보다 먼저 참고해 현재 장면에 가장 맞는 이미지를 고르고, 없으면 기존처럼 situation으로만 매칭한다. 후보 없으면 null.
+3. scene_role=hypnosis_onset 이미지는 실제 최면 반응·암시 성공이 발생한 장면 전용이다. scene_role=heart_eyes 이미지는 높은 호감이나 깊은 최면·순응 상태의 애정·황홀 반응 전용이다. 단순 계획이나 평범한 대화에는 고르지 마라.
 
 [플레이어의 이번 원본 입력]
 ${typeof playerInput === 'string' && playerInput.trim() ? playerInput : '(없음)'}
@@ -647,6 +667,10 @@ function normalizeImagePool(value) {
   return value === 'sex' || value === 'general' ? value : null;
 }
 
+function normalizeSceneRole(value) {
+  return value === 'hypnosis_onset' || value === 'heart_eyes' ? value : null;
+}
+
 function normalizeTags(value) {
   if (!Array.isArray(value)) return [];
   return value.filter(tag => typeof tag === 'string' && tag.trim()).map(tag => tag.trim());
@@ -680,6 +704,7 @@ function normalizeImageCatalog(catalog) {
       image_pool: normalizeImagePool(img.image_pool),
       is_sexual: resolveIsSexual(img),
       curation_rank: parseCurationRank(img.curation_rank),
+      scene_role: normalizeSceneRole(img.scene_role),
       image_url: img.image_url ?? null
     });
   }
@@ -1182,6 +1207,49 @@ async function summarizeRecent100(env, overall, completedWindow) {
   return appendSummary(overall || '', data.choices?.[0]?.message?.content || completedWindow);
 }
 
+const HEART_EYES_AFFINITY_THRESHOLD = 70;
+const HEART_EYES_HYPNOSIS_THRESHOLD = 70;
+
+function statNumber(stats, key) {
+  const value = Number(stats?.[key]);
+  return Number.isFinite(value) ? Math.max(0, Math.min(100, value)) : 0;
+}
+
+function resolveSpecialSceneRole(previousSave, extract, projectedStats = {}, appliedChanges = {}) {
+  const characterId = typeof extract?.character_id === 'string' ? extract.character_id : null;
+  if (!characterId || characterId === 'narrator' || extract?.is_sexual === true) return null;
+
+  const action = extract?.suggestion_action;
+  const suggestionActivated = action?.action === 'activate'
+    && (!action.character_id || action.character_id === characterId);
+  const hypnosisDelta = Number(appliedChanges?.['최면깊이']?.delta);
+  if (suggestionActivated || (Number.isFinite(hypnosisDelta) && hypnosisDelta > 0)) return 'hypnosis_onset';
+
+  const previousStats = previousSave?.npc_stats?.[characterId] || {};
+  const beforeAffinity = statNumber(previousStats, '호감도');
+  const afterAffinity = statNumber(projectedStats, '호감도');
+  const beforeDeep = statNumber(previousStats, '최면깊이') >= HEART_EYES_HYPNOSIS_THRESHOLD
+    && statNumber(previousStats, '순응도') >= HEART_EYES_HYPNOSIS_THRESHOLD;
+  const afterDeep = statNumber(projectedStats, '최면깊이') >= HEART_EYES_HYPNOSIS_THRESHOLD
+    && statNumber(projectedStats, '순응도') >= HEART_EYES_HYPNOSIS_THRESHOLD;
+
+  if ((beforeAffinity < HEART_EYES_AFFINITY_THRESHOLD && afterAffinity >= HEART_EYES_AFFINITY_THRESHOLD)
+    || (!beforeDeep && afterDeep)) return 'heart_eyes';
+  return null;
+}
+
+function selectSceneRoleImageId(catalog, characterId, sceneRole) {
+  const normalizedRole = normalizeSceneRole(sceneRole);
+  if (!characterId || characterId === 'narrator' || !normalizedRole) return null;
+  const candidates = flattenImageCatalog(catalog)
+    .filter(img => img?.character_id === characterId
+      && normalizeSceneRole(img.scene_role) === normalizedRole
+      && resolveIsSexual(img) !== true)
+    .sort((a, b) => curationSortRank(a) - curationSortRank(b));
+  const selected = candidates[0];
+  return selected ? Number(selected.image_id ?? selected.id) : null;
+}
+
 function selectImageId(catalog, characterId, requestedId, previousId, isSexual) {
   if (!characterId || characterId === 'narrator') return null;
   const candidates = flattenImageCatalog(catalog).filter(img => img?.character_id === characterId);
@@ -1233,5 +1301,8 @@ export {
   resolveIsSexual,
   normalizeImagePool,
   normalizeTags,
-  parseCurationRank
+  parseCurationRank,
+  normalizeSceneRole,
+  resolveSpecialSceneRole,
+  selectSceneRoleImageId
 };

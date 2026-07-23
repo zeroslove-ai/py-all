@@ -545,6 +545,8 @@
         state.turnCount = saved.turn_count; ui.updateMeta(null, state.turnCount);
         if (saved.npc_stats) pending.extract.npc_stats = saved.npc_stats;
         if (saved.npc_stat_changes) pending.extract.npc_stat_changes = saved.npc_stat_changes;
+        if (Number.isInteger(saved.image_id)) pending.extract.image_id = saved.image_id;
+        if (typeof saved.image_scene_role === 'string') pending.extract.image_scene_role = saved.image_scene_role;
         saveFeedback([]);
         sidebar.updateCharacter(pending.extract.character_id); sidebar.updateMind(pending.extract.npc_emotion); sidebar.renderStats(pending.extract.npc_stats, pending.extract.character_id, pending.extract.npc_stat_changes);
         ui.renderGameplayChoices(pending.extract.choices, submitChoice, { setup: pending.mode === 'player_setup' });

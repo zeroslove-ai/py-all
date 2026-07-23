@@ -740,11 +740,11 @@ function buildCurrentNpcProfileSection(save = {}, characters = {}) {
 }
 
 function buildNarrativeLengthSection() {
-  return `\n\n[NARRATIVE LENGTH AND PACING CONTRACT — HIGH PRIORITY]\n\n- 먼저 이번 턴을 A/B/C 중 하나로 내부 판단하되 분류명을 출력하지 않는다.\n  A: 확인, 짧은 질문, 가벼운 반응처럼 위치·관계·상태 전환이 거의 없는 턴\n  B: 의미 있는 부탁, 대화, 신뢰 형성, 갈등 조정, 조사, 신체 행동이 진행되는 일반 턴\n  C: 이동, 새 NPC 합류, 최면/암시/상식 개변, 관계의 결정적 변화, 중요한 성공·실패·폭로가 있는 턴\n- [1. 서사 및 행동]만 다음 목표 길이로 작성한다. [1] 헤더, [2. 플레이어 상황판], [3. 선택지]는 이 글자 수에 포함하지 않는다.\n  A: 800~1,000자\n  B: 1,000~1,500자\n  C: 1,200~2,000자\n- 길이를 채우기 위한 같은 의미의 반복, 장황한 요약, 과거 회상 재복사는 금지한다.\n- 서사는 최소 3개의 진행 단위를 가진다:\n  1. 플레이어 입력에 대한 즉각적이고 구체적인 반응\n  2. 공간·행동·대화가 실제로 전개되는 중간 과정\n  3. 이번 턴의 명확한 결과, 결정, 새 정보, 변화 또는 다음 갈등\n- 매 턴 최소 하나의 구체적인 변화가 있어야 한다. 이는 위치, 행동 완료, 새 정보, 결정, 관계의 분위기, 새 장애물 중 하나일 수 있다.\n- 구체적인 변화가 반드시 NPC 수치 delta를 의미하지는 않는다. 수치를 억지로 올리거나 내리지 않는다.\n- 플레이어의 행동을 무효화한 채 이전 상태로 되돌아가거나, 같은 거절과 망설임만 반복해서 제자리걸음하지 않는다.`;
+  return `\n\n[NARRATIVE LENGTH AND PACING CONTRACT — HIGH PRIORITY]\n\n- 먼저 이번 턴을 A/B/C 중 하나로 내부 판단하되 분류명을 출력하지 않는다.\n  A: 확인, 짧은 질문, 가벼운 반응처럼 위치·관계·상태 전환이 거의 없는 턴\n  B: 의미 있는 부탁, 대화, 신뢰 형성, 갈등 조정, 조사, 신체 행동이 진행되는 일반 턴\n  C: 이동, 새 NPC 합류, 최면/암시/상식 개변, 관계의 결정적 변화, 중요한 성공·실패·폭로가 있는 턴\n- [1. 서사 및 행동]만 다음 목표 길이로 작성한다. [1] 헤더, [2. 플레이어 상황판], [3. 선택지]는 이 글자 수에 포함하지 않는다.\n  A: 800~1,000자\n  B: 1,000~1,500자\n  C: 1,200~2,000자\n- [1]이 목표 하한을 채우기 전에는 [2. 플레이어 상황판]을 시작하지 않는다. 출력하기 전에 내부적으로 [1]이 목표 하한을 충족했는지 스스로 확인한다.\n- 분량이 부족하면 반복 묘사가 아니라 새 행동, 질문, 답변, 정보, 결정, 공간 변화 또는 갈등을 추가해서 채운다. 같은 의미의 문장을 늘이거나 장황한 요약, 과거 회상 재복사로 채우지 않는다.\n- 서사는 다음 진행 단위를 확실히 포함한다:\n  1. 입력에 대한 즉각적인 반응\n  2. 첫 번째 대화·행동 전개\n  3. 추가 질문·정보·행동 전개\n  4. 장면의 구체적인 결과\n  5. 다음 턴으로 이어지는 결정·갈등 또는 새 목표\n- 매 턴 최소 하나의 구체적인 변화가 있어야 한다. 이는 위치, 행동 완료, 새 정보, 결정, 관계의 분위기, 새 장애물 중 하나일 수 있다.\n- 구체적인 변화가 반드시 NPC 수치 delta를 의미하지는 않는다. 수치를 억지로 올리거나 내리지 않는다.\n- 플레이어의 행동을 무효화한 채 이전 상태로 되돌아가거나, 같은 거절과 망설임만 반복해서 제자리걸음하지 않는다.`;
 }
 
 function buildNpcDialogueMinimumSection() {
-  return `\n\n[NPC DIALOGUE MINIMUM CONTRACT]\n\n- 등록 NPC가 실제 장면에 있고 플레이어와 대화·상호작용하는 일반 턴이라면 의미 있는 NPC 발언을 최소 3회 포함한다. 형식은 기존과 동일하게 **캐릭터명** (연기지시): "대사 내용"이다.\n- "의미 있는 발언"은 다음 중 하나를 새로 수행해야 한다: 입력에 직접 답변 / 새 정보 제공 / 질문 또는 확인 / 결정·수락·거절·조건 제시 / 감정이나 관계 변화 표현 / 행동을 시작하거나 중단시키는 말 / 다른 NPC와의 실제 상호작용.\n- 한 문장을 세 조각으로 나누거나 같은 의미를 반복해서 3회를 채우는 것은 금지한다.\n- 다음 경우에는 최소 3회를 강제하지 않는다: NPC가 없는 narrator 장면 / 플레이어가 말없이 관찰만 하겠다고 명시한 장면 / NPC가 잠들었거나 의식을 잃었거나 말할 수 없는 장면 / 대사보다 즉각적인 물리 행동이 중심이고 발언 3회가 부자연스러운 순간 / 재진입 모드 / player_setup 모드. 다만 NPC가 있는 일반 대화 장면에서 단순히 짧게 끝내기 위해 이 예외를 쓰지 않는다.\n- 여러 NPC가 등장하면 장면 전체 등록 NPC 발언 합계가 최소 3회이면 되고, NPC마다 3회씩 강제하지 않는다. 메인 NPC가 대화의 중심을 유지하고, 다른 NPC의 짧은 발언만으로 메인 NPC를 자동 전환하지 않는 기존 계약을 유지한다.\n- 플레이어가 입력하지 않은 새 플레이어 발언을 임의로 만들어 대화 횟수를 채우지 않는다. 플레이어 입력은 이미 발생한 말 또는 행동으로 취급하고, 이후 NPC 반응과 장면 전개만 쓴다.`;
+  return `\n\n[NPC DIALOGUE MINIMUM CONTRACT]\n\n- 등록 NPC가 실제 장면에 있고 플레이어와 대화·상호작용하는 일반 턴이라면 의미 있는 NPC 발언을 최소 3회 포함한다. 형식은 기존과 동일하게 **캐릭터명** (연기지시): "대사 내용"이다.\n- "의미 있는 발언"은 다음 중 하나를 새로 수행해야 한다: 입력에 직접 답변 / 새 정보 제공 / 질문 또는 확인 / 결정·수락·거절·조건 제시 / 감정이나 관계 변화 표현 / 행동을 시작하거나 중단시키는 말 / 다른 NPC와의 실제 상호작용.\n- 각 NPC 발언 사이에는 새로운 행동·정보·결정·관계 변화 중 하나가 있어야 한다. 한 문장을 세 조각으로 나누거나 같은 의미를 반복해서 3회를 채우는 것은 금지한다.\n- 다음 경우에는 최소 3회를 강제하지 않는다: NPC가 없는 narrator 장면 / 플레이어가 말없이 관찰만 하겠다고 명시한 장면 / NPC가 잠들었거나 의식을 잃었거나 말할 수 없는 장면 / 대사보다 즉각적인 물리 행동이 중심이고 발언 3회가 부자연스러운 순간 / 재진입 모드 / player_setup 모드. 다만 NPC가 있는 일반 대화 장면에서 단순히 짧게 끝내기 위해 이 예외를 쓰지 않는다.\n- 여러 NPC가 등장하면 장면 전체 등록 NPC 발언 합계가 최소 3회이면 되고, NPC마다 3회씩 강제하지 않는다. 메인 NPC가 대화의 중심을 유지하고, 다른 NPC의 짧은 발언만으로 메인 NPC를 자동 전환하지 않는 기존 계약을 유지한다.\n- 플레이어가 입력하지 않은 새 플레이어 발언을 임의로 만들어 대화 횟수를 채우지 않는다. 플레이어 입력은 이미 발생한 말 또는 행동으로 취급하고, 이후 NPC 반응과 장면 전개만 쓴다.`;
 }
 
 function buildAntiRepetitionSection() {
@@ -814,22 +814,29 @@ function buildStoryPrompt(ctx, playerInput, currentTurn, feedback = []) {
 ${JSON.stringify(rulebook, null, 2).slice(0, 8000)}`;
   }
 
+  const suggestionPanelData = buildActiveSuggestionPanelText(save, master.characters || {});
+  const csaPanelData = buildCsaPanelText(save);
   const playerStatusPanel = `
 
 [PLAYER STATUS PANEL CONTRACT — HIGHEST PRIORITY FOR SECTION 2]
-[2. 플레이어 상황판]은 단순 키·값 나열표가 아니라 게임 속 최면 어플의 현재 화면처럼 작성한다. 이모지와 짧은 구분을 사용하되, 매 턴 문구와 배치를 기계적으로 복제하지 말고 현재 장면에 맞춰 자연스럽게 구성한다. 전체 길이는 250~400자를 목표로 한다.
-저장값과 현재 장면에서 확인 가능한 정보를 우선 사용하며, 알 수 없는 값은 지어내지 않는다. 가능한 범위에서 다음 정보를 포함한다:
+[2. 플레이어 상황판]은 단순 키·값 나열표가 아니라 게임 속 최면 어플의 현재 화면처럼 작성한다. 이모지와 짧은 구분을 사용하되, 매 턴 문구와 배치를 기계적으로 복제하지 말고 현재 장면에 맞춰 자연스럽게 구성한다. 길이 상한은 없다 — 활성 최면과 상식 개변이 많으면 상황판도 그만큼 길어지는 것이 정상이다.
+저장값과 현재 장면에서 확인 가능한 정보를 우선 사용하며, 알 수 없는 값은 지어내지 않는다. 다음 항목을 모두 포함한다:
 - 🧑 플레이어: 이름, 나이, 성별, 직업 또는 역할
-- 📍 현재 상태와 위치, 저장된 게임 일자·시각이 있으면 함께 표시. 저장되지 않은 시각을 새로 지어내지 않는다.
-- 📱 최면 어플: 이전 저장값 기준 현재 레벨, 현재 EXP/다음 레벨 필요 EXP, 현재 레벨과 룰북이 허용하는 최면 강도
-- 🌀 활성 암시 목록
-- 🌐 상식 개변: 활성 개수/최대 개수, 현재 적용 가능 범위, 오늘 사용 횟수/한도
-- 🎯 접근 대상: 현재 접근 중인 NPC의 이름과 이전 저장값 기준 진행에 유용한 최소 정보(예: 순응·신뢰). NPC 5개 스탯 전체 표는 절대 출력하지 않는다.
-- 💭 플레이어 상황 독백: 플레이어 자신의 말투·성격·현재 목표와 판단을 반영한 1인칭 직접 독백. 반드시 한국어 큰따옴표 “…”로 감싸고, 공백과 따옴표를 제외한 실질 길이 40자 이상으로 쓴다. 해설문·제3자 분석문·NPC의 표면의식/잠재의식과 혼동하는 내용은 금지하며, 이 독백은 [2]에만 출력한다.
-- 📌 현재 목표
-- 🔄 이번 턴: 실제로 일어난 사건을 정성적으로 한 줄 요약한다. 예: "🔄 이번 턴: 박소현이 손을 잡는 것을 수락함". 순응 +1, 저항 -1, 최면깊이 +1처럼 숫자·기호로 된 수치 변화는 절대 쓰지 않는다.
-Story는 Commit 이전이므로 다음을 절대 쓰지 않는다: 이번 턴 예상 stat delta 숫자, (+1)·(-2) 같은 미래 변화 표기, 최면저항력 증감 추측, 아직 저장되지 않은 EXP와 레벨업 결과, 저장되지 않은 시각의 임의 생성.
-턴 번호, 일반 최면의 하루 횟수 제한, 동시 최면 인원 제한, 1인당 중첩 암시 제한, NPC 5개 스탯 전체 표, 사정·오르가즘 누적값은 절대 출력하지 않는다.`;
+- 📍 현재 장소
+- 📱 최면 어플: 이전 저장값 기준 현재 레벨, 현재 EXP/다음 레벨 필요 EXP, 현재 사용할 수 있는 최면 강도
+- 🌀 활성 최면/암시: 아래 [STATUS PANEL DATA — 활성 최면]에 나열된 항목을 NPC 이름별로 묶어 하나도 빠짐없이 표시한다. "외 n개"처럼 일부만 보여주고 나머지를 생략하지 않는다. 목록이 비어 있으면 "활성 최면 없음"이라고만 짧게 쓴다.
+- 🌐 상식 개변: 아래 [STATUS PANEL DATA — 상식 개변]에 나열된 활성 개수/최대 개수와 오늘 사용 횟수/한도를 적고, 각 항목의 적용 범위와 실제 내용을 하나도 빠짐없이 표시한다. 목록이 비어 있으면 "상식 개변 없음"이라고만 짧게 쓴다.
+- 💭 플레이어 상황 독백: 플레이어 자신의 말투·성격·현재 욕망과 판단을 반영한 1인칭 직접 독백. 게임의 핵심 재미 요소이므로 반드시 포함한다. 반드시 한국어 큰따옴표 “…”로 감싸고, 공백과 따옴표를 제외한 실질 길이 40자 이상으로 쓴다(장면에 맞으면 더 길어도 된다). 해설문·시스템 분석문·제3자 분석문·NPC의 표면의식/잠재의식과 혼동하는 내용은 금지하며, 매턴 기계적으로 같은 독백을 반복하지 않는다. 이 독백은 [2]에만 출력한다.
+- 🔄 이번 턴: 실제로 일어난 사건을 정성적으로 서술한다. 예: "🔄 이번 턴: 한소영과 함께 면회실에서 3병동 복도로 이동했다." 순응 +2, 저항 -1, 호감도 +1처럼 숫자·기호로 된 수치 변화는 절대 쓰지 않는다.
+다음은 [2]에 절대 포함하지 않는다: 현재 접근 대상, NPC 순응도·저항력 등 NPC 수치 요약(우측 사이드바에 이미 표시되므로 중복이다), 이번 턴 예상 stat delta 숫자, (+1)·(-2) 같은 미확정 수치, 최면저항력 증감 추측, 아직 저장되지 않은 EXP와 레벨업 결과, 저장되지 않은 시각의 임의 생성, 장식용 구분선의 반복, 같은 상태를 문장만 바꾼 중복 설명.
+턴 번호, 일반 최면의 하루 횟수 제한, 동시 최면 인원 제한, 1인당 중첩 암시 제한, NPC 5개 스탯 전체 표, 사정·오르가즘 누적값은 절대 출력하지 않는다.
+
+[STATUS PANEL DATA — 활성 최면]
+${suggestionPanelData.count ? suggestionPanelData.lines : '없음'}
+
+[STATUS PANEL DATA — 상식 개변]
+활성 ${csaPanelData.count}개 / 최대 ${csaPanelData.maxActive}개, 오늘 사용 ${csaPanelData.dailyUsed}회 / 한도 ${csaPanelData.dailyLimit}회
+${csaPanelData.count ? csaPanelData.lines : '없음'}`;
 
   // ─── 섹션 5: 컨텍스트 ───
   // 최근 기억: 가장 최근 1개는 최대 5000자, 그 이전 항목은 최대 2500자로 앞·뒤를 모두 보존해 절단한다.
@@ -945,7 +952,7 @@ npc_stat_changes만 반환한다. 서사에 숫자가 없어도 대사·행동·
 이번 서사에서 최면 암시가 실제로 성공·완료됐을 때만 suggestion_action.action="activate"로 현재 NPC(character_id) 대상 암시를 반환한다. content는 암시 내용 문장, strength는 이번에 사용된 최면 강도다. 시도·계획·상상·가능성만으로는 저장하지 말고 실패한 최면도 저장하지 마라. 각성이나 명확한 해제가 실제로 일어났을 때만 action="deactivate"와 동일 content를 반환한다. 대상은 반드시 현재 NPC여야 한다. 변화가 없으면 suggestion_action은 null이다.
 
 [WORLD STATE PATCH CONTRACT]
-이번 턴에 플레이어가 실제로 이동해 장소가 명확히 바뀐 경우에만 world_state_patch에 확인된 필드를 채운다. building/floor/ward는 장소를 설명하는 한국어 명칭으로 적고 Worker가 표준 ID로 정규화하며, 표준 ID로 정규화되지 않는 값은 무시된다. 이동하지 않았거나 장소가 불분명하면 해당 필드를 빈 문자열로 두거나 patch 전체를 비워라. 알 수 없는 장소를 지어내지 마라.
+플레이어가 실제로 출발해서 새 장소에 도착했고 장면이 그 새 장소로 전환된 경우, world_state_patch에 building, floor, ward, location_label을 모두 채워서 반환한다. 바뀌지 않은 필드는 이전 저장값의 기존 명칭을 그대로 다시 적고, 실제로 바뀐 필드만 새 값으로 적는다. building/floor/ward는 장소를 설명하는 한국어 명칭으로 적으면 Worker가 표준 ID로 정규화하며, 표준 ID로 정규화되지 않는 값은 무시된다. 이동을 제안하거나 준비만 했을 뿐 아직 도착하지 않았다면 world_state_patch를 채우지 말고 비워둔다. 빈 문자열로 기존 값을 덮어쓰지 마라. 알 수 없는 장소를 지어내지 마라.
 
 [CSA ACTION CONTRACT]
 현재 장소 범위 안에서 플레이어가 상식개변을 실제로 성공시켰을 때만 csa_action.action="activate"로 content(바뀐 상식 문장)와 scope_type(ward/floor/building/world 중 현재 상황에 맞는 범위)을 반환한다. scope_id는 채우지 마라. Worker가 현재 world_state로 결정한다. 시도·계획·상상만으로는 저장하지 마라. 플레이어가 기존 상식개변을 명확히 해제했을 때만 action="deactivate"와 해제 대상 id를 반환한다. 변화가 없으면 csa_action은 null이다.
@@ -996,7 +1003,7 @@ ${JSON.stringify(imageCatalog)}
   "player_recommendation": {"name": "", "age": 0, "gender": "", "job": "", "major": "", "rank": "", "height_cm": 0, "weight_kg": 0, "style": "", "background": ""},
   "growth_event": "none | minor | standard | major (사건의 의미만 제안, 경험치 숫자는 결정하지 말 것)",
   "suggestion_action": null,
-  "world_state_patch": {"building": "", "floor": "", "ward": "", "location_label": ""},
+  "world_state_patch": {"building": "이동 완료 시 기존 또는 새 건물명, 이동 없으면 전체 비움", "floor": "이동 완료 시 기존 또는 새 층 명칭", "ward": "이동 완료 시 기존 또는 새 병동 명칭", "location_label": "이동 완료 시 도착한 새 장소, 이동 없으면 전체 비움"},
   "csa_action": null,
   "npc_relationship_state": {"player_ejaculation_count": 0, "npc_orgasm_count": 0},
   "turn_summary": "이번 턴에서 변한 핵심 사실 1~3문장",
@@ -1180,11 +1187,15 @@ function buildSavePatch(extract, enginePatch = {}, summaryPlan = null, previousS
   }
 
   const worldStatePatch = buildWorldStatePatch(extract.world_state_patch);
-  if (worldStatePatch) patch.world_state = worldStatePatch;
+  // Always send the full merged object, never the raw partial patch: if the
+  // model only returns a changed location_label (or any subset of fields),
+  // sending just that fragment risks a non-merging RPC wiping out the
+  // building/floor/ward the player was already in.
   const mergedWorldState = {
     ...(isPlainObject(previousSave?.world_state) ? previousSave.world_state : {}),
     ...(worldStatePatch || {})
   };
+  if (worldStatePatch) patch.world_state = mergedWorldState;
 
   if (characterId && characterId !== 'narrator' && extract._npc_registration_rejected !== true) {
     const structured = hasStructuredEncounter(previousSave, characterId);
@@ -1567,6 +1578,49 @@ function buildActiveSuggestionSection(save, characters = {}) {
     return `${name}(${characterId})\n${lines}`;
   }).join('\n\n');
   return `\n\n[ACTIVE PERSONAL SUGGESTIONS — ESTABLISHED FACTS]\n\n${blocks}\n\n규칙:\n- 위 암시는 각 NPC에게 이미 성공해 활성 상태다.\n- 성공 여부를 다시 의심하거나 같은 암시를 다시 거는 장면을 만들지 않는다.\n- 해당 NPC는 암시 범위 안의 요청을 자기 성격에 맞게 자연스럽게 따른다.\n- 암시 범위를 벗어난 무조건 복종으로 확대하지 않는다.\n- 다른 NPC에게 잘못 적용하지 않는다.\n\n[금지 표현]\n- 암시가 먹힌 것 같다\n- 암시가 제대로 적용됐는지 모르겠다\n- 다시 걸어봐야겠다\n- 효과를 확인해야겠다\n- 아까 최면이 성공했는지 확실하지 않다`;
+}
+
+// Pre-formats every currently active personal suggestion, grouped by real
+// NPC name, as render-ready text for [2. 플레이어 상황판]. Deliberately
+// duplicates buildActiveSuggestionSection's data: that block is an
+// established-fact contract for narrative behavior, this one exists so the
+// model transcribes a complete list into the status panel instead of
+// summarizing/truncating it from memory.
+function buildActiveSuggestionPanelText(save, characters = {}) {
+  const map = normalizeLegacyActiveSuggestions(save?.active_suggestions);
+  const entries = Object.entries(map)
+    .map(([characterId, list]) => [characterId, (Array.isArray(list) ? list : []).filter(item => item?.active)])
+    .filter(([characterId, list]) => characterId !== 'narrator' && list.length && isPlainObject(characters?.[characterId]));
+  if (!entries.length) return { count: 0, lines: '' };
+  let count = 0;
+  const blocks = entries.map(([characterId, list]) => {
+    const name = characters?.[characterId]?.name || characters?.[characterId]?.['이름'] || characterId;
+    const lines = list.map(item => {
+      count += 1;
+      return `  · [${item.strength || 'surface'}] ${item.content}`;
+    }).join('\n');
+    return `- ${name}\n${lines}`;
+  }).join('\n');
+  return { count, lines: blocks };
+}
+
+// Pre-formats every currently active common-sense change (CSA) — not just
+// the ones applicable to the player's current location — with its scope
+// label and content, plus the active/max and daily-use counts, as
+// render-ready text for [2. 플레이어 상황판].
+function buildCsaPanelText(save = {}) {
+  const active = (Array.isArray(save?.csa_active) ? save.csa_active : []).filter(item => item?.active);
+  const level = Math.max(1, Number(save?.player_progress?.level) || 1);
+  const limits = getCsaLimits(level);
+  const dailyUsed = Math.max(0, Number(save?.csa_daily_used) || 0);
+  const lines = active.map(item => `- [${item.scope_label || item.scope_id}] ${item.content}`).join('\n');
+  return {
+    count: active.length,
+    maxActive: limits.max_active,
+    dailyUsed,
+    dailyLimit: limits.daily_limit,
+    lines
+  };
 }
 
 function buildCurrentSceneSection(save, characters = {}) {
@@ -2013,6 +2067,8 @@ export {
   normalizeLegacyActiveSuggestions,
   applySuggestionAction,
   buildActiveSuggestionSection,
+  buildActiveSuggestionPanelText,
+  buildCsaPanelText,
   buildApplicableCsaSection,
   resolveCsaScopeId,
   resolveIsSexual,

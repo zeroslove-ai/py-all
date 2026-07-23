@@ -278,6 +278,7 @@ test('manual one-turn flow on a dedicated test game', async ({ page, request }) 
   await page.waitForTimeout(500);
   const turnTiming = extractConsoleTiming(diagnostics, '[turn-timing]');
   const extractTiming = extractConsoleTiming(diagnostics, '[extract-timing]');
+  const after = await fetchContext(request, TEST_GAME_ID);
 
   await page.screenshot({ path: resultPath('one-turn.png'), fullPage: true });
   writeJson('one-turn-diagnostics.json', diagnostics);
@@ -301,6 +302,12 @@ test('manual one-turn flow on a dedicated test game', async ({ page, request }) 
     commit_timing: commitBody?.timing || null,
     turn_timing: turnTiming,
     page_error_count: diagnostics.page_errors.length,
-    api_responses: diagnostics.api_responses
+    api_responses: diagnostics.api_responses,
+    // Not asserted (PLAYER_INPUT isn't necessarily a location move) — recorded
+    // so a move-scenario run can be inspected for whether world_state.location_label
+    // actually changed end-to-end (Extract's world_state_patch -> Commit -> saved state).
+    world_state_before: before.context?.save?.world_state || null,
+    world_state_patch: extractBody?.extract?.world_state_patch || null,
+    world_state_after: after.context?.save?.world_state || null
   };
 });

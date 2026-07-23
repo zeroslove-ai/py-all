@@ -30,6 +30,8 @@ import {
   normalizeLegacyActiveSuggestions,
   applySuggestionAction,
   buildActiveSuggestionSection,
+  buildActiveSuggestionPanelText,
+  buildCsaPanelText,
   hasLegacyEncounterEvidence,
   resolveIsSexual,
   normalizeImagePool,
@@ -902,6 +904,14 @@ test('Story prompt omits the active-suggestion section when there is no current 
 // Structured place state (world_state)
 // ─────────────────────────────────────────────
 
+test('the Extract world state contract requires all four fields once a move completes, forbids blanking with empty strings, and never asks the Worker to regex-parse Story text', () => {
+  const prompt = buildExtractPrompt('서사', '입력', { master: {}, save: {} }, [], 1);
+  assert.match(prompt, /world_state_patch에 building, floor, ward, location_label을 모두 채워서 반환한다/);
+  assert.match(prompt, /바뀌지 않은 필드는 이전 저장값의 기존 명칭을 그대로 다시 적고/);
+  assert.match(prompt, /이동을 제안하거나 준비만 했을 뿐 아직 도착하지 않았다면 world_state_patch를 채우지 말고 비워둔다/);
+  assert.match(prompt, /빈 문자열로 기존 값을 덮어쓰지 마라/);
+});
+
 test('world_state_patch normalizes known Korean place names to standard IDs', () => {
   assert.deepEqual(buildWorldStatePatch({ building: '서울중앙병원', floor: '3층', ward: '3병동', location_label: '서울중앙병원 3병동 면회실' }), {
     building: 'seoul_central_hospital', floor: 'hospital_floor_3', ward: 'hospital_3ward', location_label: '서울중앙병원 3병동 면회실'
@@ -919,6 +929,27 @@ test('world_state_patch ignores unrecognized place names and never clears existi
 test('world_state_patch merges without requiring a registered NPC in the scene', () => {
   const patch = buildSavePatch({ character_id: 'narrator', world_state_patch: { ward: '6병동' } }, {}, null, {}, 1, '');
   assert.deepEqual(patch.world_state, { ward: 'hospital_6ward' });
+});
+
+test('buildSavePatch deep-merges a partial world_state_patch with the previous world_state instead of sending only the changed field', () => {
+  const previousSave = {
+    world_state: {
+      building: 'seoul_central_hospital', floor: 'hospital_floor_3', ward: 'hospital_3ward',
+      location_label: '서울중앙병원 3병동 면회실'
+    }
+  };
+  // Model only sends the changed field — building/floor/ward are left out.
+  const patch = buildSavePatch({ character_id: 'narrator', world_state_patch: { location_label: '서울중앙병원 3병동 복도' } }, {}, null, previousSave, 2, '');
+  assert.deepEqual(patch.world_state, {
+    building: 'seoul_central_hospital', floor: 'hospital_floor_3', ward: 'hospital_3ward',
+    location_label: '서울중앙병원 3병동 복도'
+  });
+});
+
+test('buildSavePatch omits world_state entirely (preserving the existing saved value) when world_state_patch has no recognizable fields', () => {
+  const previousSave = { world_state: { ward: 'hospital_3ward', location_label: '서울중앙병원 3병동 면회실' } };
+  const patch = buildSavePatch({ character_id: 'narrator', world_state_patch: {} }, {}, null, previousSave, 2, '');
+  assert.equal('world_state' in patch, false);
 });
 
 // ─────────────────────────────────────────────
@@ -1990,12 +2021,12 @@ test('the narrative length contract states the exact A/B/C character ranges and 
   assert.match(content, /\[1\. 서사 및 행동\]만 다음 목표 길이로 작성한다/);
 });
 
-test('the narrative length contract requires three progress beats, at least one concrete change, and forbids padding/stat-forcing', () => {
+test('the narrative length contract requires five progress beats, at least one concrete change, and forbids padding/stat-forcing', () => {
   const section = buildNarrativeLengthSection();
-  assert.match(section, /최소 3개의 진행 단위/);
+  assert.match(section, /서사는 다음 진행 단위를 확실히 포함한다/);
   assert.match(section, /매 턴 최소 하나의 구체적인 변화가 있어야 한다/);
   assert.match(section, /수치를 억지로 올리거나 내리지 않는다/);
-  assert.match(section, /길이를 채우기 위한 같은 의미의 반복, 장황한 요약, 과거 회상 재복사는 금지한다/);
+  assert.match(section, /같은 의미의 문장을 늘이거나 장황한 요약, 과거 회상 재복사로 채우지 않는다/);
 });
 
 test('the NPC dialogue minimum contract requires 3 meaningful lines, sums across multi-NPC scenes, and lists its exceptions', () => {
@@ -2017,25 +2048,157 @@ test('the anti-repetition contract names the overused stock phrases and forbids 
 });
 
 // ─────────────────────────────────────────────
-// Player status panel: no pre-Commit numeric guessing
+// Player status panel: no length cap, no duplicate NPC-stat display,
+// full active-suggestion/CSA enumeration, mandatory monologue
 // ─────────────────────────────────────────────
 
-test('the player status panel contract targets 250~400 characters and forbids future stat deltas and invented timestamps', () => {
+test('the player status panel contract has no length cap and forbids future stat deltas and invented timestamps', () => {
   const prompt = buildStoryPrompt({ master: { characters: {} }, save: { player: {} }, recent_memories: [] }, '계속', 1);
   const content = prompt.messages[0].content;
-  assert.match(content, /전체 길이는 250~400자를 목표로 한다/);
+  assert.match(content, /길이 상한은 없다/);
+  assert.doesNotMatch(content, /250~400자/);
   assert.match(content, /이번 턴 예상 stat delta 숫자/);
-  assert.match(content, /\(\+1\)·\(-2\) 같은 미래 변화 표기/);
+  assert.match(content, /\(\+1\)·\(-2\) 같은 미확정 수치/);
   assert.match(content, /최면저항력 증감 추측/);
   assert.match(content, /아직 저장되지 않은 EXP와 레벨업 결과/);
   assert.match(content, /저장되지 않은 시각의 임의 생성/);
 });
 
+test('the player status panel contract keeps the player monologue mandatory and never lets the panel repeat it verbatim turn to turn', () => {
+  const prompt = buildStoryPrompt({ master: { characters: {} }, save: { player: {} }, recent_memories: [] }, '계속', 1);
+  const content = prompt.messages[0].content;
+  assert.match(content, /게임의 핵심 재미 요소이므로 반드시 포함한다/);
+  assert.match(content, /실질 길이 40자 이상으로 쓴다\(장면에 맞으면 더 길어도 된다\)/);
+  assert.match(content, /매턴 기계적으로 같은 독백을 반복하지 않는다/);
+});
+
+test('the player status panel contract drops current-target and NPC compliance/resistance display since the sidebar already shows them', () => {
+  const prompt = buildStoryPrompt({ master: { characters: {} }, save: { player: {} }, recent_memories: [] }, '계속', 1);
+  const content = prompt.messages[0].content;
+  assert.doesNotMatch(content, /🎯 접근 대상/);
+  assert.match(content, /현재 접근 대상, NPC 순응도·저항력 등 NPC 수치 요약\(우측 사이드바에 이미 표시되므로 중복이다\)/);
+});
+
 test('the 🔄 turn-change line is specified as qualitative-only, never a numeric delta', () => {
   const prompt = buildStoryPrompt({ master: { characters: {} }, save: { player: {} }, recent_memories: [] }, '계속', 1);
   const content = prompt.messages[0].content;
-  assert.match(content, /🔄 이번 턴: 실제로 일어난 사건을 정성적으로 한 줄 요약한다/);
-  assert.match(content, /순응 \+1, 저항 -1, 최면깊이 \+1처럼 숫자·기호로 된 수치 변화는 절대 쓰지 않는다/);
+  assert.match(content, /🔄 이번 턴: 실제로 일어난 사건을 정성적으로 서술한다/);
+  assert.match(content, /순응 \+2, 저항 -1, 호감도 \+1처럼 숫자·기호로 된 수치 변화는 절대 쓰지 않는다/);
+});
+
+const STATUS_PANEL_CHARACTERS = { heroine9: { name: '박소현' }, heroine1: { name: '한소영' } };
+
+test('buildActiveSuggestionPanelText lists every active suggestion for every NPC, grouped by real name, with no truncation', () => {
+  const save = {
+    active_suggestions: {
+      heroine9: [
+        { content: '금태양의 도움 요청에 최선을 다한다', strength: 'surface', active: true },
+        { content: '금태양과 가까이 있을수록 마음이 편해진다', strength: 'deep', active: true },
+        { content: '해제된 옛 암시', strength: 'surface', active: false }
+      ],
+      heroine1: [{ content: '금태양의 질문에는 솔직히 답한다', strength: 'surface', active: true }]
+    }
+  };
+  const { count, lines } = buildActiveSuggestionPanelText(save, STATUS_PANEL_CHARACTERS);
+  assert.equal(count, 3);
+  assert.match(lines, /- 박소현/);
+  assert.match(lines, /- 한소영/);
+  assert.match(lines, /금태양의 도움 요청에 최선을 다한다/);
+  assert.match(lines, /금태양과 가까이 있을수록 마음이 편해진다/);
+  assert.match(lines, /금태양의 질문에는 솔직히 답한다/);
+  assert.doesNotMatch(lines, /해제된 옛 암시/);
+});
+
+test('the player status panel contract requires every entry in the pre-formatted suggestion data to be shown, and forbids "외 n개" hiding', () => {
+  const prompt = buildStoryPrompt({
+    master: { characters: STATUS_PANEL_CHARACTERS },
+    save: {
+      player: {},
+      active_suggestions: {
+        heroine9: [{ content: '금태양의 도움 요청에 최선을 다한다', strength: 'surface', active: true }],
+        heroine1: [{ content: '금태양의 질문에는 솔직히 답한다', strength: 'surface', active: true }]
+      }
+    },
+    recent_memories: []
+  }, '계속', 5);
+  const content = prompt.messages[0].content;
+  assert.match(content, /"외 n개"처럼 일부만 보여주고 나머지를 생략하지 않는다/);
+  assert.match(content, /\[STATUS PANEL DATA — 활성 최면\]/);
+  const dataSection = content.slice(content.lastIndexOf('[STATUS PANEL DATA — 활성 최면]'), content.lastIndexOf('[STATUS PANEL DATA — 상식 개변]'));
+  assert.match(dataSection, /- 박소현/);
+  assert.match(dataSection, /- 한소영/);
+  assert.match(dataSection, /금태양의 도움 요청에 최선을 다한다/);
+  assert.match(dataSection, /금태양의 질문에는 솔직히 답한다/);
+});
+
+test('buildCsaPanelText lists every active CSA with its scope label and content, plus active/max and daily-use counts', () => {
+  const save = {
+    player_progress: { level: 4 },
+    csa_daily_used: 1,
+    csa_active: [
+      { content: '간호사는 환자의 개인적인 부탁에도 친절히 응한다', scope_label: '3병동', active: true },
+      { content: '직원 간 가벼운 신체 접촉은 자연스러운 인사다', scope_label: '3층 전체', active: true },
+      { content: '해제된 상식', scope_label: '3병동', active: false }
+    ]
+  };
+  const data = buildCsaPanelText(save);
+  assert.equal(data.count, 2);
+  assert.equal(data.maxActive, 2); // getCsaLimits(4).max_active
+  assert.equal(data.dailyUsed, 1);
+  assert.match(data.lines, /- \[3병동\] 간호사는 환자의 개인적인 부탁에도 친절히 응한다/);
+  assert.match(data.lines, /- \[3층 전체\] 직원 간 가벼운 신체 접촉은 자연스러운 인사다/);
+  assert.doesNotMatch(data.lines, /해제된 상식/);
+});
+
+test('the player status panel contract requires every active CSA entry (not just count) to be shown with its scope and content', () => {
+  const prompt = buildStoryPrompt({
+    master: { characters: {} },
+    save: {
+      player: {},
+      player_progress: { level: 4 },
+      csa_active: [
+        { content: '간호사는 환자의 개인적인 부탁에도 친절히 응한다', scope_label: '3병동', active: true },
+        { content: '직원 간 가벼운 신체 접촉은 자연스러운 인사다', scope_label: '3층 전체', active: true }
+      ]
+    },
+    recent_memories: []
+  }, '계속', 5);
+  const content = prompt.messages[0].content;
+  assert.match(content, /\[STATUS PANEL DATA — 상식 개변\]/);
+  const dataSection = content.slice(content.lastIndexOf('[STATUS PANEL DATA — 상식 개변]'));
+  assert.match(dataSection, /활성 2개 \/ 최대 2개/);
+  assert.match(dataSection, /- \[3병동\] 간호사는 환자의 개인적인 부탁에도 친절히 응한다/);
+  assert.match(dataSection, /- \[3층 전체\] 직원 간 가벼운 신체 접촉은 자연스러운 인사다/);
+});
+
+test('an empty active-suggestion or CSA list renders as "없음" placeholders, not an empty or omitted section', () => {
+  const prompt = buildStoryPrompt({ master: { characters: {} }, save: { player: {} }, recent_memories: [] }, '계속', 1);
+  const content = prompt.messages[0].content;
+  const suggestionData = content.slice(content.lastIndexOf('[STATUS PANEL DATA — 활성 최면]'), content.lastIndexOf('[STATUS PANEL DATA — 상식 개변]'));
+  assert.match(suggestionData, /없음/);
+  const csaData = content.slice(content.lastIndexOf('[STATUS PANEL DATA — 상식 개변]'), content.indexOf('[게임 설정]'));
+  assert.match(csaData, /활성 0개 \/ 최대 1개, 오늘 사용 0회 \/ 한도 1회/);
+  assert.match(csaData, /없음/);
+});
+
+// ─────────────────────────────────────────────
+// Narrative length: gate [2] on [1]'s minimum, five progress beats
+// ─────────────────────────────────────────────
+
+test('the narrative length contract blocks starting [2] before [1] meets its lower bound, and lists the five progress beats', () => {
+  const section = buildNarrativeLengthSection();
+  assert.match(section, /\[1\]이 목표 하한을 채우기 전에는 \[2\. 플레이어 상황판\]을 시작하지 않는다/);
+  assert.match(section, /출력하기 전에 내부적으로 \[1\]이 목표 하한을 충족했는지 스스로 확인한다/);
+  assert.match(section, /1\. 입력에 대한 즉각적인 반응/);
+  assert.match(section, /2\. 첫 번째 대화·행동 전개/);
+  assert.match(section, /3\. 추가 질문·정보·행동 전개/);
+  assert.match(section, /4\. 장면의 구체적인 결과/);
+  assert.match(section, /5\. 다음 턴으로 이어지는 결정·갈등 또는 새 목표/);
+});
+
+test('the NPC dialogue minimum contract requires real progress between each NPC line, not just line count', () => {
+  const section = buildNpcDialogueMinimumSection();
+  assert.match(section, /각 NPC 발언 사이에는 새로운 행동·정보·결정·관계 변화 중 하나가 있어야 한다/);
 });
 
 // ─────────────────────────────────────────────

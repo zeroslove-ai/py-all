@@ -821,7 +821,7 @@ function buildConfirmedPlayerSetupSection(profile = {}) {
 }
 
 function buildPlayerSetupGenerationSection() {
-  return `\n\n[PLAYER SETUP PHASE — GENERATE 4 CANDIDATES]\n1. 삭제되지 않는 최면 어플 발견과 핵심 기능을 2~3문장으로 짧게 알린다.\n2. 병원 장면이나 등록 NPC는 아직 등장시키지 않는다.\n3. 플레이어 캐릭터 후보를 정확히 4개 만든다. 역할 슬롯은 고정한다:\n   1번(hospital_worker): 병원에서 근무하는 성인 — 의사, 인턴, 간호사, 임상병리사, 방사선사, 물리치료사, 병원 행정직, 보안요원 등\n   2번(patient): 현재 입원 중이거나 외래 진료를 받는 성인 환자. 질병·부상은 정상적인 플레이를 막지 않는 수준이어야 하며, 의식불명이나 심각한 인지장애 등 플레이가 어려운 설정은 금지한다.\n   3번(hospital_adjacent): 병원과 연결된 외부인 — 보호자, 면회객, 납품업자, 보험조사원, 기자, 실습생, 병원 재단 관계자 등\n   4번(wildcard): 앞의 세 역할과 플레이 방식이 겹치지 않으면서 병원 세계관에서 자연스럽게 시작할 수 있는 성인\n4. 이름·나이·성별·직업 세부 설정은 매번 새롭고 다양하게 만들되, 네 후보는 신분과 병원 접근 권한, NPC에게 접근하는 방식, 초반 난이도, 최면 어플을 쓸 동기, 시작 장소와 첫 사건이 서로 확실히 달라야 한다.\n5. 모든 후보는 성인(만 19세 이상)이다.\n6. 각 후보를 다음 카드 형식으로 출력한다 (마크다운 굵게 **는 새로 쓰지 않는다):\n[플레이어 후보 N — 역할 한글명]\n이름 · 나이 · 성별\n직업(전공/직급 있으면 함께)\n시작 위치: ...\n플레이 특징: ...\n배경: ...\n7. [선택지]에는 정확히 네 개, 각 후보를 "이름 — 짧은 직업/역할 요약으로 시작한다" 형태의 한 문장으로 적는다. 번호나 마커 없이 문장 자체만 적는다.\n8. 항목별로 하나씩 질문하지 않는다. 사용자가 특정 조건을 말하면 다음 응답에서 네 후보 전체를 그 조건에 맞게 다시 만든다.`;
+  return `\n\n[PLAYER SETUP PHASE — GENERATE 4 CANDIDATES — HIGHEST PRIORITY, NO QUESTIONS]\n사용자에게 "어떤 캐릭터를 원하시나요?", "어떤 세계에서 시작하고 싶나요?" 같은 열린 질문을 절대 하지 않는다. 사용자의 대답을 기다리지 말고, 지금 이 응답 안에서 아래 4개 후보를 전부 직접 만들어서 완성된 형태로 즉시 보여준다. "곧 결정됩니다", "캐릭터 생성 대기 중"처럼 후보 생성을 다음 턴으로 미루는 대기 화면을 만들지 않는다.\n1. 삭제되지 않는 최면 어플 발견과 핵심 기능을 2~3문장으로 짧게 알린다.\n2. 병원 장면이나 등록 NPC는 아직 등장시키지 않는다.\n3. 바로 이어서, 플레이어 캐릭터 후보 4개를 전부 확정해서 만든다(질문으로 대체하지 않는다). 역할 슬롯은 고정한다:\n   1번(hospital_worker): 병원에서 근무하는 성인 — 의사, 인턴, 간호사, 임상병리사, 방사선사, 물리치료사, 병원 행정직, 보안요원 등\n   2번(patient): 현재 입원 중이거나 외래 진료를 받는 성인 환자. 질병·부상은 정상적인 플레이를 막지 않는 수준이어야 하며, 의식불명이나 심각한 인지장애 등 플레이가 어려운 설정은 금지한다.\n   3번(hospital_adjacent): 병원과 연결된 외부인 — 보호자, 면회객, 납품업자, 보험조사원, 기자, 실습생, 병원 재단 관계자 등\n   4번(wildcard): 앞의 세 역할과 플레이 방식이 겹치지 않으면서 병원 세계관에서 자연스럽게 시작할 수 있는 성인\n4. 이름·나이·성별·직업 세부 설정은 매번 새롭고 다양하게 만들되, 네 후보는 신분과 병원 접근 권한, NPC에게 접근하는 방식, 초반 난이도, 최면 어플을 쓸 동기, 시작 장소와 첫 사건이 서로 확실히 달라야 한다.\n5. 모든 후보는 성인(만 19세 이상)이다.\n6. 네 후보 각각을 다음 카드 형식으로 빠짐없이 출력한다 (마크다운 굵게 **는 새로 쓰지 않는다):\n[플레이어 후보 N — 역할 한글명]\n이름 · 나이 · 성별\n직업(전공/직급 있으면 함께)\n시작 위치: ...\n플레이 특징: ...\n배경: ...\n7. [선택지]에는 정확히 네 개, 각 후보를 "이름 — 짧은 직업/역할 요약으로 시작한다" 형태의 한 문장으로 적는다. 번호나 마커 없이 문장 자체만 적는다. 카테고리를 묻는 질문형 선택지를 만들지 않는다.\n8. 항목별로 하나씩 질문하지 않는다. 사용자가 특정 조건을 말하면 다음 응답에서 네 후보 전체를 그 조건에 맞게 다시 만든다.`;
 }
 
 function buildPlayerSetupRedisplaySection(recommendations) {
@@ -997,7 +997,14 @@ ${recentMemorySlice.map((m, index) => clipHeadTail(m.content || '', index === re
   const openingFlow = mode === 'opening'
     ? `\n\n[OPENING PHASE — AFTER PLAYER SETUP]\nThe player setup is confirmed. Generate only the first hospital scene and first NPC encounter now. Do not repeat the app discovery, app feature explanation, player questions, or character recommendation. Never claim that the player has already used the app to change the hospital in the past.\n`
     : '';
-  const systemPrompt = coreRules + playerGate + modeSection + rulebookSection + buildNpcLocationRules() + buildAppSystemRulesSection() + currentSceneSection + npcProfileSection + explicitMentionSection + csaSection + suggestionSection + narrativeLengthSection + npcDialogueSection + antiRepetitionSection + playerStatusPanel + contextSection + feedbackSection + continuitySection + finalFormatRules + openingFlow;
+  // Repeats the no-questions rule right at the end of the prompt (same
+  // recency-favoring position as openingFlow/finalFormatRules) — a live test
+  // showed the model asking "what kind of character do you want?" instead of
+  // generating the 4 cards when this instruction only appeared near the top.
+  const playerSetupReminder = mode === 'player_setup'
+    ? `\n\n[REMINDER — PLAYER SETUP PHASE]\n지금 이 응답 안에서 질문 없이 4개 캐릭터 후보를 전부 만들어서 카드 형식으로 즉시 보여준다. "캐릭터 생성 대기 중"처럼 결정을 미루는 대기 화면이나 사용자에게 방향을 먼저 묻는 질문형 선택지를 만들지 않는다.\n`
+    : '';
+  const systemPrompt = coreRules + playerGate + modeSection + rulebookSection + buildNpcLocationRules() + buildAppSystemRulesSection() + currentSceneSection + npcProfileSection + explicitMentionSection + csaSection + suggestionSection + narrativeLengthSection + npcDialogueSection + antiRepetitionSection + playerStatusPanel + contextSection + feedbackSection + continuitySection + finalFormatRules + openingFlow + playerSetupReminder;
 
   return {
     mode,

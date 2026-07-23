@@ -19,6 +19,10 @@ import {
   isSetupComplete,
   isApprovalInput,
   mergeRecommendation,
+  normalizeRecommendation,
+  normalizeRecommendationCandidate,
+  normalizeRecommendations,
+  resolveRecommendationSelection,
   normalizeRegisteredNpcExtract,
   mindMonologueLength,
   validateMindMonologue,
@@ -636,17 +640,190 @@ test('opening mode remains explicit until opening is committed', () => {
   assert.equal(prompt.mode, 'opening');
 });
 
-test('player setup has one recommendation contract and defers the hospital until setup completes', () => {
+test('player setup phase (no candidates saved yet) asks for exactly 4 role-locked adult candidates, and defers the hospital until setup completes', () => {
   const setup = buildStoryPrompt({ master: {}, save: { player: {} }, recent_memories: [] }, 'start', 0);
   const opening = buildStoryPrompt({ master: {}, save: { player_setup: { status: 'complete' }, player: { name: 'A', job: 'doctor' } }, recent_memories: [] }, 'start', 0);
   assert.equal(setup.mode, 'player_setup');
-  assert.match(setup.messages[0].content, /\[PLAYER SETUP PHASE\]/);
-  assert.match(setup.messages[0].content, /병원 장면이나 NPC는 아직 등장시키지 않는다/);
-  assert.match(setup.messages[0].content, /① 추천 설정으로 시작한다/);
-  assert.equal((setup.messages[0].content.match(/\[PLAYER SETUP PHASE\]/g) || []).length, 1);
+  assert.match(setup.messages[0].content, /\[PLAYER SETUP PHASE — GENERATE 4 CANDIDATES\]/);
+  assert.match(setup.messages[0].content, /병원 장면이나 등록 NPC는 아직 등장시키지 않는다/);
+  assert.match(setup.messages[0].content, /정확히 4개 만든다/);
+  assert.match(setup.messages[0].content, /1번\(hospital_worker\): 병원에서 근무하는 성인/);
+  assert.match(setup.messages[0].content, /2번\(patient\): 현재 입원 중이거나 외래 진료를 받는 성인 환자/);
+  assert.match(setup.messages[0].content, /의식불명이나 심각한 인지장애 등 플레이가 어려운 설정은 금지한다/);
+  assert.match(setup.messages[0].content, /3번\(hospital_adjacent\): 병원과 연결된 외부인/);
+  assert.match(setup.messages[0].content, /4번\(wildcard\): 앞의 세 역할과 플레이 방식이 겹치지 않으면서/);
+  assert.match(setup.messages[0].content, /모든 후보는 성인\(만 19세 이상\)이다/);
+  assert.equal((setup.messages[0].content.match(/\[PLAYER SETUP PHASE/g) || []).length, 1);
   assert.equal(opening.mode, 'opening');
   assert.match(opening.messages[0].content, /병원 첫 장면과 첫 NPC 조우만/);
   assert.match(opening.messages[0].content, /어플 발견, 기능 설명, 설정 질문, 추천안은 다시 출력하지 않는다/);
+});
+
+const FOUR_SETUP_PRESETS = [
+  {
+    id: 'preset_1', slot: 'hospital_worker', name: '김준호', age: 27, gender: '남성',
+    job: '정신건강의학과 전공의', major: '정신건강의학과', rank: '전공의',
+    background: '입사 2년차, 야간 당직이 잦다', starting_location: '정신건강의학과 당직실',
+    play_hook: '병원 내부 접근성이 높지만 행동이 기록에 남기 쉽다.',
+    choice_label: '김준호 — 정신건강의학과 전공의로 시작한다'
+  },
+  {
+    id: 'preset_2', slot: 'patient', name: '이서연', age: 24, gender: '여성',
+    job: '외래 환자', background: '경미한 손목 골절로 통원 치료 중',
+    starting_location: '정형외과 외래 대기실',
+    play_hook: '환자 신분이라 병원 곳곳을 자유롭게 오가긴 어렵다.',
+    choice_label: '이서연 — 통원 치료 중인 환자로 시작한다'
+  },
+  {
+    id: 'preset_3', slot: 'hospital_adjacent', name: '박도윤', age: 31, gender: '남성',
+    job: '의료기기 납품업자', background: '매주 병원에 납품하러 방문한다',
+    starting_location: '1층 물류 하역장',
+    play_hook: '병원 출입은 자유롭지만 체류 시간이 제한적이다.',
+    choice_label: '박도윤 — 의료기기 납품업자로 시작한다'
+  },
+  {
+    id: 'preset_4', slot: 'wildcard', name: '최하늘', age: 26, gender: '여성',
+    job: '병원 홍보팀 프리랜서 사진작가', background: '병원 브로슈어 촬영 의뢰를 받았다',
+    starting_location: '로비 촬영 부스',
+    play_hook: '자유롭게 돌아다니지만 병원 소속이 아니라 신뢰를 얻는 속도가 느리다.',
+    choice_label: '최하늘 — 홍보용 사진작가로 시작한다'
+  }
+];
+
+test('normalizeRecommendations accepts exactly 4 valid, role-covering, adult candidates with unique ids/labels', () => {
+  const normalized = normalizeRecommendations(FOUR_SETUP_PRESETS);
+  assert.equal(normalized.length, 4);
+  assert.deepEqual(normalized.map(c => c.slot), ['hospital_worker', 'patient', 'hospital_adjacent', 'wildcard']);
+});
+
+test('normalizeRecommendations rejects a wrong array size', () => {
+  assert.equal(normalizeRecommendations(FOUR_SETUP_PRESETS.slice(0, 3)), null);
+  assert.equal(normalizeRecommendations([...FOUR_SETUP_PRESETS, { ...FOUR_SETUP_PRESETS[3], id: 'preset_5', choice_label: '다섯 번째' }]), null);
+  assert.equal(normalizeRecommendations(null), null);
+  assert.equal(normalizeRecommendations('not-an-array'), null);
+});
+
+test('normalizeRecommendations requires at least one hospital_worker and one patient slot', () => {
+  const noWorker = FOUR_SETUP_PRESETS.map(c => c.slot === 'hospital_worker' ? { ...c, slot: 'wildcard' } : c);
+  assert.equal(normalizeRecommendations(noWorker), null);
+  const noPatient = FOUR_SETUP_PRESETS.map(c => c.slot === 'patient' ? { ...c, slot: 'wildcard' } : c);
+  assert.equal(normalizeRecommendations(noPatient), null);
+});
+
+test('normalizeRecommendations rejects duplicate ids or duplicate choice_labels', () => {
+  const dupeIds = FOUR_SETUP_PRESETS.map((c, i) => i === 1 ? { ...c, id: 'preset_1' } : c);
+  assert.equal(normalizeRecommendations(dupeIds), null);
+  const dupeLabels = FOUR_SETUP_PRESETS.map((c, i) => i === 1 ? { ...c, choice_label: FOUR_SETUP_PRESETS[0].choice_label } : c);
+  assert.equal(normalizeRecommendations(dupeLabels), null);
+});
+
+test('normalizeRecommendationCandidate rejects a candidate younger than 19', () => {
+  assert.equal(normalizeRecommendationCandidate({ ...FOUR_SETUP_PRESETS[1], age: 17 }, 'preset_2'), null);
+  assert.equal(normalizeRecommendationCandidate({ ...FOUR_SETUP_PRESETS[1], age: 19 }, 'preset_2')?.age, 19);
+});
+
+test('resolveRecommendationSelection maps ①-④, 1-4, and the stored choice_label (with or without a leading marker) to the right preset', () => {
+  const playerSetup = { recommendations: FOUR_SETUP_PRESETS };
+  assert.equal(resolveRecommendationSelection('1', playerSetup).id, 'preset_1');
+  assert.equal(resolveRecommendationSelection('①', playerSetup).id, 'preset_1');
+  assert.equal(resolveRecommendationSelection('2.', playerSetup).id, 'preset_2');
+  assert.equal(resolveRecommendationSelection(FOUR_SETUP_PRESETS[2].choice_label, playerSetup).id, 'preset_3');
+  assert.equal(resolveRecommendationSelection(`4. ${FOUR_SETUP_PRESETS[3].choice_label}`, playerSetup).id, 'preset_4');
+  assert.equal(resolveRecommendationSelection('전혀 다른 말', playerSetup), null);
+  assert.equal(resolveRecommendationSelection('', playerSetup), null);
+  assert.equal(resolveRecommendationSelection('1', { recommendations: [] }), null);
+  assert.equal(resolveRecommendationSelection('1', null), null);
+});
+
+test('buildSavePatch writes the selected preset directly to player, marks setup complete, and starts the opening — independent of Extract', () => {
+  const previousSave = { player_setup: { status: 'recommended', recommendations: FOUR_SETUP_PRESETS } };
+  const patch = buildSavePatch({ character_id: 'narrator', player_recommendation: { name: '엉뚱한값' } }, {}, null, previousSave, 1, '2');
+  assert.deepEqual(patch.player, normalizeRecommendation(FOUR_SETUP_PRESETS[1]));
+  assert.equal(patch.player_setup.status, 'complete');
+  assert.equal(patch.player_setup.selected_id, 'preset_2');
+  assert.equal(patch.opening_started, true);
+});
+
+test('buildSavePatch saves exactly 4 normalized recommendations from Extract while no selection has been made yet', () => {
+  const patch = buildSavePatch({ character_id: 'narrator', player_recommendations: FOUR_SETUP_PRESETS }, {}, null, {}, 1, '__START_PLAYER_SETUP__');
+  assert.equal(patch.player_setup.status, 'recommended');
+  assert.equal(patch.player_setup.recommendations.length, 4);
+  assert.equal(patch.player, undefined);
+});
+
+test('a malformed 4-candidate set from Extract is not saved at all (setup stays pending rather than half-broken)', () => {
+  const patch = buildSavePatch({ character_id: 'narrator', player_recommendations: FOUR_SETUP_PRESETS.slice(0, 2) }, {}, null, {}, 1, '__START_PLAYER_SETUP__');
+  assert.equal('player_setup' in patch, false);
+});
+
+test('legacy single-recommendation saves still work: old data with a single "recommendation" is read as before', () => {
+  const previousSave = { player_setup: { status: 'recommended', recommendation: { name: '민준', age: 29, job: '의사' } } };
+  // No recommendations array exists, so structural selection can't match; the
+  // approval must fall through to the legacy phrase-matching path.
+  const patch = buildSavePatch({ character_id: 'narrator' }, {}, null, previousSave, 1, '추천 설정으로 시작한다');
+  assert.deepEqual(patch.player, { name: '민준', age: 29, job: '의사' });
+  assert.equal(patch.player_setup.status, 'complete');
+  assert.equal(patch.opening_started, true);
+});
+
+test('isApprovalInput recognizes the literal button sentence "추천 설정으로 시작한다", not just the truncated phrase', () => {
+  assert.equal(isApprovalInput('추천 설정으로 시작한다'), true);
+  assert.equal(isApprovalInput('이 설정으로 시작한다'), true);
+  assert.equal(isApprovalInput('추천 설정으로 시작'), true);
+});
+
+test('CONFIRMED PLAYER SETUP is injected into the opening turn using the just-resolved selection, and instructs the model to start the hospital opening immediately without re-asking', () => {
+  const previousSave = { player_setup: { status: 'recommended', recommendations: FOUR_SETUP_PRESETS } };
+  const prompt = buildStoryPrompt({ master: {}, save: previousSave, recent_memories: [] }, '1', 0);
+  assert.equal(prompt.mode, 'opening');
+  const content = prompt.messages[0].content;
+  assert.match(content, /\[CONFIRMED PLAYER SETUP — ESTABLISHED FACT\]/);
+  assert.match(content, /이름: 김준호/);
+  assert.match(content, /직업: 정신건강의학과 전공의/);
+  assert.match(content, /시작 장소: 정신건강의학과 당직실/);
+  assert.match(content, /이 설정을 다시 추천하거나 질문하지 않는다/);
+  assert.match(content, /선택한 캐릭터로 병원 오프닝을 즉시 시작한다/);
+});
+
+test('when 4 candidates are already saved but the input does not match any of them, Story re-shows the same 4 without regenerating new ones', () => {
+  const previousSave = { player_setup: { status: 'recommended', recommendations: FOUR_SETUP_PRESETS } };
+  const prompt = buildStoryPrompt({ master: {}, save: previousSave, recent_memories: [] }, '__START_PLAYER_SETUP__', 0);
+  assert.equal(prompt.mode, 'player_setup');
+  const content = prompt.messages[0].content;
+  assert.match(content, /\[PLAYER SETUP PHASE — CANDIDATES ALREADY GENERATED\]/);
+  assert.match(content, /새 후보를 만들지 않는다/);
+  assert.match(content, /김준호/);
+  assert.match(content, /이서연/);
+  assert.match(content, /박도윤/);
+  assert.match(content, /최하늘/);
+});
+
+test('the hypnosis app contract bans fake scan/registration/level-lock systems and confines all suggestion mutation to app usage', () => {
+  const prompt = buildStoryPrompt({ master: { characters: {} }, save: { player: {} }, recent_memories: [] }, '계속', 1);
+  const content = prompt.messages[0].content;
+  assert.match(content, /\[HYPNOSIS APP CONTRACT — HIGH PRIORITY\]/);
+  assert.match(content, /별도 스캔이나 대상자 등록은 필요 없다/);
+  assert.match(content, /테스트 대상 검색, 생체 신호 스캔, 대상자 등록, 스캔 완료, 초기 스캔 안정도, 데모 모드, 암시 라이브러리 잠금, Lv\.3 암시 해제, Lv\.5 상식 개변 해제/);
+  assert.match(content, /플레이어는 선천적인 최면술사나 언어 암시 전문가가 아니다/);
+  assert.match(content, /일반 대화, 설득, 반복 발언, 눈맞춤, 목소리, 분위기 조성만으로는 활성 암시를 생성·변경하지 않고/);
+});
+
+test('Extract mind-monitor contract requires npc_emotion for any registered NPC on screen even with zero active suggestions', () => {
+  const prompt = buildExtractPrompt('서사', '입력', { master: {}, save: {} }, [], 1);
+  assert.match(prompt, /활성 암시가 하나도 없어도, character_id가 narrator가 아닌 등록 NPC이고 그 NPC가 방금 서사에 실제로 등장한 정상 턴이면 npc_emotion\(표면의식\/잠재의식\/신체적·행동적 반응\)을 반드시 모두 생성한다/);
+});
+
+test('Extract suggestion_action contract only fires on completed app usage, never on ordinary persuasion', () => {
+  const prompt = buildExtractPrompt('서사', '입력', { master: {}, save: {} }, [], 1);
+  assert.match(prompt, /플레이어가 최면 어플을 실제로 사용해 암시를 생성·변경·강화·삭제한 것이 명확히 완료됐을 때만/);
+  assert.match(prompt, /일반 대화·설득·반복 발언·분위기 조성만으로 암시를 활용하거나 암시 효과를 체감한 턴에는 suggestion_action을 반환하지 않는다/);
+});
+
+test('Extract PLAYER SETUP RECOMMENDATION contract requires exactly-4 structured recommendations for new cards, and never lets Extract guess the selection', () => {
+  const prompt = buildExtractPrompt('서사', '입력', { master: {}, save: {} }, [], 1);
+  assert.match(prompt, /player_recommendations에 정확히 4개를 반환한다/);
+  assert.match(prompt, /choice_label\(서사의 \[선택지\]에 실제로 적은 문장과 완전히 동일한 문자열\)/);
+  assert.match(prompt, /후보 선택\(번호, ①~④, 선택 문장, "추천 설정으로 시작한다" 등\)은 Worker가 저장된 recommendations에서 직접 판정하므로/);
 });
 
 test('approval stores the existing recommendation deterministically', () => {

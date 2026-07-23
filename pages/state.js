@@ -12,6 +12,7 @@ const state = {
   isStreaming: false,
   autoTts: true,
   pendingResetConfirm: false,
+  startupRequested: false,
 
   // ─── 렌더링 상태 ───
   narrativeText: '',

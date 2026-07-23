@@ -43,9 +43,36 @@ test('sidebar uses compact character facts and relationship counters, not choice
 });
 
 test('reset clears the view and starts only the player setup prologue', () => {
-  assert.match(pageSource, /await api\.reset\(state\.gameId\); close\(\); ui\.clearGameView\(\); await loadGameContext\(\); await startPlayerSetup\(\);/);
+  assert.match(pageSource, /close\(\); await resetAndStartNewGame\(\);/);
   const startSetup = pageSource.match(/async function startPlayerSetup\(\)[\s\S]*?\n    }/)?.[0] || '';
   assert.match(startSetup, /__START_PLAYER_SETUP__/);
+});
+
+test('resetAndStartNewGame resets state then immediately calls startPlayerSetup — no user input required to see recommendations', () => {
+  const resetFn = pageSource.match(/async function resetAndStartNewGame\(\)[\s\S]*?\n    }/)?.[0] || '';
+  assert.match(resetFn, /await api\.reset\(state\.gameId\)/);
+  assert.match(resetFn, /ui\.clearGameView\(\)/);
+  assert.match(resetFn, /state\.turnCount = 0/);
+  assert.match(resetFn, /await startPlayerSetup\(\)/);
+});
+
+test('loadGameContext auto-starts player setup on a fresh/empty game (turn 0, incomplete setup, no memories) without requiring user input', () => {
+  const loadFn = pageSource.match(/async function loadGameContext\(\)[\s\S]*?\n    }/)?.[0] || '';
+  assert.match(loadFn, /state\.turnCount === 0/);
+  assert.match(loadFn, /player_setup\?\.status !== 'complete'/);
+  assert.match(loadFn, /recent_memories \|\| \[\]\)\.length/);
+  assert.match(loadFn, /await startPlayerSetup\(\)/);
+});
+
+test('startPlayerSetup guards against duplicate concurrent Story requests with a startupRequested flag', () => {
+  const startSetup = pageSource.match(/async function startPlayerSetup\(\)[\s\S]*?\n    }/)?.[0] || '';
+  assert.match(startSetup, /state\.startupRequested/);
+});
+
+test('a failed auto-start (systemStart) shows a distinct "새 게임 다시 시작" retry button instead of demanding input', () => {
+  const retryStoryFn = pageSource.match(/async function retryStory\(pending\)[\s\S]*?\n    }/)?.[0] || '';
+  assert.match(retryStoryFn, /pending\.systemStart/);
+  assert.match(retryStoryFn, /새 게임 다시 시작/);
 });
 
 test('mind monitor preserves quoted monologues and separates observable reactions', () => {

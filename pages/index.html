@@ -446,10 +446,31 @@
             .catch(() => {});
         }
         ui.setLoading(false);
+
+        const setupIncomplete = state.context?.save?.player_setup?.status !== 'complete';
+        const hasNoMemories = !(state.context?.recent_memories || []).length;
+        if (state.turnCount === 0 && setupIncomplete && hasNoMemories && !state.startupRequested) {
+          await startPlayerSetup();
+        }
       } catch (e) {
         ui.showSystemMessage('컨텍스트 로드 실패: ' + e.message);
         ui.setLoading(false);
       }
+    }
+
+    // Reset then immediately kick off the player_setup Story call in one
+    // flow, so the recommendation cards appear without the user typing
+    // anything — loadGameContext() alone never triggers Story requests.
+    async function resetAndStartNewGame() {
+      await api.reset(state.gameId);
+      ui.clearGameView();
+      state.turnCount = 0;
+      state.context = null;
+      state.isStreaming = false;
+      // startPlayerSetup() owns the state.startupRequested guard itself, so
+      // a second click (or a race with the page-load auto-start) can't fire
+      // a duplicate Story request.
+      await startPlayerSetup();
     }
 
     // ─── Event Listeners ───
@@ -499,7 +520,7 @@
       const close = () => overlay.remove();
       overlay.addEventListener('click', event => { if (event.target === overlay) close(); });
       overlay.querySelector('.cancel').addEventListener('click', close);
-      overlay.querySelector('.confirm').addEventListener('click', async () => { await api.reset(state.gameId); close(); ui.clearGameView(); await loadGameContext(); await startPlayerSetup(); });
+      overlay.querySelector('.confirm').addEventListener('click', async () => { close(); await resetAndStartNewGame(); });
       document.addEventListener('keydown', function onKey(event) { if (event.key === 'Escape') { close(); document.removeEventListener('keydown', onKey); } });
       document.body.appendChild(overlay); overlay.querySelector('.cancel').focus();
     }
@@ -527,7 +548,11 @@
         ui.setChoicesEnabled(true);
         const code = error.status || 'UNKNOWN';
         const suffix = error.requestId ? ` · 요청 ${error.requestId}` : '';
-        ui.showRetryNotice(`서사 생성에 실패했습니다. [${code}]${suffix}`, '다시 생성', () => retryStory(pending));
+        if (pending.systemStart) {
+          ui.showRetryNotice(`새 게임을 시작하지 못했습니다. [${code}]${suffix}`, '새 게임 다시 시작', () => startPlayerSetup());
+        } else {
+          ui.showRetryNotice(`서사 생성에 실패했습니다. [${code}]${suffix}`, '다시 생성', () => retryStory(pending));
+        }
       } finally { state.isStreaming = false; ui.setLoading(false); }
     }
 
@@ -645,8 +670,13 @@
     }
 
     async function startPlayerSetup() {
-      if (!state.gameId || state.isStreaming) return;
-      await retryStory({ input: '__START_PLAYER_SETUP__', nextTurn: state.turnCount + 1, narrative: null, extract: null, mode: 'player_setup', systemStart: true });
+      if (!state.gameId || state.isStreaming || state.startupRequested) return;
+      state.startupRequested = true;
+      try {
+        await retryStory({ input: '__START_PLAYER_SETUP__', nextTurn: state.turnCount + 1, narrative: null, extract: null, mode: 'player_setup', systemStart: true });
+      } finally {
+        state.startupRequested = false;
+      }
     }
 
     window.resumeGame = resumeGame;

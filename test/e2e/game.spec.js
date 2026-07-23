@@ -24,7 +24,8 @@ const report = {
   smoke_game_id: SMOKE_GAME_ID,
   test_game_id: TEST_GAME_ID || null,
   smoke: null,
-  one_turn: null
+  one_turn: null,
+  player_setup: null
 };
 
 function trimSlash(value) {
@@ -309,5 +310,116 @@ test('manual one-turn flow on a dedicated test game', async ({ page, request }) 
     world_state_before: before.context?.save?.world_state || null,
     world_state_patch: extractBody?.extract?.world_state_patch || null,
     world_state_after: after.context?.save?.world_state || null
+  };
+});
+
+test('player setup: reset auto-shows 4 candidates with no input, and picking one starts the hospital opening in the same flow', async ({ page, request }) => {
+  test.skip(MODE !== 'player_setup', 'workflow mode is not player_setup');
+  expect(TEST_GAME_ID, 'player_setup mode requires a dedicated test_game_id').not.toBe('');
+  expect(TEST_GAME_ID, 'production game_id is blocked for mutating E2E tests').not.toBe(SMOKE_GAME_ID);
+
+  const resetResponse = await request.post(`${API_BASE}/api/reset`, { data: { game_id: TEST_GAME_ID } });
+  expect(resetResponse.ok(), `POST /api/reset returned ${resetResponse.status()}`).toBeTruthy();
+
+  const diagnostics = startDiagnostics(page);
+
+  // No fill()/click() before this navigation — the 4 candidates must appear
+  // purely from loadGameContext() detecting turn 0 + incomplete setup.
+  const autoStoryPromise = page.waitForResponse(response =>
+    response.url().startsWith(API_BASE) && new URL(response.url()).pathname === '/api/story' && response.request().method() === 'POST',
+  { timeout: 3 * 60 * 1000 });
+  const autoExtractPromise = page.waitForResponse(response =>
+    response.url().startsWith(API_BASE) && new URL(response.url()).pathname === '/api/extract' && response.request().method() === 'POST',
+  { timeout: 5 * 60 * 1000 });
+  const autoCommitPromise = page.waitForResponse(response =>
+    response.url().startsWith(API_BASE) && new URL(response.url()).pathname === '/api/commit-turn' && response.request().method() === 'POST',
+  { timeout: 7 * 60 * 1000 });
+
+  await page.addInitScript(({ id }) => {
+    localStorage.setItem('autoTts', 'false');
+    localStorage.setItem('gameId', id);
+    sessionStorage.clear();
+  }, { id: TEST_GAME_ID });
+  await page.goto(`${BASE_URL}/?game=${encodeURIComponent(TEST_GAME_ID)}`, { waitUntil: 'domcontentloaded' });
+
+  const autoStoryResponse = await autoStoryPromise;
+  expect(autoStoryResponse.ok(), `auto-start Story returned ${autoStoryResponse.status()}`).toBeTruthy();
+  const autoExtractResponse = await autoExtractPromise;
+  const autoExtractBody = await responseJson(autoExtractResponse);
+  expect(autoExtractResponse.ok(), `auto-start Extract returned ${autoExtractResponse.status()}: ${JSON.stringify(autoExtractBody)}`).toBeTruthy();
+  const autoCommitResponse = await autoCommitPromise;
+  const autoCommitBody = await responseJson(autoCommitResponse);
+  expect(autoCommitResponse.ok(), `auto-start Commit returned ${autoCommitResponse.status()}: ${JSON.stringify(autoCommitBody)}`).toBeTruthy();
+
+  await expect(page.locator('#loading')).not.toHaveClass(/active/, { timeout: 60_000 });
+
+  const candidateText = await page.locator('body').innerText();
+  expect(candidateText).toMatch(/플레이어 후보 1/);
+  expect(candidateText).toMatch(/병원 직원|hospital_worker/);
+  expect(candidateText).toMatch(/환자/);
+  expect(candidateText).not.toMatch(/테스트 대상 검색|생체 신호 스캔|대상자 등록|스캔 완료|초기 스캔 안정도|데모 모드|암시 라이브러리 잠금|Lv\.3 암시 해제|Lv\.5 상식 개변 해제/);
+
+  const candidateButtons = page.locator('#choice-buttons button');
+  await expect(candidateButtons).toHaveCount(4);
+  const firstCandidateLabel = (await candidateButtons.nth(0).innerText()).trim();
+
+  const openingStoryPromise = page.waitForResponse(response =>
+    response.url().startsWith(API_BASE) && new URL(response.url()).pathname === '/api/story' && response.request().method() === 'POST',
+  { timeout: 3 * 60 * 1000 });
+  const openingExtractPromise = page.waitForResponse(response =>
+    response.url().startsWith(API_BASE) && new URL(response.url()).pathname === '/api/extract' && response.request().method() === 'POST',
+  { timeout: 5 * 60 * 1000 });
+  const openingCommitPromise = page.waitForResponse(response =>
+    response.url().startsWith(API_BASE) && new URL(response.url()).pathname === '/api/commit-turn' && response.request().method() === 'POST',
+  { timeout: 7 * 60 * 1000 });
+
+  // Click #1 — the same turn's response must be the hospital opening itself,
+  // with no second round of user input.
+  await candidateButtons.nth(0).click();
+
+  const openingStoryResponse = await openingStoryPromise;
+  expect(openingStoryResponse.ok(), `opening Story returned ${openingStoryResponse.status()}`).toBeTruthy();
+  const openingExtractResponse = await openingExtractPromise;
+  const openingExtractBody = await responseJson(openingExtractResponse);
+  expect(openingExtractResponse.ok(), `opening Extract returned ${openingExtractResponse.status()}: ${JSON.stringify(openingExtractBody)}`).toBeTruthy();
+  const openingCommitResponse = await openingCommitPromise;
+  const openingCommitBody = await responseJson(openingCommitResponse);
+  expect(openingCommitResponse.ok(), `opening Commit returned ${openingCommitResponse.status()}: ${JSON.stringify(openingCommitBody)}`).toBeTruthy();
+
+  await expect(page.locator('#loading')).not.toHaveClass(/active/, { timeout: 60_000 });
+
+  const openingText = await page.locator('body').innerText();
+  expect(openingText).not.toMatch(/테스트 대상 검색|생체 신호 스캔|대상자 등록|스캔 완료|초기 스캔 안정도|데모 모드|암시 라이브러리 잠금|Lv\.3 암시 해제|Lv\.5 상식 개변 해제/);
+  expect(diagnostics.page_errors).toHaveLength(0);
+
+  const after = await fetchContext(request, TEST_GAME_ID);
+  expect(after.context?.save?.player_setup?.status).toBe('complete');
+  expect(typeof after.context?.save?.player_setup?.selected_id).toBe('string');
+  expect(after.context?.save?.opening_started).toBe(true);
+  expect(typeof after.context?.save?.player?.name).toBe('string');
+  expect(after.context.save.player.name.length).toBeGreaterThan(0);
+  expect(typeof after.context?.save?.player?.job).toBe('string');
+
+  const mindMonitorHasContent = openingExtractBody?.extract?.character_id
+    && openingExtractBody.extract.character_id !== 'narrator'
+    && typeof openingExtractBody.extract?.npc_emotion?.surface === 'string'
+    && openingExtractBody.extract.npc_emotion.surface.length > 0;
+
+  await page.screenshot({ path: resultPath('player-setup.png'), fullPage: true });
+  writeJson('player-setup-diagnostics.json', diagnostics);
+  writeJson('player-setup-auto-extract-response.json', autoExtractBody);
+  writeJson('player-setup-opening-extract-response.json', openingExtractBody);
+
+  report.player_setup = {
+    game_id: TEST_GAME_ID,
+    first_candidate_button_label: firstCandidateLabel,
+    auto_extract_recommendations_count: Array.isArray(autoExtractBody?.extract?.player_recommendations)
+      ? autoExtractBody.extract.player_recommendations.length : null,
+    selected_id: after.context?.save?.player_setup?.selected_id || null,
+    player_name: after.context?.save?.player?.name || null,
+    player_job: after.context?.save?.player?.job || null,
+    opening_character_id: openingExtractBody?.extract?.character_id || null,
+    mind_monitor_present_on_opening: Boolean(mindMonitorHasContent),
+    page_error_count: diagnostics.page_errors.length
   };
 });

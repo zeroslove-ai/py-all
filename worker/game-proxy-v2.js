@@ -914,6 +914,7 @@ function getCsaLimits(level) {
 const CSA_SCOPE_LABELS = {
   seoul_central_hospital: '서울중앙병원',
   hospital_floor_3: '서울중앙병원 3층',
+  hospital_floor_6: '서울중앙병원 6층',
   hospital_3ward: '서울중앙병원 3병동',
   hospital_6ward: '서울중앙병원 6병동',
   world: '병원 전체'
@@ -982,7 +983,12 @@ function buildApplicableCsaSection(save) {
 // ─────────────────────────────────────────────
 
 const WORLD_STATE_BUILDING_IDS = { '서울중앙병원': 'seoul_central_hospital', seoul_central_hospital: 'seoul_central_hospital' };
-const WORLD_STATE_FLOOR_IDS = { '3층': 'hospital_floor_3', hospital_floor_3: 'hospital_floor_3' };
+const WORLD_STATE_FLOOR_IDS = {
+  '3층': 'hospital_floor_3',
+  hospital_floor_3: 'hospital_floor_3',
+  '6층': 'hospital_floor_6',
+  hospital_floor_6: 'hospital_floor_6'
+};
 const WORLD_STATE_WARD_IDS = { '3병동': 'hospital_3ward', hospital_3ward: 'hospital_3ward', '6병동': 'hospital_6ward', hospital_6ward: 'hospital_6ward' };
 
 function normalizeWorldStateId(map, value) {
@@ -1018,10 +1024,17 @@ function hasStructuredEncounter(previousSave, characterId) {
 // A save from before npc_encounters existed still proves the NPC was already
 // met; these signals must never include npc_stats alone (every heroine may
 // have default stats pre-seeded without ever having been encountered).
+function hasMeaningfulNpcEmotion(emotion) {
+  if (!isPlainObject(emotion)) return false;
+  return ['surface', 'inner', 'physical_reaction'].some(key =>
+    typeof emotion[key] === 'string' && emotion[key].trim().length > 0
+  );
+}
+
 function hasLegacyEncounterEvidence(previousSave, characterId) {
   if (!characterId) return false;
   if (previousSave?.last_character_id === characterId) return true;
-  if (isPlainObject(previousSave?.npc_emotion?.[characterId]) && Object.keys(previousSave.npc_emotion[characterId]).length > 0) return true;
+  if (hasMeaningfulNpcEmotion(previousSave?.npc_emotion?.[characterId])) return true;
   if (isPlainObject(previousSave?.npc_stat_changes?.[characterId])) return true;
   if (isPlainObject(previousSave?.npc_relationship_state?.[characterId])) return true;
   return false;
@@ -1035,10 +1048,13 @@ function clampStatValue(value, min, max) {
 
 function normalizeFirstEncounterStats(raw) {
   if (!isPlainObject(raw)) return null;
+  const affinity = Number(raw['호감도']);
+  const trust = Number(raw['신뢰도']);
+  if (!Number.isFinite(affinity) || !Number.isFinite(trust)) return null;
   const reason = typeof raw.reason === 'string' ? raw.reason.trim().slice(0, 240) : '';
   return {
-    호감도: clampStatValue(raw['호감도'], 0, 35),
-    신뢰도: clampStatValue(raw['신뢰도'], 0, 35),
+    호감도: clampStatValue(affinity, 0, 35),
+    신뢰도: clampStatValue(trust, 0, 35),
     reason
   };
 }

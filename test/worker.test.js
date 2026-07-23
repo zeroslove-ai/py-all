@@ -812,15 +812,18 @@ test('player setup phase (no candidates saved yet) asks for exactly 4 role-locke
   assert.match(setup.messages[0].content, /사용자에게 "어떤 캐릭터를 원하시나요\?", "어떤 세계에서 시작하고 싶나요\?" 같은 열린 질문을 절대 하지 않는다/);
   assert.match(setup.messages[0].content, /병원 장면이나 등록 NPC는 아직 등장시키지 않는다/);
   assert.match(setup.messages[0].content, /플레이어 캐릭터 후보 4개를 전부 확정해서 만든다/);
+  assert.match(setup.messages[0].content, /네 후보 모두 성인 남성이다/);
   assert.match(setup.messages[0].content, /\[REMINDER — PLAYER SETUP PHASE\]/);
   assert.match(setup.messages[0].content, /"대기 중"처럼 결정을 미루는 표현이나 사용자에게 방향을 먼저 묻는 질문형 선택지를 만들지 않는다/);
-  assert.match(setup.messages[0].content, /\[3\. 선택지\]는 반드시 방금 만든 4개 플레이어 후보의 선택 문장이어야 하며, 등록 NPC를 고르는 선택지가 되어서는 안 된다/);
-  assert.match(setup.messages[0].content, /1번\(hospital_worker\): 병원에서 근무하는 성인/);
-  assert.match(setup.messages[0].content, /2번\(patient\): 현재 입원 중이거나 외래 진료를 받는 성인 환자/);
+  assert.match(setup.messages[0].content, /\[3\. 선택지\]는 반드시 방금 만든 4개 플레이어 후보를 "이름 · 직업" 형태로 짧게 적은 것이어야 하며, 등록 NPC를 고르는 선택지나 긴 설명문이 되어서는 안 된다/);
+  assert.match(setup.messages[0].content, /1번\(hospital_worker\): 병원에서 근무하는 성인 남성/);
+  assert.match(setup.messages[0].content, /2번\(patient\): 현재 입원 중이거나 외래 진료를 받는 성인 남성 환자/);
   assert.match(setup.messages[0].content, /의식불명이나 심각한 인지장애 등 플레이가 어려운 설정은 금지한다/);
-  assert.match(setup.messages[0].content, /3번\(hospital_adjacent\): 병원과 연결된 외부인/);
-  assert.match(setup.messages[0].content, /4번\(wildcard\): 앞의 세 역할과 플레이 방식이 겹치지 않으면서/);
-  assert.match(setup.messages[0].content, /모든 후보는 성인\(만 19세 이상\)이다/);
+  assert.match(setup.messages[0].content, /3번\(hospital_adjacent\): 병원과 연결된 성인 남성 외부인/);
+  assert.match(setup.messages[0].content, /4번\(wildcard\): 앞의 세 역할과 플레이 방식이 겹치지 않으면서 병원 세계관에서 자연스럽게 시작할 수 있는 성인 남성/);
+  assert.match(setup.messages[0].content, /모든 후보는 성인\(만 19세 이상\)이며 성별은 남성으로 고정한다/);
+  assert.match(setup.messages[0].content, /키\(cm\)·몸무게\(kg\)·성기 크기\(cm\)를 현실적인 성인 범위 안에서 반드시 정하고/);
+  assert.match(setup.messages[0].content, /"이름 · 직업" 형태로만 짧게 적는다\(공백 포함 24자 이하 목표\)/);
   assert.equal((setup.messages[0].content.match(/\[PLAYER SETUP PHASE/g) || []).length, 1);
   assert.equal(opening.mode, 'opening');
   assert.match(opening.messages[0].content, /병원 첫 장면과 첫 NPC 조우만/);
@@ -831,30 +834,39 @@ const FOUR_SETUP_PRESETS = [
   {
     id: 'preset_1', slot: 'hospital_worker', name: '김준호', age: 27, gender: '남성',
     job: '정신건강의학과 전공의', major: '정신건강의학과', rank: '전공의',
-    background: '입사 2년차, 야간 당직이 잦다', starting_location: '정신건강의학과 당직실',
-    play_hook: '병원 내부 접근성이 높지만 행동이 기록에 남기 쉽다.',
-    choice_label: '김준호 — 정신건강의학과 전공의로 시작한다'
+    height_cm: 178, weight_kg: 70, penis_length_cm: 15,
+    style: '단정한 흰 가운, 피곤해 보이지만 깔끔한 인상', speech_style: '차분하고 정중한 존댓말',
+    personality: '꼼꼼하고 책임감이 강하지만 속으로는 지쳐 있다',
+    background: '입사 2년차로 야간 당직이 잦다. 최근 업무 스트레스가 누적되어 있다.',
+    starting_location: '정신건강의학과 당직실', short_feature: '병원 내부 접근성이 높지만 행동이 기록에 남기 쉽다.',
+    choice_label: '김준호 · 정신과 전공의'
   },
   {
-    id: 'preset_2', slot: 'patient', name: '이서연', age: 24, gender: '여성',
-    job: '외래 환자', background: '경미한 손목 골절로 통원 치료 중',
-    starting_location: '정형외과 외래 대기실',
-    play_hook: '환자 신분이라 병원 곳곳을 자유롭게 오가긴 어렵다.',
-    choice_label: '이서연 — 통원 치료 중인 환자로 시작한다'
+    id: 'preset_2', slot: 'patient', name: '박재훈', age: 24, gender: '남성',
+    job: '외래 환자', height_cm: 175, weight_kg: 68, penis_length_cm: 14,
+    style: '환자복 차림, 손목에 깁스를 한 마른 체형', speech_style: '무뚝뚝하지만 예의는 지키는 말투',
+    personality: '지루함을 잘 견디지 못하고 호기심이 많다',
+    background: '경미한 손목 골절로 통원 치료 중이다. 대기 시간이 길어 지루해하고 있다.',
+    starting_location: '정형외과 외래 대기실', short_feature: '환자 신분이라 병원 곳곳을 자유롭게 오가긴 어렵다.',
+    choice_label: '박재훈 · 입원 환자'
   },
   {
-    id: 'preset_3', slot: 'hospital_adjacent', name: '박도윤', age: 31, gender: '남성',
-    job: '의료기기 납품업자', background: '매주 병원에 납품하러 방문한다',
-    starting_location: '1층 물류 하역장',
-    play_hook: '병원 출입은 자유롭지만 체류 시간이 제한적이다.',
-    choice_label: '박도윤 — 의료기기 납품업자로 시작한다'
+    id: 'preset_3', slot: 'hospital_adjacent', name: '이현우', age: 31, gender: '남성',
+    job: '의료기기 납품업자', height_cm: 180, weight_kg: 78, penis_length_cm: 16,
+    style: '캐주얼한 정장 차림, 서류 가방을 든 건장한 체격', speech_style: '사교적이고 붙임성 좋은 영업용 말투',
+    personality: '눈치가 빠르고 사람을 잘 구슬린다',
+    background: '매주 병원에 납품하러 방문한다. 병원 직원들과 안면이 넓다.',
+    starting_location: '1층 물류 하역장', short_feature: '병원 출입은 자유롭지만 체류 시간이 제한적이다.',
+    choice_label: '이현우 · 환자 보호자'
   },
   {
-    id: 'preset_4', slot: 'wildcard', name: '최하늘', age: 26, gender: '여성',
-    job: '병원 홍보팀 프리랜서 사진작가', background: '병원 브로슈어 촬영 의뢰를 받았다',
-    starting_location: '로비 촬영 부스',
-    play_hook: '자유롭게 돌아다니지만 병원 소속이 아니라 신뢰를 얻는 속도가 느리다.',
-    choice_label: '최하늘 — 홍보용 사진작가로 시작한다'
+    id: 'preset_4', slot: 'wildcard', name: '서강민', age: 26, gender: '남성',
+    job: '병원 보안요원', height_cm: 183, weight_kg: 82, penis_length_cm: 17,
+    style: '검정 보안 제복, 다부진 체격', speech_style: '짧고 절도 있는 말투',
+    personality: '원칙주의자지만 의외로 허술한 구석이 있다',
+    background: '입사한 지 얼마 안 된 신입 보안요원이다. 야간 순찰을 자주 돈다.',
+    starting_location: '1층 보안실', short_feature: '병원 전역 출입이 자유롭지만 상급자 감시를 받는다.',
+    choice_label: '서강민 · 병원 보안요원'
   }
 ];
 
@@ -862,6 +874,62 @@ test('normalizeRecommendations accepts exactly 4 valid, role-covering, adult can
   const normalized = normalizeRecommendations(FOUR_SETUP_PRESETS);
   assert.equal(normalized.length, 4);
   assert.deepEqual(normalized.map(c => c.slot), ['hospital_worker', 'patient', 'hospital_adjacent', 'wildcard']);
+});
+
+test('all 4 candidates carry height_cm/weight_kg/penis_length_cm as positive integers', () => {
+  const normalized = normalizeRecommendations(FOUR_SETUP_PRESETS);
+  for (const c of normalized) {
+    assert.equal(Number.isInteger(c.height_cm) && c.height_cm > 0, true, `${c.id} height_cm`);
+    assert.equal(Number.isInteger(c.weight_kg) && c.weight_kg > 0, true, `${c.id} weight_kg`);
+    assert.equal(Number.isInteger(c.penis_length_cm) && c.penis_length_cm > 0, true, `${c.id} penis_length_cm`);
+  }
+});
+
+test('all 4 candidates carry non-empty style/speech_style/personality', () => {
+  const normalized = normalizeRecommendations(FOUR_SETUP_PRESETS);
+  for (const c of normalized) {
+    assert.equal(typeof c.style === 'string' && c.style.length > 0, true, `${c.id} style`);
+    assert.equal(typeof c.speech_style === 'string' && c.speech_style.length > 0, true, `${c.id} speech_style`);
+    assert.equal(typeof c.personality === 'string' && c.personality.length > 0, true, `${c.id} personality`);
+  }
+});
+
+test('a zero or missing body-measurement field rejects that candidate, which rejects the whole 4-candidate set', () => {
+  for (const field of ['height_cm', 'weight_kg', 'penis_length_cm']) {
+    const zeroed = FOUR_SETUP_PRESETS.map((c, i) => i === 2 ? { ...c, [field]: 0 } : c);
+    assert.equal(normalizeRecommendations(zeroed), null, `zero ${field} should reject the set`);
+    const missing = FOUR_SETUP_PRESETS.map((c, i) => {
+      if (i !== 2) return c;
+      const clone = { ...c };
+      delete clone[field];
+      return clone;
+    });
+    assert.equal(normalizeRecommendations(missing), null, `missing ${field} should reject the set`);
+  }
+});
+
+test('a body-measurement value outside the realistic adult range rejects the candidate set (no absurd extremes)', () => {
+  const tooTall = FOUR_SETUP_PRESETS.map((c, i) => i === 0 ? { ...c, height_cm: 400 } : c);
+  assert.equal(normalizeRecommendations(tooTall), null);
+  const tooLight = FOUR_SETUP_PRESETS.map((c, i) => i === 0 ? { ...c, weight_kg: 5 } : c);
+  assert.equal(normalizeRecommendations(tooLight), null);
+  const absurdLength = FOUR_SETUP_PRESETS.map((c, i) => i === 0 ? { ...c, penis_length_cm: 90 } : c);
+  assert.equal(normalizeRecommendations(absurdLength), null);
+});
+
+test('normalizeRecommendationCandidate requires gender to be exactly "남성" — all 4 candidates are adult men', () => {
+  assert.equal(normalizeRecommendationCandidate({ ...FOUR_SETUP_PRESETS[0], gender: '여성' }, 'preset_1'), null);
+  assert.equal(normalizeRecommendationCandidate(FOUR_SETUP_PRESETS[0], 'preset_1')?.gender, '남성');
+});
+
+test('all 4 choice_label values are short (target <=24 chars including spaces), unique, and free of long explanations', () => {
+  const normalized = normalizeRecommendations(FOUR_SETUP_PRESETS);
+  const labels = normalized.map(c => c.choice_label);
+  assert.equal(new Set(labels).size, 4);
+  for (const label of labels) {
+    assert.ok(label.length <= 24, `"${label}" should be <=24 chars, got ${label.length}`);
+    assert.doesNotMatch(label, /시작한다|접근|계획|배경/, `"${label}" should not contain a long explanatory clause`);
+  }
 });
 
 test('normalizeRecommendations rejects a wrong array size', () => {
@@ -910,6 +978,20 @@ test('buildSavePatch writes the selected preset directly to player, marks setup 
   assert.equal(patch.player_setup.status, 'complete');
   assert.equal(patch.player_setup.selected_id, 'preset_2');
   assert.equal(patch.opening_started, true);
+  // Body measurements land on game_save.player directly — no DB migration,
+  // reusing the existing player JSONB fields.
+  assert.equal(patch.player.height_cm, FOUR_SETUP_PRESETS[1].height_cm);
+  assert.equal(patch.player.weight_kg, FOUR_SETUP_PRESETS[1].weight_kg);
+  assert.equal(patch.player.penis_length_cm, FOUR_SETUP_PRESETS[1].penis_length_cm);
+  assert.equal(patch.player.location, FOUR_SETUP_PRESETS[1].starting_location);
+  // speech_style/personality never land on player (no schema field for them)
+  // — they're preserved only in player_setup.selected_profile.
+  assert.equal('speech_style' in patch.player, false);
+  assert.equal('personality' in patch.player, false);
+  assert.deepEqual(patch.player_setup.selected_profile, {
+    speech_style: FOUR_SETUP_PRESETS[1].speech_style,
+    personality: FOUR_SETUP_PRESETS[1].personality
+  });
 });
 
 test('buildSavePatch saves exactly 4 normalized recommendations from Extract while no selection has been made yet', () => {
@@ -949,6 +1031,14 @@ test('CONFIRMED PLAYER SETUP is injected into the opening turn using the just-re
   assert.match(content, /이름: 김준호/);
   assert.match(content, /직업: 정신건강의학과 전공의/);
   assert.match(content, /시작 장소: 정신건강의학과 당직실/);
+  // Body/appearance/speech fields must be injected as established fact, not
+  // left for the opening LLM to invent or drop.
+  assert.match(content, /키: 178cm/);
+  assert.match(content, /몸무게: 70kg/);
+  assert.match(content, /성기 크기: 15cm/);
+  assert.match(content, /외형: 단정한 흰 가운, 피곤해 보이지만 깔끔한 인상/);
+  assert.match(content, /성격: 꼼꼼하고 책임감이 강하지만 속으로는 지쳐 있다/);
+  assert.match(content, /말투: 차분하고 정중한 존댓말/);
   assert.match(content, /이 설정을 다시 추천하거나 질문하지 않는다/);
   assert.match(content, /선택한 캐릭터로 병원 오프닝을 즉시 시작한다/);
 });
@@ -961,9 +1051,9 @@ test('when 4 candidates are already saved but the input does not match any of th
   assert.match(content, /\[PLAYER SETUP PHASE — CANDIDATES ALREADY GENERATED\]/);
   assert.match(content, /새 후보를 만들지 않는다/);
   assert.match(content, /김준호/);
-  assert.match(content, /이서연/);
-  assert.match(content, /박도윤/);
-  assert.match(content, /최하늘/);
+  assert.match(content, /박재훈/);
+  assert.match(content, /이현우/);
+  assert.match(content, /서강민/);
 });
 
 test('the hypnosis app contract bans fake scan/registration/level-lock systems and confines all suggestion mutation to app usage', () => {
@@ -990,7 +1080,9 @@ test('Extract suggestion_action contract only fires on completed app usage, neve
 test('Extract PLAYER SETUP RECOMMENDATION contract requires exactly-4 structured recommendations for new cards, and never lets Extract guess the selection', () => {
   const prompt = buildExtractPrompt('서사', '입력', { master: {}, save: {} }, [], 1);
   assert.match(prompt, /player_recommendations에 정확히 4개를 반환한다/);
-  assert.match(prompt, /choice_label\(서사의 \[선택지\]에 실제로 적은 문장과 완전히 동일한 문자열\)/);
+  assert.match(prompt, /height_cm\/weight_kg\/penis_length_cm\(서사의 "신체" 줄에서 가져온 현실적인 성인 범위의 정수, 빠짐없이 채운다\)/);
+  assert.match(prompt, /speech_style·personality\(서사의 "성격·말투"에서 분리\)/);
+  assert.match(prompt, /choice_label\(서사의 \[선택지\]에 실제로 적은 "이름 · 직업" 문구와 완전히 동일한 문자열\)/);
   assert.match(prompt, /후보 선택\(번호, ①~④, 선택 문장, "추천 설정으로 시작한다" 등\)은 Worker가 저장된 recommendations에서 직접 판정하므로/);
 });
 

@@ -713,7 +713,14 @@ function normalizeRecommendation(value = {}) {
   for (const key of ['name', 'gender', 'job', 'major', 'rank', 'style', 'background']) {
     if (typeof value[key] === 'string' && value[key].trim()) result[key] = value[key].trim();
   }
-  for (const key of ['age', 'height_cm', 'weight_kg']) {
+  // A structured preset carries starting_location; a legacy/custom
+  // recommendation may carry location directly — either maps onto the same
+  // game_save.player.location field.
+  const location = typeof value.location === 'string' && value.location.trim()
+    ? value.location.trim()
+    : (typeof value.starting_location === 'string' && value.starting_location.trim() ? value.starting_location.trim() : null);
+  if (location) result.location = location;
+  for (const key of ['age', 'height_cm', 'weight_kg', 'penis_length_cm']) {
     const number = Number(value[key]);
     if (Number.isFinite(number) && number > 0) result[key] = Math.round(number);
   }
@@ -736,31 +743,56 @@ const SETUP_ROLE_LABELS = {
   wildcard: '자유 추천'
 };
 const MIN_ADULT_AGE = 19;
+const MAX_ADULT_AGE = 80;
+// Sanity bounds only — reject the obviously-broken/absurd, not a narrow
+// "typical" band. A candidate outside these is treated as malformed data.
+const PLAYER_HEIGHT_RANGE_CM = [140, 210];
+const PLAYER_WEIGHT_RANGE_KG = [40, 150];
+const PLAYER_PENIS_LENGTH_RANGE_CM = [8, 30];
 
+function isIntegerInRange(value, [min, max]) {
+  const n = Math.round(Number(value));
+  return Number.isFinite(n) && n === Math.round(n) && n >= min && n <= max ? n : null;
+}
+
+// Every field here maps directly onto game_save.player (or, for
+// speech_style/personality, onto player_setup.selected_profile) with no DB
+// migration — so anything missing here is something the confirmed opening
+// prompt or the save patch would otherwise have to silently fake.
 function normalizeRecommendationCandidate(value, fallbackId) {
   if (!isPlainObject(value)) return null;
   const id = typeof value.id === 'string' && value.id.trim() ? value.id.trim() : fallbackId;
   const slot = SETUP_ROLE_SLOTS.includes(value.slot) ? value.slot : null;
   const age = Number(value.age);
-  if (!slot || !Number.isFinite(age) || age < MIN_ADULT_AGE) return null;
+  if (!slot || !Number.isFinite(age) || age < MIN_ADULT_AGE || age > MAX_ADULT_AGE) return null;
+  if (typeof value.gender !== 'string' || value.gender.trim() !== '남성') return null;
+
   const name = typeof value.name === 'string' ? value.name.trim() : '';
-  const gender = typeof value.gender === 'string' ? value.gender.trim() : '';
   const job = typeof value.job === 'string' ? value.job.trim() : '';
+  const style = typeof value.style === 'string' ? value.style.trim() : '';
+  const speechStyle = typeof value.speech_style === 'string' ? value.speech_style.trim() : '';
+  const personality = typeof value.personality === 'string' ? value.personality.trim() : '';
   const background = typeof value.background === 'string' ? value.background.trim() : '';
   const startingLocation = typeof value.starting_location === 'string' ? value.starting_location.trim() : '';
-  const playHook = typeof value.play_hook === 'string' ? value.play_hook.trim() : '';
+  const shortFeature = typeof value.short_feature === 'string' ? value.short_feature.trim() : '';
   const choiceLabel = typeof value.choice_label === 'string' ? value.choice_label.trim() : '';
-  if (!name || !gender || !job || !background || !startingLocation || !playHook || !choiceLabel) return null;
+  if (!name || !job || !style || !speechStyle || !personality || !background || !startingLocation || !shortFeature || !choiceLabel) return null;
+
+  // Empty, zero, or wildly unrealistic body values reject the candidate —
+  // never silently defaulted, since these feed game_save.player directly.
+  const heightCm = isIntegerInRange(value.height_cm, PLAYER_HEIGHT_RANGE_CM);
+  const weightKg = isIntegerInRange(value.weight_kg, PLAYER_WEIGHT_RANGE_KG);
+  const penisLengthCm = isIntegerInRange(value.penis_length_cm, PLAYER_PENIS_LENGTH_RANGE_CM);
+  if (heightCm === null || weightKg === null || penisLengthCm === null) return null;
+
   const candidate = {
-    id, slot, name, age: Math.round(age), gender, job, background,
-    starting_location: startingLocation, play_hook: playHook, choice_label: choiceLabel
+    id, slot, name, age: Math.round(age), gender: '남성', job,
+    height_cm: heightCm, weight_kg: weightKg, penis_length_cm: penisLengthCm,
+    style, speech_style: speechStyle, personality, background,
+    starting_location: startingLocation, short_feature: shortFeature, choice_label: choiceLabel
   };
-  for (const key of ['major', 'rank', 'style']) {
+  for (const key of ['major', 'rank']) {
     if (typeof value[key] === 'string' && value[key].trim()) candidate[key] = value[key].trim();
-  }
-  for (const key of ['height_cm', 'weight_kg']) {
-    const number = Number(value[key]);
-    if (Number.isFinite(number) && number > 0) candidate[key] = Math.round(number);
   }
   return candidate;
 }
@@ -826,25 +858,30 @@ function buildConfirmedPlayerSetupSection(profile = {}) {
     `성별: ${profile.gender || ''}`,
     `직업: ${profile.job || ''}`,
     `전공/직급: ${[profile.major, profile.rank].filter(Boolean).join(' / ')}`,
+    `키: ${profile.height_cm ?? ''}cm`,
+    `몸무게: ${profile.weight_kg ?? ''}kg`,
+    `성기 크기: ${profile.penis_length_cm ?? ''}cm`,
     `외형: ${profile.style || ''}`,
+    `성격: ${profile.personality || ''}`,
+    `말투: ${profile.speech_style || ''}`,
     `배경: ${profile.background || ''}`,
-    `시작 장소: ${profile.starting_location || ''}`,
-    `플레이 훅: ${profile.play_hook || ''}`
+    `시작 장소: ${profile.starting_location || profile.location || ''}`,
+    `특징: ${profile.short_feature || profile.play_hook || ''}`
   ];
-  return `\n\n[CONFIRMED PLAYER SETUP — ESTABLISHED FACT]\n\n${lines.join('\n')}\n\n규칙:\n- 이 설정을 다시 추천하거나 질문하지 않는다.\n- 이름·직업·나이 등을 임의 변경하지 않는다.\n- 선택한 캐릭터로 병원 오프닝을 즉시 시작한다.`;
+  return `\n\n[CONFIRMED PLAYER SETUP — ESTABLISHED FACT]\n\n${lines.join('\n')}\n\n규칙:\n- 이 설정을 다시 추천하거나 질문하지 않는다.\n- 이름·나이·직업·키·몸무게·성기 크기·외형·성격·말투 등 위 값을 임의로 바꾸거나 누락하지 않는다.\n- 선택한 캐릭터로 병원 오프닝을 즉시 시작한다.`;
 }
 
 function buildPlayerSetupGenerationSection() {
-  return `\n\n[PLAYER SETUP PHASE — GENERATE 4 CANDIDATES — HIGHEST PRIORITY, NO QUESTIONS]\n사용자에게 "어떤 캐릭터를 원하시나요?", "어떤 세계에서 시작하고 싶나요?" 같은 열린 질문을 절대 하지 않는다. 사용자의 대답을 기다리지 말고, 지금 이 응답 안에서 아래 4개 후보를 전부 직접 만들어서 완성된 형태로 즉시 보여준다. "대기", "대기 중", "곧 결정됩니다", "캐릭터 생성 단계"처럼 후보 생성을 다음 턴으로 미루거나 진행 중이라고 암시하는 표현을 본문 어디에도 쓰지 않는다. [3. 선택지]를 비워두거나 다른 용도로 쓰지 않는다 — 반드시 아래 4번(플레이어 후보 4개의 선택 문장)으로 채운다. [3. 선택지]에 등록 NPC 이름이나 NPC를 고르는 선택지를 넣지 않는다 — 이건 플레이어 자신의 캐릭터를 고르는 단계이지 NPC를 고르는 단계가 아니다.\n1. 삭제되지 않는 최면 어플 발견과 핵심 기능을 2~3문장으로 짧게 알린다.\n2. 병원 장면이나 등록 NPC는 아직 등장시키지 않는다.\n3. 바로 이어서, 플레이어 캐릭터 후보 4개를 전부 확정해서 만든다(질문으로 대체하지 않는다). 역할 슬롯은 고정한다:\n   1번(hospital_worker): 병원에서 근무하는 성인 — 의사, 인턴, 간호사, 임상병리사, 방사선사, 물리치료사, 병원 행정직, 보안요원 등\n   2번(patient): 현재 입원 중이거나 외래 진료를 받는 성인 환자. 질병·부상은 정상적인 플레이를 막지 않는 수준이어야 하며, 의식불명이나 심각한 인지장애 등 플레이가 어려운 설정은 금지한다.\n   3번(hospital_adjacent): 병원과 연결된 외부인 — 보호자, 면회객, 납품업자, 보험조사원, 기자, 실습생, 병원 재단 관계자 등\n   4번(wildcard): 앞의 세 역할과 플레이 방식이 겹치지 않으면서 병원 세계관에서 자연스럽게 시작할 수 있는 성인\n4. 이름·나이·성별·직업 세부 설정은 매번 새롭고 다양하게 만들되, 네 후보는 신분과 병원 접근 권한, NPC에게 접근하는 방식, 초반 난이도, 최면 어플을 쓸 동기, 시작 장소와 첫 사건이 서로 확실히 달라야 한다.\n5. 모든 후보는 성인(만 19세 이상)이다.\n6. 네 후보 각각을 다음 카드 형식으로 빠짐없이 출력한다 (마크다운 굵게 **는 새로 쓰지 않는다):\n[플레이어 후보 N — 역할 한글명]\n이름 · 나이 · 성별\n직업(전공/직급 있으면 함께)\n시작 위치: ...\n플레이 특징: ...\n배경: ...\n7. [선택지]에는 정확히 네 개, 각 후보를 "이름 — 짧은 직업/역할 요약으로 시작한다" 형태의 한 문장으로 적는다. 번호나 마커 없이 문장 자체만 적는다. 카테고리를 묻는 질문형 선택지나 NPC 선택지를 만들지 않는다.\n8. 항목별로 하나씩 질문하지 않는다. 사용자가 특정 조건을 말하면 다음 응답에서 네 후보 전체를 그 조건에 맞게 다시 만든다.\n\n[출력 형태 예시 — 실제 이름·설정은 매번 새로 만들 것, 이 예시를 그대로 베끼지 말 것]\n[1. 서사 및 행동]\n(어플 발견 2~3문장)\n\n[플레이어 후보 1 — 병원 직원]\n(이름) · (나이) · (성별)\n(직업)\n시작 위치: (장소)\n플레이 특징: (특징)\n배경: (배경)\n\n[플레이어 후보 2 — 환자] ... (후보 3, 4도 동일한 형식으로 이어짐)\n\n[2. 플레이어 상황판]\n(간단한 상태 표시, "대기" 표현 없이)\n\n[3. 선택지]\n(후보1 이름) — (후보1 요약으로 시작한다)\n(후보2 이름) — (후보2 요약으로 시작한다)\n(후보3 이름) — (후보3 요약으로 시작한다)\n(후보4 이름) — (후보4 요약으로 시작한다)`;
+  return `\n\n[PLAYER SETUP PHASE — GENERATE 4 CANDIDATES — HIGHEST PRIORITY, NO QUESTIONS]\n사용자에게 "어떤 캐릭터를 원하시나요?", "어떤 세계에서 시작하고 싶나요?" 같은 열린 질문을 절대 하지 않는다. 사용자의 대답을 기다리지 말고, 지금 이 응답 안에서 아래 4개 후보를 전부 직접 만들어서 완성된 형태로 즉시 보여준다. "대기", "대기 중", "곧 결정됩니다", "캐릭터 생성 단계"처럼 후보 생성을 다음 턴으로 미루거나 진행 중이라고 암시하는 표현을 본문 어디에도 쓰지 않는다. [3. 선택지]를 비워두거나 다른 용도로 쓰지 않는다 — 반드시 아래 4번(플레이어 후보 4개의 짧은 선택지)으로 채운다. [3. 선택지]에 등록 NPC 이름이나 NPC를 고르는 선택지를 넣지 않는다 — 이건 플레이어 자신의 캐릭터를 고르는 단계이지 NPC를 고르는 단계가 아니다.\n1. 삭제되지 않는 최면 어플 발견과 핵심 기능을 2~3문장으로 짧게 알린다.\n2. 병원 장면이나 등록 NPC는 아직 등장시키지 않는다.\n3. 바로 이어서, 플레이어 캐릭터 후보 4개를 전부 확정해서 만든다(질문으로 대체하지 않는다). 네 후보 모두 성인 남성이다. 역할 슬롯은 고정한다:\n   1번(hospital_worker): 병원에서 근무하는 성인 남성 — 의사, 인턴, 간호사, 임상병리사, 방사선사, 물리치료사, 병원 행정직, 보안요원 등\n   2번(patient): 현재 입원 중이거나 외래 진료를 받는 성인 남성 환자. 질병·부상은 정상적인 플레이를 막지 않는 수준이어야 하며, 의식불명이나 심각한 인지장애 등 플레이가 어려운 설정은 금지한다.\n   3번(hospital_adjacent): 병원과 연결된 성인 남성 외부인 — 보호자, 면회객, 납품업자, 보험조사원, 기자, 실습생, 병원 재단 관계자 등\n   4번(wildcard): 앞의 세 역할과 플레이 방식이 겹치지 않으면서 병원 세계관에서 자연스럽게 시작할 수 있는 성인 남성\n4. 이름·나이·직업 세부 설정은 매번 새롭고 다양하게 만들되, 네 후보는 신분과 병원 접근 권한, NPC에게 접근하는 방식, 초반 난이도, 최면 어플을 쓸 동기, 시작 장소가 서로 확실히 달라야 한다.\n5. 모든 후보는 성인(만 19세 이상)이며 성별은 남성으로 고정한다.\n6. 네 후보 각각에 키(cm)·몸무게(kg)·성기 크기(cm)를 현실적인 성인 범위 안에서 반드시 정하고, 외형(style)·성격(personality)·말투(speech_style)도 각 후보가 서로 다르게 만든다.\n7. 네 후보 각각을 다음 카드 형식으로 짧고 정보 중심으로 출력한다 — 배경은 최대 2문장, 플레이 특징은 한 문장으로 압축한다(병원 접근 권한·초반 난이도·어플 활용 동기를 그 한 문장 안에 녹인다). 마크다운 굵게 **는 새로 쓰지 않는다:\n[후보 N · 역할 한글명]\n이름 · 나이 · 남성\n직업: 직업 / 전공·직급(있으면)\n신체: 키cm / 몸무게kg / 성기 크기cm\n외형: style\n성격·말투: personality / speech_style\n배경: 최대 2문장\n특징: 한 문장\n8. [선택지]에는 정확히 네 개, 각 후보를 "이름 · 직업" 형태로만 짧게 적는다(공백 포함 24자 이하 목표). 시작 장소·접근 방식·어플 활용 계획·배경 설명 등 긴 문장을 넣지 않는다. 번호나 마커 없이 "이름 · 직업" 문구 자체만 적는다. 카테고리를 묻는 질문형 선택지나 NPC 선택지를 만들지 않는다.\n9. 항목별로 하나씩 질문하지 않는다. 사용자가 특정 조건을 말하면 다음 응답에서 네 후보 전체를 그 조건에 맞게 다시 만든다.\n\n[출력 형태 예시 — 실제 이름·설정은 매번 새로 만들 것, 이 예시를 그대로 베끼지 말 것]\n[1. 서사 및 행동]\n(어플 발견 2~3문장)\n\n[후보 1 · 병원 직원]\n(이름) · (나이) · 남성\n직업: (직업)\n신체: (키)cm / (몸무게)kg / (성기 크기)cm\n외형: (style)\n성격·말투: (personality) / (speech_style)\n배경: (최대 2문장)\n특징: (한 문장)\n\n[후보 2 · 환자] ... (후보 3, 4도 동일한 형식으로 이어짐)\n\n[2. 플레이어 상황판]\n(간단한 상태 표시, "대기" 표현 없이)\n\n[3. 선택지]\n(후보1 이름) · (후보1 직업)\n(후보2 이름) · (후보2 직업)\n(후보3 이름) · (후보3 직업)\n(후보4 이름) · (후보4 직업)`;
 }
 
 function buildPlayerSetupRedisplaySection(recommendations) {
   const cards = recommendations.map((rec, index) => {
     const label = SETUP_ROLE_LABELS[rec.slot] || rec.slot;
     const rankPart = [rec.major, rec.rank].filter(Boolean).join(' / ');
-    return `[플레이어 후보 ${index + 1} — ${label}]\nID: ${rec.id}\n이름: ${rec.name} · 나이: ${rec.age} · 성별: ${rec.gender}\n직업: ${rec.job}${rankPart ? ` (${rankPart})` : ''}\n시작 위치: ${rec.starting_location}\n플레이 특징: ${rec.play_hook}\n배경: ${rec.background}\n선택 문장: ${rec.choice_label}`;
+    return `[후보 ${index + 1} · ${label}]\nID: ${rec.id}\n이름: ${rec.name} · 나이: ${rec.age} · 남성\n직업: ${rec.job}${rankPart ? ` (${rankPart})` : ''}\n신체: ${rec.height_cm}cm / ${rec.weight_kg}kg / ${rec.penis_length_cm}cm\n외형: ${rec.style}\n성격·말투: ${rec.personality} / ${rec.speech_style}\n배경: ${rec.background}\n특징: ${rec.short_feature}\n선택지 문구: ${rec.choice_label}`;
   }).join('\n\n');
-  return `\n\n[PLAYER SETUP PHASE — CANDIDATES ALREADY GENERATED]\n아래 4개는 이미 확정되어 저장된 후보다. 내용을 바꾸지 말고 정확히 같은 이름·직업·설정으로 카드 형식으로 다시 보여준다. 새 후보를 만들지 않는다.\n\n${cards}\n\n[선택지]에는 각 후보의 "선택 문장"을 그대로, 정확히 네 개만 적는다. 마크다운 굵게 **는 새로 쓰지 않는다.\n사용자가 네 후보와 다른 캐릭터를 직접 설명하면, 그 설명을 반영한 완성형 새 캐릭터를 만들어 보여주고 승인을 구한다(이 경우 기존 4개 카드를 다시 보여줄 필요는 없다).`;
+  return `\n\n[PLAYER SETUP PHASE — CANDIDATES ALREADY GENERATED]\n아래 4개는 이미 확정되어 저장된 후보다. 내용을 바꾸지 말고 정확히 같은 이름·직업·신체·설정으로 카드 형식으로 다시 보여준다. 새 후보를 만들지 않는다.\n\n${cards}\n\n[선택지]에는 각 후보의 "선택지 문구"를 그대로, 정확히 네 개만 적는다. 마크다운 굵게 **는 새로 쓰지 않는다.\n사용자가 네 후보와 다른 캐릭터를 직접 설명하면, 그 설명을 반영한 완성형 새 캐릭터를 만들어 보여주고 승인을 구한다(이 경우 기존 4개 카드를 다시 보여줄 필요는 없다).`;
 }
 
 // Applies broadly (opening + normal turns), not just player_setup: bans the
@@ -1016,7 +1053,7 @@ ${recentMemorySlice.map((m, index) => clipHeadTail(m.content || '', index === re
   // showed the model asking "what kind of character do you want?" instead of
   // generating the 4 cards when this instruction only appeared near the top.
   const playerSetupReminder = mode === 'player_setup'
-    ? `\n\n[REMINDER — PLAYER SETUP PHASE]\n지금 이 응답 안에서 질문 없이 4개 캐릭터 후보를 전부 만들어서 카드 형식으로 즉시 보여준다. "대기 중"처럼 결정을 미루는 표현이나 사용자에게 방향을 먼저 묻는 질문형 선택지를 만들지 않는다. [3. 선택지]는 반드시 방금 만든 4개 플레이어 후보의 선택 문장이어야 하며, 등록 NPC를 고르는 선택지가 되어서는 안 된다.\n`
+    ? `\n\n[REMINDER — PLAYER SETUP PHASE]\n지금 이 응답 안에서 질문 없이 4개 캐릭터 후보를 전부 만들어서 카드 형식으로 즉시 보여준다. 네 후보 모두 성인 남성이며 각자 키·몸무게·성기 크기·외형·성격·말투를 반드시 정한다. "대기 중"처럼 결정을 미루는 표현이나 사용자에게 방향을 먼저 묻는 질문형 선택지를 만들지 않는다. [3. 선택지]는 반드시 방금 만든 4개 플레이어 후보를 "이름 · 직업" 형태로 짧게 적은 것이어야 하며, 등록 NPC를 고르는 선택지나 긴 설명문이 되어서는 안 된다.\n`
     : '';
   const systemPrompt = coreRules + playerGate + modeSection + rulebookSection + buildNpcLocationRules() + buildAppSystemRulesSection() + currentSceneSection + npcProfileSection + explicitMentionSection + csaSection + suggestionSection + narrativeLengthSection + npcDialogueSection + antiRepetitionSection + playerStatusPanel + contextSection + feedbackSection + continuitySection + finalFormatRules + openingFlow + playerSetupReminder;
 
@@ -1056,7 +1093,7 @@ function buildExtractPrompt(narrativeText, playerInput, ctx, images, turnCount) 
 
 [PLAYER SETUP RECOMMENDATION]
 save.player_setup.status가 complete가 아니면 이 턴의 서사가 무엇이었는지부터 확인한다.
-- 방금 서사가 4개의 새 후보 카드를 만들었다면(선택지가 4개의 캐릭터 요약 문장인 경우) player_recommendations에 정확히 4개를 반환한다. 각 항목은 id("preset_1"~"preset_4"), slot(hospital_worker/patient/hospital_adjacent/wildcard 중 하나, 4개 슬롯 각각 정확히 하나씩 사용), name, age(19 이상 정수), gender, job, background, starting_location(서사의 "시작 위치"), play_hook(서사의 "플레이 특징"), choice_label(서사의 [선택지]에 실제로 적은 문장과 완전히 동일한 문자열)을 모두 채운다. major/rank/height_cm/weight_kg/style은 서사에 있으면 채운다.
+- 방금 서사가 4개의 새 후보 카드를 만들었다면(선택지가 4개의 짧은 "이름 · 직업" 문구인 경우) player_recommendations에 정확히 4개를 반환한다. 각 항목은 id("preset_1"~"preset_4"), slot(hospital_worker/patient/hospital_adjacent/wildcard 중 하나, 4개 슬롯 각각 정확히 하나씩 사용), name, age(19 이상 정수), gender(항상 "남성"), job, height_cm/weight_kg/penis_length_cm(서사의 "신체" 줄에서 가져온 현실적인 성인 범위의 정수, 빠짐없이 채운다), style(서사의 "외형"), speech_style·personality(서사의 "성격·말투"에서 분리), background(서사의 "배경"), starting_location, short_feature(서사의 "특징" 한 문장), choice_label(서사의 [선택지]에 실제로 적은 "이름 · 직업" 문구와 완전히 동일한 문자열)을 모두 채운다. major/rank는 서사에 있으면 채운다. 이 필드 중 하나라도 서사에 없으면 만들어서 채우지 말고 해당 항목을 빈 문자열/0으로 두지도 말라 — 서사 자체를 다시 확인해 누락 없이 채운다.
 - 방금 서사가 이미 저장된 4개 후보를 내용 변경 없이 그대로 다시 보여줬을 뿐이면(사용자가 아직 선택하지 않음) player_recommendations는 빈 배열 []로 둔다.
 - 사용자가 4개 후보 대신 원하는 캐릭터를 직접 설명해서 서사가 그 설명을 반영한 하나의 커스텀 캐릭터를 새로 제안했다면 player_recommendation(단수)에 name, age, gender, job, major, rank, height_cm, weight_kg, style, background를 모두 채운 완성형 추천안을 반환한다. 일부만 바꾼 요청이면 사용자가 명시적으로 바꾼 필드만 반환한다.
 - 이 단계에서는 player_patch에 값을 넣지 마라. 후보 선택(번호, ①~④, 선택 문장, "추천 설정으로 시작한다" 등)은 Worker가 저장된 recommendations에서 직접 판정하므로 player_patch나 player_recommendation에 선택 결과를 추측해 넣지 마라.
@@ -1155,7 +1192,7 @@ ${JSON.stringify(imageCatalog)}
   "first_encounter_stats": null,
   "player_patch": {"name": "", "age": 0, "gender": "", "height_cm": 0, "weight_kg": 0, "job": "", "background": "", "location": "", "style": "", "penis_length_cm": 0},
   "player_recommendation": {"name": "", "age": 0, "gender": "", "job": "", "major": "", "rank": "", "height_cm": 0, "weight_kg": 0, "style": "", "background": ""},
-  "player_recommendations": [{"id": "preset_1", "slot": "hospital_worker", "name": "", "age": 0, "gender": "", "job": "", "major": "", "rank": "", "height_cm": 0, "weight_kg": 0, "style": "", "background": "", "starting_location": "", "play_hook": "", "choice_label": ""}],
+  "player_recommendations": [{"id": "preset_1", "slot": "hospital_worker", "name": "", "age": 0, "gender": "남성", "job": "", "major": "", "rank": "", "height_cm": 0, "weight_kg": 0, "penis_length_cm": 0, "style": "", "speech_style": "", "personality": "", "background": "", "starting_location": "", "short_feature": "", "choice_label": "이름 · 직업 형태의 짧은 문구"}],
   "growth_event": "none | minor | standard | major (사건의 의미만 제안, 경험치 숫자는 결정하지 말 것)",
   "suggestion_action": null,
   "world_state_patch": {"building": "이동 완료 시 기존 또는 새 건물명, 이동 없으면 전체 비움", "floor": "이동 완료 시 기존 또는 새 층 명칭", "ward": "이동 완료 시 기존 또는 새 병동 명칭", "location_label": "이동 완료 시 도착한 새 장소, 이동 없으면 전체 비움"},
@@ -1420,7 +1457,15 @@ function buildSavePatch(extract, enginePatch = {}, summaryPlan = null, previousS
     const selection = resolveRecommendationSelection(playerInput, previousSetup);
     if (selection) {
       patch.player = normalizeRecommendation(selection);
-      patch.player_setup = { ...previousSetup, status: 'complete', selected_id: selection.id };
+      // speech_style/personality have no column on game_save.player and are
+      // never merged into style/background — they live only in this JSONB
+      // sub-object, no migration required.
+      patch.player_setup = {
+        ...previousSetup,
+        status: 'complete',
+        selected_id: selection.id,
+        selected_profile: { speech_style: selection.speech_style || '', personality: selection.personality || '' }
+      };
       patch.opening_started = true;
     } else {
       // Legacy/custom-description path: kept for saves mid-flow under the old

@@ -22,7 +22,15 @@ import {
   normalizeRegisteredNpcExtract,
   mindMonologueLength,
   validateMindMonologue,
-  validateNpcEmotion
+  validateNpcEmotion,
+  resolveCsaScopeId,
+  buildApplicableCsaSection,
+  buildWorldStatePatch,
+  normalizeFirstEncounterStats,
+  normalizeLegacyActiveSuggestions,
+  applySuggestionAction,
+  buildActiveSuggestionSection,
+  hasLegacyEncounterEvidence
 } from '../worker/game-proxy-v2.js';
 import worker from '../worker/game-proxy-v2.js';
 
@@ -297,11 +305,57 @@ test('no-change dialogue preserves all NPC stats at zero delta', () => {
 test('CSA uses level limits, stores spatial scope, and filters current scene only', () => {
   assert.deepEqual(getCsaLimits(1), { scope_type: 'ward', max_active: 1, daily_limit: 1 });
   assert.deepEqual(getCsaLimits(9), { scope_type: 'building', max_active: 3, daily_limit: 5 });
-  const patch = applyCsaAction({ csa_active: [], csa_daily_used: 0 }, { action: 'activate', content: 'test rule', scope_type: 'ward', scope_id: 'ward-3', scope_label: 'Ward 3' }, 1, 12);
-  assert.equal(patch.csa_active[0].scope_id, 'ward-3');
+  const worldState = { building: 'seoul_central_hospital', floor: 'hospital_floor_3', ward: 'hospital_3ward' };
+  const patch = applyCsaAction({ csa_active: [], csa_daily_used: 0 }, { action: 'activate', content: 'test rule', scope_type: 'ward' }, 1, 12, worldState);
+  assert.equal(patch.csa_active[0].scope_id, 'hospital_3ward');
+  assert.equal(patch.csa_active[0].scope_label, '서울중앙병원 3병동');
   assert.equal(patch.csa_daily_used, 1);
-  assert.equal(isCsaApplicable(patch.csa_active[0], { ward: 'ward-3' }), true);
-  assert.equal(isCsaApplicable(patch.csa_active[0], { ward: 'ward-2' }), false);
+  assert.equal(isCsaApplicable(patch.csa_active[0], { ward: 'hospital_3ward' }), true);
+  assert.equal(isCsaApplicable(patch.csa_active[0], { ward: 'hospital_6ward' }), false);
+});
+
+test('CSA activation ignores an attacker-supplied scope_id and rejects when world_state lacks the required scope', () => {
+  const forged = applyCsaAction({ csa_active: [], csa_daily_used: 0 }, { action: 'activate', content: 'forged rule', scope_type: 'ward', scope_id: 'forged-ward' }, 1, 12, { ward: 'hospital_3ward' });
+  assert.equal(forged.csa_active[0].scope_id, 'hospital_3ward');
+  const rejected = applyCsaAction({ csa_active: [], csa_daily_used: 0 }, { action: 'activate', content: 'no location known', scope_type: 'ward' }, 1, 12, {});
+  assert.equal(rejected, null);
+});
+
+test('CSA rejects duplicate content within the same resolved scope and ignores a deactivate for an unknown id', () => {
+  const worldState = { ward: 'hospital_3ward' };
+  const first = applyCsaAction({ csa_active: [], csa_daily_used: 0 }, { action: 'activate', content: 'same rule', scope_type: 'ward' }, 1, 10, worldState);
+  const duplicate = applyCsaAction({ csa_active: first.csa_active, csa_daily_used: first.csa_daily_used }, { action: 'activate', content: 'same rule', scope_type: 'ward' }, 1, 11, worldState);
+  assert.equal(duplicate, null);
+  const missingDeactivate = applyCsaAction({ csa_active: first.csa_active, csa_daily_used: 0 }, { action: 'deactivate', id: 'csa_999' }, 1, 12, worldState);
+  assert.equal(missingDeactivate, null);
+  const realDeactivate = applyCsaAction({ csa_active: first.csa_active, csa_daily_used: 0 }, { action: 'deactivate', id: first.csa_active[0].id }, 1, 12, worldState);
+  assert.equal(realDeactivate.csa_active[0].active, false);
+  assert.equal(realDeactivate.csa_active.length, 1);
+});
+
+test('CSA scope resolution covers ward, floor, building, and world', () => {
+  assert.equal(resolveCsaScopeId('ward', { ward: 'hospital_3ward' }), 'hospital_3ward');
+  assert.equal(resolveCsaScopeId('floor', { floor: 'hospital_floor_3' }), 'hospital_floor_3');
+  assert.equal(resolveCsaScopeId('building', { building: 'seoul_central_hospital' }), 'seoul_central_hospital');
+  assert.equal(resolveCsaScopeId('world', {}), 'world');
+  assert.equal(resolveCsaScopeId('floor', {}), null);
+});
+
+test('Story only injects currently-applicable, active CSAs with the player-unaffected rule', () => {
+  const save = {
+    world_state: { ward: 'hospital_3ward', location_label: '서울중앙병원 3병동 면회실' },
+    csa_active: [
+      { id: 'csa_1', content: '3병동 상식', scope_type: 'ward', scope_id: 'hospital_3ward', active: true },
+      { id: 'csa_2', content: '6병동 상식', scope_type: 'ward', scope_id: 'hospital_6ward', active: true },
+      { id: 'csa_3', content: '해제된 상식', scope_type: 'ward', scope_id: 'hospital_3ward', active: false }
+    ]
+  };
+  const section = buildApplicableCsaSection(save);
+  assert.match(section, /3병동 상식/);
+  assert.doesNotMatch(section, /6병동 상식/);
+  assert.doesNotMatch(section, /해제된 상식/);
+  assert.match(section, /서울중앙병원 3병동 면회실/);
+  assert.match(section, /플레이어만 원래 상식과 변경된 상식의 차이를 기억한다/);
 });
 
 test('extract prompt receives raw player input separately from the narrative', () => {
@@ -484,4 +538,259 @@ test('version endpoint exposes Cloudflare version metadata', async () => {
   assert.deepEqual(await response.json(), {
     worker: 'game-proxy-v2', version_id: 'version-id', tag: 'git-tag'
   });
+});
+
+// ─────────────────────────────────────────────
+// First encounter
+// ─────────────────────────────────────────────
+
+test('first encounter sets absolute affinity/trust once and records npc_encounters', () => {
+  const extract = {
+    character_id: 'heroine9',
+    first_encounter_stats: { 호감도: 40, 신뢰도: -5, reason: '단정한 외형에는 관심을 보였지만 거친 말투 때문에 신뢰는 낮게 형성됨' },
+    npc_stat_changes: { 순응도: { delta: 1, reason: '자연스러운 대화' } }
+  };
+  const patch = buildSavePatch(extract, {}, null, {}, 33, '');
+  assert.equal(patch.npc_stats.heroine9.호감도, 35);
+  assert.equal(patch.npc_stats.heroine9.신뢰도, 0);
+  assert.equal(patch.npc_stats.heroine9.순응도, 1);
+  assert.deepEqual(patch.npc_encounters, {
+    heroine9: { first_turn: 33, initial_affinity: 35, initial_trust: 0, reason: '단정한 외형에는 관심을 보였지만 거친 말투 때문에 신뢰는 낮게 형성됨' }
+  });
+});
+
+test('first encounter stats round decimals and ignore same-turn affinity/trust deltas to avoid double counting', () => {
+  const extract = {
+    character_id: 'heroine9',
+    first_encounter_stats: { 호감도: 17.4, 신뢰도: 8.6, reason: 'reason text' },
+    npc_stat_changes: { 호감도: { delta: 2, reason: 'ignored' }, 신뢰도: { delta: 2, reason: 'ignored' } }
+  };
+  const patch = buildSavePatch(extract, {}, null, {}, 5, '');
+  assert.equal(patch.npc_stats.heroine9.호감도, 17);
+  assert.equal(patch.npc_stats.heroine9.신뢰도, 9);
+});
+
+test('obedience and hypnosis-depth deltas still apply normally on a first-encounter turn', () => {
+  const extract = {
+    character_id: 'heroine9',
+    first_encounter_stats: { 호감도: 10, 신뢰도: 10, reason: 'r' },
+    npc_stat_changes: { 순응도: { delta: 2, reason: '자연스러운 수용' }, 최면깊이: { delta: 2, reason: '명확한 최면 성공' } }
+  };
+  const patch = buildSavePatch(extract, {}, null, {}, 1, '');
+  assert.equal(patch.npc_stats.heroine9.순응도, 2);
+  assert.equal(patch.npc_stats.heroine9.최면깊이, 2);
+});
+
+test('a second encounter with the same NPC never reapplies first_encounter_stats', () => {
+  const previousSave = { npc_encounters: { heroine9: { first_turn: 5, initial_affinity: 17, initial_trust: 8, reason: 'x' } }, npc_stats: { heroine9: { 호감도: 17, 신뢰도: 8 } } };
+  const extract = {
+    character_id: 'heroine9',
+    first_encounter_stats: { 호감도: 30, 신뢰도: 30, reason: 'should be ignored' },
+    npc_stat_changes: { 호감도: { delta: 1, reason: '호의' } }
+  };
+  const patch = buildSavePatch(extract, {}, null, previousSave, 20, '');
+  assert.equal(patch.npc_stats.heroine9.호감도, 18);
+  assert.equal('npc_encounters' in patch, false);
+});
+
+test('first_encounter_stats never applies to narrator or an unregistered NPC', () => {
+  const characters = { heroine9: { name: '박소현' } };
+  const rejected = normalizeRegisteredNpcExtract({
+    character_id: 'unknown_nurse', first_encounter_stats: { 호감도: 20, 신뢰도: 20 }
+  }, characters, null);
+  assert.equal(rejected.character_id, 'narrator');
+  assert.equal(rejected.first_encounter_stats, null);
+  const patch = buildSavePatch({ character_id: 'narrator', first_encounter_stats: { 호감도: 20, 신뢰도: 20 } }, {}, null, {}, 1, '');
+  assert.equal(patch.npc_encounters, undefined);
+});
+
+test('Worker never invents first-encounter numbers itself: identical inputs always produce identical output', () => {
+  const extract = { character_id: 'heroine9', first_encounter_stats: { 호감도: 12, 신뢰도: 22, reason: 'r' } };
+  const a = buildSavePatch(extract, {}, null, {}, 10, '');
+  const b = buildSavePatch(extract, {}, null, {}, 10, '');
+  assert.deepEqual(a.npc_encounters, b.npc_encounters);
+  assert.deepEqual(a.npc_stats, b.npc_stats);
+});
+
+// ─────────────────────────────────────────────
+// Legacy encounter compatibility
+// ─────────────────────────────────────────────
+
+test('legacy save evidence marks an NPC as already encountered and backfills npc_encounters without reapplying stats', () => {
+  const previousSave = { last_character_id: 'heroine9', npc_stats: { heroine9: { 호감도: 40 } } };
+  const extract = { character_id: 'heroine9', first_encounter_stats: { 호감도: 5, 신뢰도: 5, reason: 'should not apply' }, npc_stat_changes: { 호감도: { delta: 1, reason: '호의' } } };
+  const patch = buildSavePatch(extract, {}, null, previousSave, 40, '');
+  assert.equal(patch.npc_stats.heroine9.호감도, 41);
+  assert.deepEqual(patch.npc_encounters, { heroine9: { first_turn: 0, initial_affinity: 0, initial_trust: 0, reason: 'legacy encounter inferred from existing save state' } });
+});
+
+test('legacy evidence is recognized via last_character_id, npc_emotion, npc_stat_changes, or npc_relationship_state, never from npc_stats alone', () => {
+  assert.equal(hasLegacyEncounterEvidence({ last_character_id: 'heroine1' }, 'heroine1'), true);
+  assert.equal(hasLegacyEncounterEvidence({ npc_emotion: { heroine1: { surface: 'x' } } }, 'heroine1'), true);
+  assert.equal(hasLegacyEncounterEvidence({ npc_stat_changes: { heroine1: {} } }, 'heroine1'), true);
+  assert.equal(hasLegacyEncounterEvidence({ npc_relationship_state: { heroine1: {} } }, 'heroine1'), true);
+  assert.equal(hasLegacyEncounterEvidence({ npc_stats: { heroine1: { 호감도: 10 } } }, 'heroine1'), false);
+});
+
+test('a fresh game does not treat every registered heroine as already encountered just because turn_count is positive', () => {
+  const previousSave = { turn_count: 5, npc_stats: { heroine1: { 호감도: 0 }, heroine2: { 호감도: 0 } } };
+  const extract = { character_id: 'heroine1', first_encounter_stats: { 호감도: 10, 신뢰도: 5, reason: 'r' } };
+  const patch = buildSavePatch(extract, {}, null, previousSave, 6, '');
+  assert.deepEqual(patch.npc_encounters, { heroine1: { first_turn: 6, initial_affinity: 10, initial_trust: 5, reason: 'r' } });
+  assert.equal(Object.keys(patch.npc_encounters).length, 1);
+});
+
+// ─────────────────────────────────────────────
+// Active suggestions
+// ─────────────────────────────────────────────
+
+test('extract.choices no longer leaks into active_suggestions', () => {
+  const patch = buildSavePatch({ character_id: 'heroine1', choices: ['① 선택1', '② 선택2'] }, {}, null, {}, 5, '');
+  assert.equal('active_suggestions' in patch, false);
+});
+
+test('suggestion_action activates a new suggestion for the current NPC with a deterministic ID', () => {
+  const extract = { character_id: 'heroine9', suggestion_action: { action: 'activate', character_id: 'heroine9', content: '금태양의 도움 요청에 최선을 다해야 한다', strength: 'surface', reason: 'r' } };
+  const patch = buildSavePatch(extract, {}, null, {}, 32, '');
+  assert.deepEqual(patch.active_suggestions, {
+    heroine9: [{ id: 'suggestion_32_1', content: '금태양의 도움 요청에 최선을 다해야 한다', strength: 'surface', created_turn: 32, active: true }]
+  });
+});
+
+test('duplicate active suggestions for the same NPC (ignoring whitespace) are not added twice', () => {
+  const previousSave = { active_suggestions: { heroine9: [{ id: 'suggestion_30_1', content: '금태양 도움', strength: 'surface', created_turn: 30, active: true }] } };
+  const extract = { character_id: 'heroine9', suggestion_action: { action: 'activate', content: '금태양   도움', strength: 'surface' } };
+  const patch = buildSavePatch(extract, {}, null, previousSave, 31, '');
+  assert.equal('active_suggestions' in patch, false);
+});
+
+test("activating a suggestion for one NPC never touches another NPC's suggestion list", () => {
+  const previousSave = { active_suggestions: { heroine1: [{ id: 'suggestion_1_1', content: 'other npc suggestion', strength: 'surface', created_turn: 1, active: true }] } };
+  const extract = { character_id: 'heroine9', suggestion_action: { action: 'activate', content: 'new suggestion', strength: 'surface' } };
+  const patch = buildSavePatch(extract, {}, null, previousSave, 2, '');
+  assert.deepEqual(Object.keys(patch.active_suggestions), ['heroine9']);
+});
+
+test('deactivate flips active to false without deleting the suggestion entry', () => {
+  const previousSave = { active_suggestions: { heroine9: [{ id: 'suggestion_5_1', content: '금태양 도움', strength: 'surface', created_turn: 5, active: true }] } };
+  const extract = { character_id: 'heroine9', suggestion_action: { action: 'deactivate', content: '금태양 도움', reason: '각성' } };
+  const patch = buildSavePatch(extract, {}, null, previousSave, 6, '');
+  assert.deepEqual(patch.active_suggestions.heroine9, [{ id: 'suggestion_5_1', content: '금태양 도움', strength: 'surface', created_turn: 5, active: false }]);
+});
+
+test('deactivating a suggestion that cannot be found is ignored rather than failing the whole commit', () => {
+  const previousSave = { active_suggestions: { heroine9: [] } };
+  const patch = buildSavePatch({ character_id: 'heroine9', suggestion_action: { action: 'deactivate', content: 'never activated' } }, {}, null, previousSave, 6, '');
+  assert.equal('active_suggestions' in patch, false);
+});
+
+test('suggestion_action is blocked for narrator, an unregistered NPC, and a mismatched target NPC', () => {
+  const characters = { heroine9: { name: '박소현' } };
+  const narratorPatch = buildSavePatch({ character_id: 'narrator', suggestion_action: { action: 'activate', content: 'x' } }, {}, null, {}, 1, '');
+  assert.equal('active_suggestions' in narratorPatch, false);
+  const rejected = normalizeRegisteredNpcExtract({ character_id: 'unknown_nurse', suggestion_action: { action: 'activate', content: 'x' } }, characters, null);
+  assert.equal(rejected.suggestion_action, null);
+  const mismatched = applySuggestionAction({}, { action: 'activate', character_id: 'heroine1', content: 'x' }, 'heroine9', 1);
+  assert.equal(mismatched, null);
+});
+
+test('legacy array-shaped active_suggestions normalizes to an empty map instead of being read as suggestions', () => {
+  assert.deepEqual(normalizeLegacyActiveSuggestions(['병원 구경을 부탁한다', '커피를 제안한다']), {});
+  assert.deepEqual(normalizeLegacyActiveSuggestions({ heroine1: [] }), { heroine1: [] });
+  assert.deepEqual(normalizeLegacyActiveSuggestions(undefined), {});
+});
+
+test("Story prompt injects only the current NPC's active suggestions as established facts", () => {
+  const characters = { heroine9: { name: '박소현' }, heroine1: { name: '한소영' } };
+  const save = {
+    last_character_id: 'heroine9',
+    active_suggestions: {
+      heroine9: [{ id: 'suggestion_32_1', content: '금태양의 도움 요청에 최선을 다해야 한다', strength: 'surface', created_turn: 32, active: true }],
+      heroine1: [{ id: 'suggestion_10_1', content: '다른 NPC 암시', strength: 'surface', created_turn: 10, active: true }]
+    }
+  };
+  const prompt = buildStoryPrompt({ master: { characters }, save, recent_memories: [] }, '계속', 32);
+  const content = prompt.messages[0].content;
+  assert.match(content, /CURRENT NPC ACTIVE SUGGESTIONS/);
+  assert.match(content, /박소현\(heroine9\)/);
+  assert.match(content, /금태양의 도움 요청에 최선을 다해야 한다/);
+  const section = content.slice(content.indexOf('[CURRENT NPC ACTIVE SUGGESTIONS'), content.indexOf('[게임 설정]'));
+  assert.doesNotMatch(section, /다른 NPC 암시/);
+  assert.match(content, /암시가 먹힌 것 같다/);
+});
+
+test('Story prompt omits the active-suggestion section when there is no current NPC', () => {
+  const prompt = buildStoryPrompt({ master: { characters: {} }, save: { player: {} }, recent_memories: [] }, '시작', 0);
+  assert.doesNotMatch(prompt.messages[0].content, /CURRENT NPC ACTIVE SUGGESTIONS/);
+});
+
+// ─────────────────────────────────────────────
+// Structured place state (world_state)
+// ─────────────────────────────────────────────
+
+test('world_state_patch normalizes known Korean place names to standard IDs', () => {
+  assert.deepEqual(buildWorldStatePatch({ building: '서울중앙병원', floor: '3층', ward: '3병동', location_label: '서울중앙병원 3병동 면회실' }), {
+    building: 'seoul_central_hospital', floor: 'hospital_floor_3', ward: 'hospital_3ward', location_label: '서울중앙병원 3병동 면회실'
+  });
+  assert.deepEqual(buildWorldStatePatch({ ward: '6병동' }), { ward: 'hospital_6ward' });
+});
+
+test('world_state_patch ignores unrecognized place names and never clears existing fields with empty strings', () => {
+  assert.equal(buildWorldStatePatch({ building: '알 수 없는 건물', floor: '', ward: '', location_label: '' }), null);
+  assert.equal(buildWorldStatePatch({}), null);
+  const patch = buildSavePatch({ character_id: 'narrator', world_state_patch: { building: '', floor: '', ward: '', location_label: '' } }, {}, null, { world_state: { ward: 'hospital_3ward' } }, 1, '');
+  assert.equal('world_state' in patch, false);
+});
+
+test('world_state_patch merges without requiring a registered NPC in the scene', () => {
+  const patch = buildSavePatch({ character_id: 'narrator', world_state_patch: { ward: '6병동' } }, {}, null, {}, 1, '');
+  assert.deepEqual(patch.world_state, { ward: 'hospital_6ward' });
+});
+
+// ─────────────────────────────────────────────
+// Full commit-turn integration
+// ─────────────────────────────────────────────
+
+test('commit-turn persists first_encounter_stats, suggestion_action, and world_state_patch through the full request pipeline', async () => {
+  const originalFetch = globalThis.fetch;
+  let committedPatch;
+  globalThis.fetch = async (url, init = {}) => {
+    const requestUrl = String(url);
+    if (requestUrl.includes('/rpc/get_context')) {
+      return new Response(JSON.stringify({
+        turn_count: 32,
+        image_catalog: [],
+        master: { characters: { heroine9: { name: '박소현' } } },
+        save: {}
+      }), { headers: { 'content-type': 'application/json' } });
+    }
+    if (requestUrl.includes('/rpc/commit_turn')) {
+      committedPatch = JSON.parse(init.body).p_patch;
+      return new Response(JSON.stringify({ status: 'committed', turn_count: 33 }), { headers: { 'content-type': 'application/json' } });
+    }
+    throw new Error(`unexpected fetch: ${requestUrl}`);
+  };
+  try {
+    const response = await worker.fetch(apiRequest('/api/commit-turn', {
+      game_id: 'test-game', turn_number: 33, content: 'test',
+      extract: {
+        character_id: 'heroine9', npcs_present: ['heroine9'],
+        first_encounter_stats: { 호감도: 17, 신뢰도: 8, reason: '단정한 외형과 거친 말투' },
+        suggestion_action: { action: 'activate', character_id: 'heroine9', content: '금태양의 도움 요청에 최선을 다해야 한다', strength: 'surface' },
+        world_state_patch: { building: '서울중앙병원', floor: '3층', ward: '3병동', location_label: '서울중앙병원 3병동 면회실' },
+        npc_emotion: {
+          surface: '"괜찮은 척은 하지만 낯선 사람이라 마음이 놓이지 않는다."',
+          inner: '"도와주고 싶은데 왜 이렇게 경계하게 되는지 모르겠다."',
+          physical_reaction: '그녀는 차트를 고쳐 잡고 시선을 피한다. 짧게 숨을 고른다.'
+        }
+      }
+    }), { SUPABASE_SECRET_KEY: 'test' });
+    assert.equal(response.status, 200);
+    assert.deepEqual(committedPatch.npc_encounters, { heroine9: { first_turn: 33, initial_affinity: 17, initial_trust: 8, reason: '단정한 외형과 거친 말투' } });
+    assert.equal(committedPatch.npc_stats.heroine9.호감도, 17);
+    assert.equal(committedPatch.active_suggestions.heroine9[0].content, '금태양의 도움 요청에 최선을 다해야 한다');
+    assert.deepEqual(committedPatch.world_state, { building: 'seoul_central_hospital', floor: 'hospital_floor_3', ward: 'hospital_3ward', location_label: '서울중앙병원 3병동 면회실' });
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
 });

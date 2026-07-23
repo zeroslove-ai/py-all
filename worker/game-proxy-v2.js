@@ -491,6 +491,7 @@ ${recentMemories.slice(-3).map(m => m.content?.slice(0, 200) || '').join('\n---\
 
   // ─── 조립 ───
   const csaSection = buildApplicableCsaSection(save);
+  const suggestionSection = buildActiveSuggestionSection(save, master.characters || {});
   const feedbackSection = Array.isArray(feedback) && feedback.length
     ? `\n\n[USER FEEDBACK — APPLY TO THIS NEXT RESPONSE ONLY]\n${feedback.map(item => `- ${typeof item === 'string' ? item : item?.text || ''}`).filter(Boolean).join('\n')}\nThis is not an in-world action. Never narrate it as dialogue or an event; use it only to improve output quality.`
     : '';
@@ -498,7 +499,7 @@ ${recentMemories.slice(-3).map(m => m.content?.slice(0, 200) || '').join('\n---\
   const openingFlow = mode === 'opening'
     ? `\n\n[OPENING PHASE — AFTER PLAYER SETUP]\nThe player setup is confirmed. Generate only the first hospital scene and first NPC encounter now. Do not repeat the app discovery, app feature explanation, player questions, or character recommendation. Never claim that the player has already used the app to change the hospital in the past.\n`
     : '';
-  const systemPrompt = coreRules + playerGate + modeSection + rulebookSection + playerStatusPanel + buildNpcLocationRules() + csaSection + contextSection + feedbackSection + finalFormatRules + openingFlow;
+  const systemPrompt = coreRules + playerGate + modeSection + rulebookSection + playerStatusPanel + buildNpcLocationRules() + csaSection + suggestionSection + contextSection + feedbackSection + finalFormatRules + openingFlow;
 
   return {
     mode,
@@ -556,6 +557,18 @@ npc_emotion.physical_reaction은 표정, 시선, 자세, 목소리, 손동작, �
 [NPC STAT DELTA CONTRACT]
 npc_stat_changes만 반환한다. 서사에 숫자가 없어도 대사·행동·표정·판단의 실제 변화를 근거로 판단하되 변화 없는 반복 대화는 0이다. 의미 있는 호의·편안함·자발적 대화 지속은 호감 +1~2, 의심 완화·정직성 확인·도움 수용은 신뢰 +1~2, 부탁 자발 수용·자기합리화·자연스러운 따름은 순응 +1~3을 검토한다. 무례는 호감 -1~-2, 거짓말 발각·모순·신분 의심은 신뢰 -1~-3, 명확한 거부는 순응 -1~-3을 검토한다. 실제 반응 변화가 명백하면 모든 값을 기계적으로 0으로 두지 마라. 최면깊이는 실제 최면 시도·성공·실패·각성 또는 활성 암시 작동 때만 변화하며 저항력은 항상 0이다. 한도는 호감·신뢰·최면 -5~+5, 순응 일반 -3~+3·최면 사건 -5~+5이고 ±4~5는 중요한 전환에만 쓴다. reason은 서사 근거 한 문장이다.
 
+[FIRST ENCOUNTER CONTRACT]
+저장된 npc_encounters에 현재 NPC(character_id) 기록이 없고 이번이 실제로 처음 직접 조우한 장면일 때만 first_encounter_stats에 호감도·신뢰도를 0~35 사이 정수로 판단해 반환한다. 공식이나 랜덤 없이, 플레이어의 저장된 외형·복장·직업·말투·현재 태도와 NPC의 성격·가치관·경계심·현재 상황을 근거로 종합적으로 정한다. 제공되지 않은 정보를 지어내지 마라. 두 수치는 같을 필요가 없고 NPC 성격에 따라 결과가 달라져야 한다. 이미 조우한 NPC이거나 처음 만나는 장면이 아니면 first_encounter_stats는 반드시 null이다.
+
+[SUGGESTION ACTION CONTRACT]
+이번 서사에서 최면 암시가 실제로 성공·완료됐을 때만 suggestion_action.action="activate"로 현재 NPC(character_id) 대상 암시를 반환한다. content는 암시 내용 문장, strength는 이번에 사용된 최면 강도다. 시도·계획·상상·가능성만으로는 저장하지 말고 실패한 최면도 저장하지 마라. 각성이나 명확한 해제가 실제로 일어났을 때만 action="deactivate"와 동일 content를 반환한다. 대상은 반드시 현재 NPC여야 한다. 변화가 없으면 suggestion_action은 null이다.
+
+[WORLD STATE PATCH CONTRACT]
+이번 턴에 플레이어가 실제로 이동해 장소가 명확히 바뀐 경우에만 world_state_patch에 확인된 필드를 채운다. building/floor/ward는 장소를 설명하는 한국어 명칭으로 적고 Worker가 표준 ID로 정규화하며, 표준 ID로 정규화되지 않는 값은 무시된다. 이동하지 않았거나 장소가 불분명하면 해당 필드를 빈 문자열로 두거나 patch 전체를 비워라. 알 수 없는 장소를 지어내지 마라.
+
+[CSA ACTION CONTRACT]
+현재 장소 범위 안에서 플레이어가 상식개변을 실제로 성공시켰을 때만 csa_action.action="activate"로 content(바뀐 상식 문장)와 scope_type(ward/floor/building/world 중 현재 상황에 맞는 범위)을 반환한다. scope_id는 채우지 마라. Worker가 현재 world_state로 결정한다. 시도·계획·상상만으로는 저장하지 마라. 플레이어가 기존 상식개변을 명확히 해제했을 때만 action="deactivate"와 해제 대상 id를 반환한다. 변화가 없으면 csa_action은 null이다.
+
 [이미지 선택]
 1. image_reasoning으로 is_sexual 판단: 실제 성행위/삽입/성기노출/오르가즘이 구체적이면 true. 키스/포옹/스킨십/분위기만으로는 false. 애매하면 반드시 false.
 2. image_library에서 character_id+is_sexual 일치 항목 필터 → situation 매칭 → image_id 선택. 후보 없으면 null.
@@ -578,9 +591,12 @@ ${JSON.stringify(imageCatalog)}
   "character_id": "npcs_present 안에서만 선택. 비어있을 때만 narrator.",
   "npc_emotion": {"surface": "“따옴표로 감싼 1인칭 내면 독백, 실질 길이 최소 40자”", "inner": "“따옴표로 감싼 1인칭 내면 독백, 실질 길이 최소 40자”", "physical_reaction": "관찰 가능한 신체적·행동적 반응, 최소 2문장"},
   "npc_stat_changes": {"호감도": {"delta": 0, "reason": "변화 근거 없음"}, "신뢰도": {"delta": 0, "reason": "변화 근거 없음"}, "최면깊이": {"delta": 0, "reason": "일반 대화"}, "순응도": {"delta": 0, "reason": "변화 근거 없음"}, "최면저항력": {"delta": 0, "reason": "고정값"}},
+  "first_encounter_stats": null,
   "player_patch": {"name": "", "age": 0, "gender": "", "height_cm": 0, "weight_kg": 0, "job": "", "background": "", "location": "", "style": "", "penis_length_cm": 0},
   "player_recommendation": {"name": "", "age": 0, "gender": "", "job": "", "major": "", "rank": "", "height_cm": 0, "weight_kg": 0, "style": "", "background": ""},
   "growth_event": "none | minor | standard | major (사건의 의미만 제안, 경험치 숫자는 결정하지 말 것)",
+  "suggestion_action": null,
+  "world_state_patch": {"building": "", "floor": "", "ward": "", "location_label": ""},
   "csa_action": null,
   "npc_relationship_state": {"player_ejaculation_count": 0, "npc_orgasm_count": 0},
   "turn_summary": "이번 턴에서 변한 핵심 사실 1~3문장",
@@ -668,6 +684,8 @@ function normalizeRegisteredNpcExtract(extract = {}, characters = {}, lastCharac
     normalized.npc_relationship_state = null;
     normalized.image_id = null;
     normalized.is_sexual = false;
+    normalized.first_encounter_stats = null;
+    normalized.suggestion_action = null;
   }
   return normalized;
 }
@@ -705,8 +723,7 @@ function buildSavePatch(extract, enginePatch = {}, summaryPlan = null, previousS
     : null;
   const patch = {
     last_character_id: characterId,
-    last_image_id: extract.image_id ?? null,
-    active_suggestions: Array.isArray(extract.choices) ? extract.choices : []
+    last_image_id: extract.image_id ?? null
   };
   if (summaryPlan) {
     patch.story_summary_recent100 = summaryPlan.recentSummary;
@@ -714,15 +731,58 @@ function buildSavePatch(extract, enginePatch = {}, summaryPlan = null, previousS
     if (summaryPlan.isBoundary) patch.story_summary_overall = summaryPlan.overallSummary;
   }
 
+  const worldStatePatch = buildWorldStatePatch(extract.world_state_patch);
+  if (worldStatePatch) patch.world_state = worldStatePatch;
+  const mergedWorldState = {
+    ...(isPlainObject(previousSave?.world_state) ? previousSave.world_state : {}),
+    ...(worldStatePatch || {})
+  };
+
   if (characterId && characterId !== 'narrator' && extract._npc_registration_rejected !== true) {
-    const statUpdate = applyNpcStatChanges(previousSave?.npc_stats?.[characterId], extract.npc_stat_changes);
+    const structured = hasStructuredEncounter(previousSave, characterId);
+    const legacy = !structured && hasLegacyEncounterEvidence(previousSave, characterId);
+    const firstEncounterStats = !structured && !legacy ? normalizeFirstEncounterStats(extract.first_encounter_stats) : null;
+
+    const statChangeInput = firstEncounterStats
+      ? { ...extract.npc_stat_changes, 호감도: { delta: 0, reason: '' }, 신뢰도: { delta: 0, reason: '' } }
+      : extract.npc_stat_changes;
+    const statUpdate = applyNpcStatChanges(previousSave?.npc_stats?.[characterId], statChangeInput);
     if (statUpdate.errors.length) console.warn('NPC stat delta rejected:', { characterId, errors: statUpdate.errors });
+
+    if (firstEncounterStats) {
+      const priorAffinity = Math.max(0, Math.min(100, Number(previousSave?.npc_stats?.[characterId]?.['호감도']) || 0));
+      const priorTrust = Math.max(0, Math.min(100, Number(previousSave?.npc_stats?.[characterId]?.['신뢰도']) || 0));
+      statUpdate.stats['호감도'] = firstEncounterStats['호감도'];
+      statUpdate.stats['신뢰도'] = firstEncounterStats['신뢰도'];
+      statUpdate.changes['호감도'] = { delta: firstEncounterStats['호감도'] - priorAffinity, reason: firstEncounterStats.reason };
+      statUpdate.changes['신뢰도'] = { delta: firstEncounterStats['신뢰도'] - priorTrust, reason: firstEncounterStats.reason };
+    }
+
     patch.npc_stats = { [characterId]: statUpdate.stats };
     patch.npc_stat_changes = { [characterId]: statUpdate.changes };
     patch.npc_emotion = { [characterId]: extract.npc_emotion || {} };
     if (isPlainObject(extract.npc_relationship_state)) {
       patch.npc_relationship_state = { [characterId]: normalizeRelationshipState(previousSave?.npc_relationship_state?.[characterId], extract.npc_relationship_state) };
     }
+
+    if (firstEncounterStats) {
+      patch.npc_encounters = { [characterId]: {
+        first_turn: turnNumber,
+        initial_affinity: firstEncounterStats['호감도'],
+        initial_trust: firstEncounterStats['신뢰도'],
+        reason: firstEncounterStats.reason
+      } };
+    } else if (legacy) {
+      patch.npc_encounters = { [characterId]: {
+        first_turn: 0,
+        initial_affinity: 0,
+        initial_trust: 0,
+        reason: 'legacy encounter inferred from existing save state'
+      } };
+    }
+
+    const suggestionPatch = applySuggestionAction(previousSave, extract.suggestion_action, characterId, turnNumber);
+    if (suggestionPatch) Object.assign(patch, suggestionPatch);
   }
   const setupComplete = isSetupComplete(previousSave);
   const recommendation = mergeRecommendation(previousSave?.player_setup?.recommendation, extract.player_recommendation);
@@ -742,7 +802,7 @@ function buildSavePatch(extract, enginePatch = {}, summaryPlan = null, previousS
     patch.opening_started = true;
   }
   patch.player_progress = calculateProgress(previousSave?.player_progress, extract.growth_event);
-  const csaState = applyCsaAction(previousSave, extract.csa_action, patch.player_progress.level, turnNumber);
+  const csaState = applyCsaAction(previousSave, extract.csa_action, patch.player_progress.level, turnNumber, mergedWorldState);
   if (csaState) Object.assign(patch, csaState);
   return patch;
 }
@@ -775,6 +835,9 @@ function normalizeExtract(extract) {
   if (!['none', 'minor', 'standard', 'major'].includes(normalized.growth_event)) normalized.growth_event = 'none';
   if (!isPlainObject(normalized.csa_action)) normalized.csa_action = null;
   if (!isPlainObject(normalized.npc_relationship_state)) normalized.npc_relationship_state = null;
+  if (!isPlainObject(normalized.first_encounter_stats)) normalized.first_encounter_stats = null;
+  if (!isPlainObject(normalized.suggestion_action)) normalized.suggestion_action = null;
+  if (!isPlainObject(normalized.world_state_patch)) normalized.world_state_patch = null;
   return normalized;
 }
 
@@ -848,20 +911,55 @@ function getCsaLimits(level) {
   return { scope_type: 'ward', max_active: 1, daily_limit: level >= 3 ? 2 : 1 };
 }
 
-function applyCsaAction(save, action, level, turnNumber) {
+const CSA_SCOPE_LABELS = {
+  seoul_central_hospital: '서울중앙병원',
+  hospital_floor_3: '서울중앙병원 3층',
+  hospital_3ward: '서울중앙병원 3병동',
+  hospital_6ward: '서울중앙병원 6병동',
+  world: '병원 전체'
+};
+
+// The LLM proposes a scope_type only; the Worker resolves scope_id from the
+// server-owned world_state so activation scope can never be forged by the model.
+function resolveCsaScopeId(scopeType, worldState = {}) {
+  if (scopeType === 'world') return 'world';
+  const value = worldState?.[scopeType];
+  return typeof value === 'string' && value.trim() ? value.trim() : null;
+}
+
+function applyCsaAction(save, action, level, turnNumber, worldState = {}) {
   if (!action || !['activate', 'deactivate'].includes(action.action)) return null;
   const active = Array.isArray(save?.csa_active) ? save.csa_active : [];
   if (action.action === 'deactivate') {
     if (typeof action.id !== 'string') return null;
+    if (!active.some(item => item.id === action.id)) return null;
     return { csa_active: active.map(item => item.id === action.id ? { ...item, active: false } : item) };
   }
   const limits = getCsaLimits(level);
   const scope = action.scope_type;
-  if (!CSA_SCOPE_RANK[scope] || CSA_SCOPE_RANK[scope] > CSA_SCOPE_RANK[limits.scope_type] || typeof action.content !== 'string' || !action.content.trim() || typeof action.scope_id !== 'string' || !action.scope_id.trim()) return null;
+  if (!CSA_SCOPE_RANK[scope] || CSA_SCOPE_RANK[scope] > CSA_SCOPE_RANK[limits.scope_type] || typeof action.content !== 'string' || !action.content.trim()) return null;
+  const scopeId = resolveCsaScopeId(scope, worldState);
+  if (!scopeId) {
+    console.error('CSA activation rejected: world_state missing required scope', { scope, worldState });
+    return null;
+  }
+  const content = action.content.trim();
   const activeCount = active.filter(item => item?.active).length;
   const used = Math.max(0, Number(save?.csa_daily_used) || 0);
   if (activeCount >= limits.max_active || used >= limits.daily_limit) return null;
-  return { csa_active: [...active, { id: `csa_${turnNumber}`, content: action.content.trim(), scope_type: scope, scope_id: action.scope_id.trim(), scope_label: typeof action.scope_label === 'string' ? action.scope_label : action.scope_id.trim(), created_turn: turnNumber, active: true }], csa_daily_used: used + 1 };
+  if (active.some(item => item?.active && item.content === content && item.scope_id === scopeId)) return null;
+  return {
+    csa_active: [...active, {
+      id: `csa_${turnNumber}`,
+      content,
+      scope_type: scope,
+      scope_id: scopeId,
+      scope_label: CSA_SCOPE_LABELS[scopeId] || scopeId,
+      created_turn: turnNumber,
+      active: true
+    }],
+    csa_daily_used: used + 1
+  };
 }
 
 function isCsaApplicable(csa, worldState = {}) {
@@ -871,10 +969,133 @@ function isCsaApplicable(csa, worldState = {}) {
 }
 
 function buildApplicableCsaSection(save) {
-  const world = save?.world_state || save?.player_location || {};
+  const world = isPlainObject(save?.world_state) ? save.world_state : (isPlainObject(save?.player_location) ? save.player_location : {});
   const applicable = (Array.isArray(save?.csa_active) ? save.csa_active : []).filter(csa => isCsaApplicable(csa, world));
   if (!applicable.length) return '';
-  return `\n\n[CURRENT SCENE CSA RULES]\n${applicable.map(csa => `- ${csa.content}\n  This is accepted common sense by everyone in the current scene.`).join('\n')}`;
+  const locationLabel = typeof world.location_label === 'string' && world.location_label.trim() ? world.location_label.trim() : '현재 위치';
+  const lines = applicable.map(csa => `- ${csa.content}`).join('\n');
+  return `\n\n[CURRENT APPLICABLE COMMON-SENSE CHANGES — ESTABLISHED FACTS]\n\n현재 장소:\n${locationLabel}\n\n적용 중인 상식:\n${lines}\n\n적용 규칙:\n- 현재 장면의 NPC와 배경 인물은 위 내용을 당연한 상식으로 받아들인다.\n- 플레이어만 원래 상식과 변경된 상식의 차이를 기억한다.\n- 이미 적용된 상식개변의 성공 여부를 다시 의심하지 마라.\n- NPC가 이유 없이 위화감을 느끼거나 규칙을 부정하지 않게 한다.\n- 현재 범위를 벗어나면 적용하지 않는다.\n- 해제되거나 비활성인 개변은 적용하지 않는다.\n- NPC의 성격은 유지되지만 판단의 전제가 변경된 상식을 따른다.`;
+}
+
+// ─────────────────────────────────────────────
+// 장소 상태(world_state) 정규화
+// ─────────────────────────────────────────────
+
+const WORLD_STATE_BUILDING_IDS = { '서울중앙병원': 'seoul_central_hospital', seoul_central_hospital: 'seoul_central_hospital' };
+const WORLD_STATE_FLOOR_IDS = { '3층': 'hospital_floor_3', hospital_floor_3: 'hospital_floor_3' };
+const WORLD_STATE_WARD_IDS = { '3병동': 'hospital_3ward', hospital_3ward: 'hospital_3ward', '6병동': 'hospital_6ward', hospital_6ward: 'hospital_6ward' };
+
+function normalizeWorldStateId(map, value) {
+  if (typeof value !== 'string' || !value.trim()) return null;
+  return map[value.trim()] || null;
+}
+
+// Only emits fields the model actually resolved to a known standard ID, so an
+// empty or unrecognized value never wipes an existing world_state field via merge.
+function buildWorldStatePatch(rawPatch) {
+  if (!isPlainObject(rawPatch)) return null;
+  const result = {};
+  const building = normalizeWorldStateId(WORLD_STATE_BUILDING_IDS, rawPatch.building);
+  if (building) result.building = building;
+  const floor = normalizeWorldStateId(WORLD_STATE_FLOOR_IDS, rawPatch.floor);
+  if (floor) result.floor = floor;
+  const ward = normalizeWorldStateId(WORLD_STATE_WARD_IDS, rawPatch.ward);
+  if (ward) result.ward = ward;
+  if (typeof rawPatch.location_label === 'string' && rawPatch.location_label.trim()) {
+    result.location_label = rawPatch.location_label.trim();
+  }
+  return Object.keys(result).length ? result : null;
+}
+
+// ─────────────────────────────────────────────
+// 첫 조우 판정
+// ─────────────────────────────────────────────
+
+function hasStructuredEncounter(previousSave, characterId) {
+  return isPlainObject(previousSave?.npc_encounters) && isPlainObject(previousSave.npc_encounters[characterId]);
+}
+
+// A save from before npc_encounters existed still proves the NPC was already
+// met; these signals must never include npc_stats alone (every heroine may
+// have default stats pre-seeded without ever having been encountered).
+function hasLegacyEncounterEvidence(previousSave, characterId) {
+  if (!characterId) return false;
+  if (previousSave?.last_character_id === characterId) return true;
+  if (isPlainObject(previousSave?.npc_emotion?.[characterId]) && Object.keys(previousSave.npc_emotion[characterId]).length > 0) return true;
+  if (isPlainObject(previousSave?.npc_stat_changes?.[characterId])) return true;
+  if (isPlainObject(previousSave?.npc_relationship_state?.[characterId])) return true;
+  return false;
+}
+
+function clampStatValue(value, min, max) {
+  const number = Number(value);
+  if (!Number.isFinite(number)) return min;
+  return Math.max(min, Math.min(max, Math.round(number)));
+}
+
+function normalizeFirstEncounterStats(raw) {
+  if (!isPlainObject(raw)) return null;
+  const reason = typeof raw.reason === 'string' ? raw.reason.trim().slice(0, 240) : '';
+  return {
+    호감도: clampStatValue(raw['호감도'], 0, 35),
+    신뢰도: clampStatValue(raw['신뢰도'], 0, 35),
+    reason
+  };
+}
+
+// ─────────────────────────────────────────────
+// 활성 암시(active_suggestions) 관리
+// ─────────────────────────────────────────────
+
+// Older saves stored the last turn's UI choice strings under this key by
+// mistake; treat that shape as empty rather than importing it as suggestions.
+function normalizeLegacyActiveSuggestions(value) {
+  if (Array.isArray(value)) return {};
+  return isPlainObject(value) ? value : {};
+}
+
+function normalizeSuggestionContent(value) {
+  return typeof value === 'string' ? value.trim().replace(/\s+/g, ' ') : '';
+}
+
+function nextSuggestionId(existingList, turnNumber) {
+  const sameTurnCount = existingList.filter(item => item?.created_turn === turnNumber).length;
+  return `suggestion_${turnNumber}_${sameTurnCount + 1}`;
+}
+
+function applySuggestionAction(previousSave, action, currentCharacterId, turnNumber) {
+  if (!isPlainObject(action) || !['activate', 'deactivate'].includes(action.action)) return null;
+  if (!currentCharacterId || currentCharacterId === 'narrator') return null;
+  const actionCharacterId = typeof action.character_id === 'string' ? action.character_id : null;
+  if (actionCharacterId && actionCharacterId !== currentCharacterId) return null;
+
+  const previousMap = normalizeLegacyActiveSuggestions(previousSave?.active_suggestions);
+  const list = Array.isArray(previousMap[currentCharacterId]) ? previousMap[currentCharacterId] : [];
+  const content = normalizeSuggestionContent(action.content);
+  if (!content) return null;
+
+  if (action.action === 'activate') {
+    const strength = typeof action.strength === 'string' && action.strength.trim() ? action.strength.trim() : 'surface';
+    const duplicate = list.some(item => item?.active && normalizeSuggestionContent(item.content) === content);
+    if (duplicate) return null;
+    const newItem = { id: nextSuggestionId(list, turnNumber), content, strength, created_turn: turnNumber, active: true };
+    return { active_suggestions: { [currentCharacterId]: [...list, newItem] } };
+  }
+
+  const target = list.find(item => item?.active && normalizeSuggestionContent(item.content) === content);
+  if (!target) return null;
+  return { active_suggestions: { [currentCharacterId]: list.map(item => item === target ? { ...item, active: false } : item) } };
+}
+
+function buildActiveSuggestionSection(save, characters = {}) {
+  const characterId = save?.last_character_id;
+  if (!characterId || characterId === 'narrator') return '';
+  const map = normalizeLegacyActiveSuggestions(save?.active_suggestions);
+  const list = Array.isArray(map[characterId]) ? map[characterId].filter(item => item?.active) : [];
+  if (!list.length) return '';
+  const name = characters?.[characterId]?.name || characters?.[characterId]?.['이름'] || characterId;
+  const lines = list.map(item => `- ${item.content}\n  강도: ${item.strength}\n  적용 턴: ${item.created_turn}`).join('\n');
+  return `\n\n[CURRENT NPC ACTIVE SUGGESTIONS — ESTABLISHED FACTS]\n\n현재 NPC:\n${name}(${characterId})\n\n활성 암시:\n${lines}\n\n적용 규칙:\n- 위 암시는 이미 활성 상태다.\n- 암시 성공 여부를 다시 의심하지 마라.\n- 암시를 NPC 성격과 현재 상황에 맞춰 자연스럽게 행동으로 드러내라.\n- 각성, 해제 또는 명확한 저항 성공이 실제로 발생하지 않는 한 유지된다.\n- 이미 활성인 동일 암시를 다시 주입하는 장면을 만들지 마라.\n- 암시 때문에 NPC의 성격이 완전히 사라지지는 않는다.\n- NPC는 자신의 성격 안에서 암시를 합리화하며 행동한다.\n\n[금지 표현]\n- 암시가 먹힌 것 같다\n- 암시가 제대로 적용됐는지 모르겠다\n- 다시 걸어봐야겠다\n- 효과를 확인해야겠다\n- 아까 최면이 성공했는지 확실하지 않다`;
 }
 
 function appendSummary(previous, addition, limit = 1000) {
@@ -936,5 +1157,14 @@ export {
   isSetupComplete,
   isApprovalInput,
   mergeRecommendation,
-  withSetupCompatibility
+  withSetupCompatibility,
+  buildWorldStatePatch,
+  hasStructuredEncounter,
+  hasLegacyEncounterEvidence,
+  normalizeFirstEncounterStats,
+  normalizeLegacyActiveSuggestions,
+  applySuggestionAction,
+  buildActiveSuggestionSection,
+  buildApplicableCsaSection,
+  resolveCsaScopeId
 };

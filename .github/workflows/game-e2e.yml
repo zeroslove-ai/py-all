@@ -1,0 +1,132 @@
+name: Game E2E
+
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: 'smoke는 읽기 전용, one_turn은 전용 테스트 게임을 실제로 1턴 진행'
+        required: true
+        type: choice
+        default: smoke
+        options:
+          - smoke
+          - one_turn
+      base_url:
+        description: '게임 프론트 URL'
+        required: true
+        type: string
+        default: 'https://gamebuilder-v2.zeroslove.workers.dev'
+      api_base:
+        description: '게임 API Worker URL'
+        required: true
+        type: string
+        default: 'https://game-proxy-v2.zeroslove.workers.dev'
+      smoke_game_id:
+        description: '읽기 전용 페이지·context 확인용 게임 ID'
+        required: true
+        type: string
+        default: '9ed5b835-9948-4cad-ac25-3ebff7348574'
+      test_game_id:
+        description: 'one_turn 전용 게임 ID. 운영 게임과 같으면 실행이 차단됩니다.'
+        required: false
+        type: string
+      player_input:
+        description: 'one_turn에서 전송할 입력'
+        required: false
+        type: string
+        default: '현재 상황을 확인하고 차분하게 대화를 이어간다.'
+      expected_worker_version_id:
+        description: '선택 사항. 입력하면 /api/version이 이 version_id가 될 때까지 대기'
+        required: false
+        type: string
+      version_wait_minutes:
+        description: 'expected version 대기 시간'
+        required: true
+        type: choice
+        default: '0'
+        options:
+          - '0'
+          - '15'
+          - '30'
+          - '60'
+  schedule:
+    # 매일 09:00 KST. 읽기 전용 smoke만 실행한다.
+    - cron: '0 0 * * *'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: game-e2e-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  game-e2e:
+    name: ${{ inputs.mode || 'scheduled-smoke' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 75
+    env:
+      E2E_MODE: ${{ inputs.mode || 'smoke' }}
+      E2E_BASE_URL: ${{ inputs.base_url || 'https://gamebuilder-v2.zeroslove.workers.dev' }}
+      E2E_API_BASE: ${{ inputs.api_base || 'https://game-proxy-v2.zeroslove.workers.dev' }}
+      E2E_SMOKE_GAME_ID: ${{ inputs.smoke_game_id || '9ed5b835-9948-4cad-ac25-3ebff7348574' }}
+      E2E_TEST_GAME_ID: ${{ inputs.test_game_id || '' }}
+      E2E_PLAYER_INPUT: ${{ inputs.player_input || '현재 상황을 확인하고 차분하게 대화를 이어간다.' }}
+      E2E_EXPECTED_VERSION_ID: ${{ inputs.expected_worker_version_id || '' }}
+      E2E_VERSION_WAIT_MINUTES: ${{ inputs.version_wait_minutes || '0' }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Guard mutating test inputs
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "$E2E_MODE" == "one_turn" ]]; then
+            if [[ -z "$E2E_TEST_GAME_ID" ]]; then
+              echo '::error::one_turn 모드는 별도 test_game_id가 필요합니다.'
+              exit 1
+            fi
+            if [[ "$E2E_TEST_GAME_ID" == "$E2E_SMOKE_GAME_ID" ]]; then
+              echo '::error::운영 smoke_game_id는 실제 1턴 테스트에 사용할 수 없습니다.'
+              exit 1
+            fi
+          fi
+
+      - name: Install Playwright test runner
+        run: npm install --no-save @playwright/test@latest
+
+      - name: Install Chromium
+        run: npx playwright install --with-deps chromium
+
+      - name: Run browser E2E
+        run: npx playwright test test/e2e/game.spec.js
+
+      - name: Publish run summary
+        if: always()
+        shell: bash
+        run: |
+          if [[ -f test-results/game-e2e/summary.md ]]; then
+            cat test-results/game-e2e/summary.md >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo '## Game E2E 결과' >> "$GITHUB_STEP_SUMMARY"
+            echo '' >> "$GITHUB_STEP_SUMMARY"
+            echo '테스트가 summary.md를 만들기 전에 종료되었습니다. Artifact와 job log를 확인하세요.' >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Upload Playwright diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: game-e2e-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            playwright-report/
+            test-results/
+          if-no-files-found: warn
+          retention-days: 7

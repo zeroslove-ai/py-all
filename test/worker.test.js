@@ -42,7 +42,9 @@ import {
   parseJsonContent,
   buildStoryStateSnapshot,
   clipHeadTail,
-  buildCurrentSceneSection
+  buildCurrentSceneSection,
+  detectExplicitRegisteredNpcMentions,
+  buildExplicitNpcMentionSection
 } from '../worker/game-proxy-v2.js';
 import worker from '../worker/game-proxy-v2.js';
 
@@ -1454,4 +1456,97 @@ test('/api/commit-turn requests get_commit_context and get_image_catalog_for_cha
   } finally {
     globalThis.fetch = originalFetch;
   }
+});
+
+// ─────────────────────────────────────────────
+// Minimal multi-NPC target switching
+// ─────────────────────────────────────────────
+
+test('detectExplicitRegisteredNpcMentions finds only exact full registered names, in text order, once each', () => {
+  const characters = { heroine1: { name: '한소영' }, heroine9: { name: '박소현' } };
+  assert.deepEqual(
+    detectExplicitRegisteredNpcMentions('한소영 수간호사님, 잠깐 이야기하시죠.', characters).map(m => m.character_id),
+    ['heroine1']
+  );
+  assert.deepEqual(
+    detectExplicitRegisteredNpcMentions('박소현 씨와 한소영 수간호사님 두 분께 묻는다.', characters).map(m => m.character_id),
+    ['heroine9', 'heroine1']
+  );
+  assert.deepEqual(
+    detectExplicitRegisteredNpcMentions('한소영, 한소영, 한소영에게 다시 묻는다.', characters).map(m => m.character_id),
+    ['heroine1']
+  );
+});
+
+test('detectExplicitRegisteredNpcMentions rejects titles, surnames, partial names, pronouns, and unregistered names', () => {
+  const characters = { heroine1: { name: '한소영' }, heroine9: { name: '박소현' } };
+  for (const text of ['수간호사님', '소영 씨', '박 간호사', '옆의 간호사', '그 여자', '송미영 간호사를 불러 주세요.']) {
+    assert.deepEqual(detectExplicitRegisteredNpcMentions(text, characters), []);
+  }
+});
+
+test('detectExplicitRegisteredNpcMentions returns [] for empty input or no registered characters', () => {
+  assert.deepEqual(detectExplicitRegisteredNpcMentions('', { heroine1: { name: '한소영' } }), []);
+  assert.deepEqual(detectExplicitRegisteredNpcMentions('한소영이 있다', {}), []);
+  assert.deepEqual(detectExplicitRegisteredNpcMentions(undefined, { heroine1: { name: '한소영' } }), []);
+});
+
+test('detectRegisteredCharacterIds prioritizes an exact name in the player input over the narrative, regardless of characters object order', () => {
+  const characters = { heroine9: { name: '박소현' }, heroine1: { name: '한소영' } };
+  assert.deepEqual(
+    detectRegisteredCharacterIds('박소현과 한소영이 함께 있다.', '한소영 수간호사님께 묻는다.', characters, 'heroine9'),
+    ['heroine1', 'heroine9']
+  );
+});
+
+test('Story prompt includes an explicit-mention hint section only when the player input names a registered NPC exactly, listed in input order', () => {
+  const characters = { heroine1: { name: '한소영' }, heroine9: { name: '박소현' } };
+  const withMention = buildStoryPrompt(
+    { master: { characters }, save: { last_character_id: 'heroine9' }, recent_memories: [] },
+    '박소현 씨와 한소영 수간호사님, 두 분 모두 잠깐 이야기하시죠.',
+    5
+  );
+  const content = withMention.messages[0].content;
+  assert.match(content, /EXPLICIT REGISTERED NPC MENTIONS IN PLAYER INPUT/);
+  const mentionIndex = content.indexOf('[EXPLICIT REGISTERED NPC MENTIONS');
+  const mentionSection = content.slice(mentionIndex, content.indexOf('[게임 설정]'));
+  assert.match(mentionSection, /박소현\(heroine9\)/);
+  assert.match(mentionSection, /한소영\(heroine1\)/);
+  assert.ok(mentionSection.indexOf('박소현') < mentionSection.indexOf('한소영'));
+  assert.match(mentionSection, /Worker가 응답 대상을 강제한 것이 아니다/);
+  assert.match(mentionSection, /자동 전환하지 않는다/);
+  assert.match(mentionSection, /순간이동시키지 말고/);
+
+  const withoutMention = buildStoryPrompt(
+    { master: { characters }, save: { last_character_id: 'heroine9' }, recent_memories: [] },
+    '계속 말씀해 주세요.',
+    5
+  );
+  assert.doesNotMatch(withoutMention.messages[0].content, /EXPLICIT REGISTERED NPC MENTIONS/);
+});
+
+test('the explicit-mention section is placed right after CURRENT SCENE and before ACTIVE PERSONAL SUGGESTIONS / CSA', () => {
+  const characters = { heroine1: { name: '한소영' }, heroine9: { name: '박소현' } };
+  const save = {
+    last_character_id: 'heroine9',
+    world_state: { location_label: '서울중앙병원 3병동 면회실' },
+    active_suggestions: { heroine9: [{ id: 's1', content: '암시', strength: 'surface', created_turn: 1, active: true }] }
+  };
+  const prompt = buildStoryPrompt({ master: { characters }, save, recent_memories: [] }, '한소영 수간호사님, 잠깐 말씀 좀 나눌 수 있을까요?', 5);
+  const content = prompt.messages[0].content;
+  const sceneIndex = content.indexOf('[CURRENT SCENE');
+  const mentionIndex = content.indexOf('[EXPLICIT REGISTERED NPC MENTIONS');
+  const suggestionIndex = content.indexOf('[ACTIVE PERSONAL SUGGESTIONS');
+  assert.ok(sceneIndex >= 0 && mentionIndex > sceneIndex && suggestionIndex > mentionIndex);
+});
+
+test('Extract prompt carries the MAIN NPC / MULTI NPC CONTRACT ahead of the image selection rules', () => {
+  const prompt = buildExtractPrompt('서사', '입력', { master: {}, save: {} }, [], 1);
+  assert.match(prompt, /MAIN NPC \/ MULTI NPC CONTRACT/);
+  assert.match(prompt, /이름만 대화 주제로 언급됐고 실제 장면에 등장하지 않은 NPC는 npcs_present에 넣지 않는다/);
+  assert.match(prompt, /플레이어가 이번 입력에서 직접 말을 걸거나 행동 대상으로 삼은 NPC/);
+  assert.match(prompt, /다른 NPC가 짧게 한마디 했다는 이유만으로 자동 전환하지 않는다/);
+  assert.match(prompt, /캐릭터 매핑 목록 순서, 이미지 후보 순서, master 객체 순서로 character_id를 고르지 않는다/);
+  assert.match(prompt, /메인 NPC는 한 명만 고른다/);
+  assert.ok(prompt.indexOf('MAIN NPC / MULTI NPC CONTRACT') < prompt.indexOf('[이미지 선택]'));
 });

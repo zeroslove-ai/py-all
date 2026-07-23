@@ -155,17 +155,39 @@ async function requestDeepSeekJsonWithRetry(env, requestBody, { timeoutMs = 6000
   throw lastError;
 }
 
-// Only registered heroines whose name literally appears in this turn's text
-// are candidates; never guessed from appearance or narrative inference.
-function detectRegisteredCharacterIds(narrativeText, playerInput, characters = {}, lastCharacterId = null) {
-  const haystack = `${typeof narrativeText === 'string' ? narrativeText : ''}\n${typeof playerInput === 'string' ? playerInput : ''}`;
-  const found = [];
+// Only an exact, full registered name counts as a mention — a title alone
+// ("수간호사님"), a surname ("박 간호사"), a partial given name ("소영 씨"),
+// or a pronoun never matches, so this never guesses from appearance or role.
+function detectExplicitRegisteredNpcMentions(text, characters = {}) {
+  const haystack = typeof text === 'string' ? text : '';
+  if (!haystack) return [];
+  const mentions = [];
   for (const [id, character] of Object.entries(isPlainObject(characters) ? characters : {})) {
     const name = character?.name || character?.['이름'];
-    if (typeof name === 'string' && name && haystack.includes(name)) found.push(id);
+    if (typeof name !== 'string' || !name.trim()) continue;
+    const index = haystack.indexOf(name);
+    if (index !== -1) mentions.push({ character_id: id, name, index });
   }
-  const unique = [...new Set(found)];
-  if (unique.length) return unique.slice(0, 3);
+  mentions.sort((a, b) => a.index - b.index);
+  return mentions;
+}
+
+// Prioritizes NPCs the player explicitly named by their exact registered name
+// — first in the player's own input, then in the generated narrative — over
+// character-object enumeration order, so an explicitly-addressed NPC's image
+// is guaranteed a candidate slot instead of losing out to iteration order.
+function detectRegisteredCharacterIds(narrativeText, playerInput, characters = {}, lastCharacterId = null) {
+  const inputMentions = detectExplicitRegisteredNpcMentions(playerInput, characters);
+  const narrativeMentions = detectExplicitRegisteredNpcMentions(narrativeText, characters);
+  const ordered = [];
+  const seen = new Set();
+  for (const mention of [...inputMentions, ...narrativeMentions]) {
+    if (!seen.has(mention.character_id)) {
+      seen.add(mention.character_id);
+      ordered.push(mention.character_id);
+    }
+  }
+  if (ordered.length) return ordered.slice(0, 3);
   if (lastCharacterId && isPlainObject(characters) && characters[lastCharacterId]) return [lastCharacterId];
   return [];
 }
@@ -732,6 +754,7 @@ ${recentMemorySlice.map((m, index) => clipHeadTail(m.content || '', index === re
 
   // ─── 조립 ───
   const currentSceneSection = buildCurrentSceneSection(save, master.characters || {});
+  const explicitMentionSection = buildExplicitNpcMentionSection(playerInput, master.characters || {});
   const csaSection = buildApplicableCsaSection(save);
   const suggestionSection = buildActiveSuggestionSection(save, master.characters || {});
   const feedbackSection = Array.isArray(feedback) && feedback.length
@@ -742,7 +765,7 @@ ${recentMemorySlice.map((m, index) => clipHeadTail(m.content || '', index === re
   const openingFlow = mode === 'opening'
     ? `\n\n[OPENING PHASE — AFTER PLAYER SETUP]\nThe player setup is confirmed. Generate only the first hospital scene and first NPC encounter now. Do not repeat the app discovery, app feature explanation, player questions, or character recommendation. Never claim that the player has already used the app to change the hospital in the past.\n`
     : '';
-  const systemPrompt = coreRules + playerGate + modeSection + rulebookSection + playerStatusPanel + buildNpcLocationRules() + currentSceneSection + csaSection + suggestionSection + contextSection + feedbackSection + continuitySection + finalFormatRules + openingFlow;
+  const systemPrompt = coreRules + playerGate + modeSection + rulebookSection + playerStatusPanel + buildNpcLocationRules() + currentSceneSection + explicitMentionSection + csaSection + suggestionSection + contextSection + feedbackSection + continuitySection + finalFormatRules + openingFlow;
 
   return {
     mode,
@@ -790,6 +813,19 @@ story_summary_recent100(1000자) 뒤에 이번 턴 핵심 사건을 이어붙인
 [캐릭터 ID 매핑 — character_id는 반드시 이 중 하나만 써라]
 한소영=heroine1, 강세라=heroine2, 최유리=heroine3, 배수진=heroine4, 김지은=heroine5, 윤아름=heroine6, 서지아=heroine7, 한세아=heroine8, 박소현=heroine9, 임수정=heroine10
 narrator는 정말로 주변에 NPC가 단 한 명도 없는 장면에만 써라. NPC가 등장하면 반드시 heroine ID를 써라.
+
+[MAIN NPC / MULTI NPC CONTRACT]
+- npcs_present에는 방금 생성된 서사에 실제로 등장한 등록 NPC ID를 모두 넣는다.
+- 이름만 대화 주제로 언급됐고 실제 장면에 등장하지 않은 NPC는 npcs_present에 넣지 않는다.
+- character_id는 이번 턴의 메인 상호작용 NPC 한 명이다.
+- 우선순위:
+  1. 플레이어가 이번 입력에서 직접 말을 걸거나 행동 대상으로 삼은 NPC
+  2. 이번 턴에서 주된 답변·행동·감정 반응을 보인 NPC
+  3. 대상 전환이 없을 때만 이전 메인 NPC
+- 캐릭터 매핑 목록 순서, 이미지 후보 순서, master 객체 순서로 character_id를 고르지 않는다.
+- 다른 NPC가 짧게 한마디 했다는 이유만으로 자동 전환하지 않는다.
+- 여러 NPC가 반응하더라도 npc_emotion, npc_stat_changes, 이미지, TTS의 기준이 될 메인 NPC는 한 명만 고른다.
+- 장면에 등록 NPC가 한 명 이상 실제 등장하면 narrator를 사용하지 않는다.
 
 [대사 추출 — TTS용]
 서사에서 **캐릭터명** (연기지시): "대사 내용" 형식을 찾아 dialogue_lines에 담아라.
@@ -1430,6 +1466,16 @@ function buildCurrentSceneSection(save, characters = {}) {
   return `\n\n[CURRENT SCENE — ESTABLISHED FACT]\n\n장소: ${locationLabel || '알 수 없음'}${npcLine}\n\n규칙:\n- 이미 현재 장소 안에 있다.\n- 같은 이동이나 입장을 다시 반복하지 않는다.\n- 저장된 위치와 정면 충돌하는 새 장소·시간을 임의 생성하지 않는다.`;
 }
 
+// A hint only — never a forced character_id. Story must still judge whether
+// the mention was a direct address (switch response) or a third-party
+// question (current NPC can answer without the mentioned NPC teleporting in).
+function buildExplicitNpcMentionSection(playerInput, characters = {}) {
+  const mentions = detectExplicitRegisteredNpcMentions(playerInput, characters);
+  if (!mentions.length) return '';
+  const lines = mentions.map(m => `- ${m.name}(${m.character_id})`).join('\n');
+  return `\n\n[EXPLICIT REGISTERED NPC MENTIONS IN PLAYER INPUT]\n\n사용자가 이번 입력에서 정확한 실명으로 언급한 등록 NPC:\n${lines}\n\n판정 규칙:\n- 이것은 문맥 판단을 돕는 후보 정보이며, Worker가 응답 대상을 강제한 것이 아니다.\n- 사용자가 해당 NPC에게 직접 말하거나 행동했다면 그 NPC가 이번 턴의 우선 응답자가 된다.\n- 단순히 제3자에 관해 질문한 것이라면 현재 대화 상대가 답할 수 있으며, 언급된 NPC로 자동 전환하지 않는다.\n- 언급된 NPC가 현재 장면에 없다면 순간이동시키지 말고 호출·연락·이동·위치 안내 등 자연스러운 과정을 쓴다.\n- 기존 장면의 다른 NPC를 이유 없이 삭제하거나 사라지게 하지 않는다.\n- 여러 명을 직접 부른 경우 모두 반응할 수 있지만, 서사를 주도하는 메인 NPC는 한 명으로 명확하게 만든다.\n- 등록되지 않은 새 고유 NPC를 만들지 않는다.`;
+}
+
 // Only the fields the Story LLM actually needs — never a full save dump —
 // so npc_stats/npc_emotion for the other nine heroines never leak in and a
 // naive character-count slice can never truncate active_suggestions/world_state.
@@ -1589,5 +1635,7 @@ export {
   parseJsonContent,
   buildStoryStateSnapshot,
   clipHeadTail,
-  buildCurrentSceneSection
+  buildCurrentSceneSection,
+  detectExplicitRegisteredNpcMentions,
+  buildExplicitNpcMentionSection
 };

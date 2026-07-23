@@ -522,7 +522,11 @@ function buildExtractPrompt(narrativeText, playerInput, ctx, images, turnCount) 
     image_id: img.image_id ?? img.id,
     character_id: img.character_id,
     situation: img.situation,
-    is_sexual: img.is_sexual
+    short_description: typeof img.short_description === 'string' ? img.short_description : '',
+    tags: normalizeTags(img.tags),
+    image_pool: normalizeImagePool(img.image_pool),
+    is_sexual: resolveIsSexual(img),
+    curation_rank: parseCurationRank(img.curation_rank)
   }));
 
   return `너는 플레이 LLM이 방금 쓴 서사와 플레이어의 원본 입력을 읽고, 저장/이미지/음성에 필요한 값만 구조화하는 역할이다. NPC 수치만은 아래 delta 계약에 따라 이번 턴의 실제 변화와 근거를 판단한다. JSON 코드블록 하나만 출력하고 다른 말은 절대 하지 마라.
@@ -571,7 +575,7 @@ npc_stat_changes만 반환한다. 서사에 숫자가 없어도 대사·행동·
 
 [이미지 선택]
 1. image_reasoning으로 is_sexual 판단: 실제 성행위/삽입/성기노출/오르가즘이 구체적이면 true. 키스/포옹/스킨십/분위기만으로는 false. 애매하면 반드시 false.
-2. image_library에서 character_id+is_sexual 일치 항목 필터 → situation 매칭 → image_id 선택. 후보 없으면 null.
+2. image_library에서 character_id+is_sexual(또는 image_pool) 일치 항목만 후보로 본다. short_description과 tags가 있으면 situation보다 먼저 참고해 현재 장면에 가장 맞는 이미지를 고르고, 없으면 기존처럼 situation으로만 매칭한다. 후보 없으면 null.
 
 [플레이어의 이번 원본 입력]
 ${typeof playerInput === 'string' && playerInput.trim() ? playerInput : '(없음)'}
@@ -627,15 +631,55 @@ function cleanForLlm(obj, options = {}) {
   return cleaned;
 }
 
+// ─────────────────────────────────────────────
+// 이미지 카탈로그: 신규(curated) 메타데이터 지원
+// ─────────────────────────────────────────────
+
+// image_pool is the DB-curated source of truth once present; only a legacy
+// row with no image_pool falls back to the old boolean is_sexual flag.
+function resolveIsSexual(img) {
+  if (img?.image_pool === 'sex') return true;
+  if (img?.image_pool === 'general') return false;
+  return img?.is_sexual === true;
+}
+
+function normalizeImagePool(value) {
+  return value === 'sex' || value === 'general' ? value : null;
+}
+
+function normalizeTags(value) {
+  if (!Array.isArray(value)) return [];
+  return value.filter(tag => typeof tag === 'string' && tag.trim()).map(tag => tag.trim());
+}
+
+// A missing/invalid curation_rank must never win a fallback pick, so it's
+// stored as null and treated as +Infinity wherever ranks are compared.
+function parseCurationRank(value) {
+  if (value === null || value === undefined || value === '') return null;
+  const n = Number(value);
+  return Number.isInteger(n) ? n : null;
+}
+
+function curationSortRank(img) {
+  const rank = parseCurationRank(img?.curation_rank);
+  return rank === null ? Number.POSITIVE_INFINITY : rank;
+}
+
 function normalizeImageCatalog(catalog) {
   const grouped = {};
   for (const img of flattenImageCatalog(catalog)) {
     if (!img?.character_id) continue;
     if (!grouped[img.character_id]) grouped[img.character_id] = [];
+    const situation = typeof img.situation === 'string' && img.situation.trim() ? img.situation.trim() : '';
+    const shortDescription = typeof img.short_description === 'string' && img.short_description.trim() ? img.short_description.trim() : '';
     grouped[img.character_id].push({
       image_id: img.image_id ?? img.id,
-      situation: img.situation ?? '',
-      is_sexual: img.is_sexual === true,
+      situation: situation || shortDescription,
+      short_description: shortDescription || situation,
+      tags: normalizeTags(img.tags),
+      image_pool: normalizeImagePool(img.image_pool),
+      is_sexual: resolveIsSexual(img),
+      curation_rank: parseCurationRank(img.curation_rank),
       image_url: img.image_url ?? null
     });
   }
@@ -1142,10 +1186,13 @@ function selectImageId(catalog, characterId, requestedId, previousId, isSexual) 
   if (!characterId || characterId === 'narrator') return null;
   const candidates = flattenImageCatalog(catalog).filter(img => img?.character_id === characterId);
   const requested = candidates.find(img => Number(img.image_id ?? img.id) === Number(requestedId));
-  if (requested && (requested.is_sexual === true) === (isSexual === true)) return Number(requested.image_id ?? requested.id);
-  const safe = candidates.find(img => img.is_sexual !== true);
-  if (safe) return Number(safe.image_id ?? safe.id);
-  const previous = candidates.find(img => Number(img.image_id ?? img.id) === Number(previousId) && img.is_sexual !== true);
+  if (requested && resolveIsSexual(requested) === (isSexual === true)) return Number(requested.image_id ?? requested.id);
+  const safeCandidates = candidates.filter(img => resolveIsSexual(img) !== true);
+  if (safeCandidates.length) {
+    const best = [...safeCandidates].sort((a, b) => curationSortRank(a) - curationSortRank(b))[0];
+    return Number(best.image_id ?? best.id);
+  }
+  const previous = candidates.find(img => Number(img.image_id ?? img.id) === Number(previousId) && resolveIsSexual(img) !== true);
   return previous ? Number(previous.image_id ?? previous.id) : null;
 }
 
@@ -1182,5 +1229,9 @@ export {
   applySuggestionAction,
   buildActiveSuggestionSection,
   buildApplicableCsaSection,
-  resolveCsaScopeId
+  resolveCsaScopeId,
+  resolveIsSexual,
+  normalizeImagePool,
+  normalizeTags,
+  parseCurationRank
 };

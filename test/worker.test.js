@@ -30,7 +30,11 @@ import {
   normalizeLegacyActiveSuggestions,
   applySuggestionAction,
   buildActiveSuggestionSection,
-  hasLegacyEncounterEvidence
+  hasLegacyEncounterEvidence,
+  resolveIsSexual,
+  normalizeImagePool,
+  normalizeTags,
+  parseCurationRank
 } from '../worker/game-proxy-v2.js';
 import worker from '../worker/game-proxy-v2.js';
 
@@ -47,6 +51,80 @@ test('context image catalog accepts DB id and exposes API image_id', () => {
     { id: 42, character_id: 'heroine1', situation: '복도', is_sexual: false }
   ]);
   assert.equal(catalog.heroine1[0].image_id, 42);
+});
+
+// ─────────────────────────────────────────────
+// Curated image catalog metadata
+// ─────────────────────────────────────────────
+
+test('normalizeImageCatalog keeps curated metadata alongside legacy fields', () => {
+  const catalog = normalizeImageCatalog([
+    {
+      id: 123, character_id: 'heroine9', situation: '기존 원본 설명',
+      short_description: '면회실에서 긴장한 표정으로 앉아 있는 장면',
+      tags: ['긴장', '착석', '면회실', '상반신'],
+      image_pool: 'general', is_sexual: false, curation_rank: 1
+    }
+  ]);
+  assert.deepEqual(catalog.heroine9[0], {
+    image_id: 123, situation: '기존 원본 설명',
+    short_description: '면회실에서 긴장한 표정으로 앉아 있는 장면',
+    tags: ['긴장', '착석', '면회실', '상반신'],
+    image_pool: 'general', is_sexual: false, curation_rank: 1, image_url: null
+  });
+});
+
+test('image_pool is authoritative: sex forces is_sexual true and general forces it false regardless of the legacy flag', () => {
+  const sexPool = normalizeImageCatalog([{ id: 1, character_id: 'heroine1', image_pool: 'sex', is_sexual: false }]);
+  assert.equal(sexPool.heroine1[0].is_sexual, true);
+  const generalPool = normalizeImageCatalog([{ id: 2, character_id: 'heroine1', image_pool: 'general', is_sexual: true }]);
+  assert.equal(generalPool.heroine1[0].is_sexual, false);
+});
+
+test('a missing or invalid image_pool falls back to the legacy is_sexual flag', () => {
+  assert.equal(resolveIsSexual({ is_sexual: true }), true);
+  assert.equal(resolveIsSexual({ image_pool: 'unknown', is_sexual: true }), true);
+  assert.equal(normalizeImagePool('unknown'), null);
+  assert.equal(normalizeImagePool(undefined), null);
+});
+
+test('tags normalize to an array of trimmed non-empty strings, and invalid tags become []', () => {
+  assert.deepEqual(normalizeTags(['긴장', '  착석  ', '', '   ', 42, null]), ['긴장', '착석']);
+  assert.deepEqual(normalizeTags('not-an-array'), []);
+  assert.deepEqual(normalizeTags(undefined), []);
+});
+
+test('short_description and situation fall back to each other in either direction', () => {
+  const onlySituation = normalizeImageCatalog([{ id: 1, character_id: 'heroine1', situation: '복도' }]);
+  assert.equal(onlySituation.heroine1[0].situation, '복도');
+  assert.equal(onlySituation.heroine1[0].short_description, '복도');
+  const onlyShortDescription = normalizeImageCatalog([{ id: 2, character_id: 'heroine1', short_description: '면회실에서 대기 중' }]);
+  assert.equal(onlyShortDescription.heroine1[0].situation, '면회실에서 대기 중');
+  assert.equal(onlyShortDescription.heroine1[0].short_description, '면회실에서 대기 중');
+  const neither = normalizeImageCatalog([{ id: 3, character_id: 'heroine1' }]);
+  assert.equal(neither.heroine1[0].situation, '');
+  assert.equal(neither.heroine1[0].short_description, '');
+});
+
+test('a curated image catalog entry never breaks normalization for a legacy entry in the same catalog', () => {
+  const catalog = normalizeImageCatalog([
+    { id: 1, character_id: 'heroine1', situation: '복도', is_sexual: false },
+    { id: 2, character_id: 'heroine1', image_pool: 'sex', short_description: '침대 장면', tags: ['침대'], curation_rank: 2, is_sexual: false }
+  ]);
+  assert.equal(catalog.heroine1.length, 2);
+  assert.equal(catalog.heroine1[0].image_pool, null);
+  assert.equal(catalog.heroine1[0].is_sexual, false);
+  assert.equal(catalog.heroine1[1].image_pool, 'sex');
+  assert.equal(catalog.heroine1[1].is_sexual, true);
+});
+
+test('parseCurationRank keeps valid integers and treats anything else as unranked (null)', () => {
+  assert.equal(parseCurationRank(1), 1);
+  assert.equal(parseCurationRank('3'), 3);
+  assert.equal(parseCurationRank(null), null);
+  assert.equal(parseCurationRank(undefined), null);
+  assert.equal(parseCurationRank('not-a-number'), null);
+  assert.equal(parseCurationRank(1.5), null);
 });
 
 test('extract normalization converts numeric image IDs', () => {
@@ -101,6 +179,35 @@ test('image selection accepts only matching character and sexuality, then falls 
   assert.equal(selectImageId(catalog, 'heroine1', 2, 1, false), 1);
   assert.equal(selectImageId(catalog, 'heroine1', 3, 1, false), 1);
   assert.equal(selectImageId([], 'heroine1', 99, null, false), null);
+});
+
+test('selectImageId prefers image_pool over the legacy is_sexual flag on both request and candidates', () => {
+  const catalog = [
+    { id: 1, character_id: 'heroine1', image_pool: 'general', is_sexual: true },
+    { id: 2, character_id: 'heroine1', image_pool: 'sex', is_sexual: false }
+  ];
+  assert.equal(selectImageId(catalog, 'heroine1', 1, null, false), 1);
+  assert.equal(selectImageId(catalog, 'heroine1', 2, null, true), 2);
+});
+
+test('a sex-pool request never resolves to a general-pool image and vice versa', () => {
+  const catalog = [
+    { id: 1, character_id: 'heroine1', image_pool: 'general' },
+    { id: 2, character_id: 'heroine1', image_pool: 'sex' }
+  ];
+  assert.equal(selectImageId(catalog, 'heroine1', 2, null, false), 1);
+  assert.notEqual(selectImageId(catalog, 'heroine1', 1, null, false), 2);
+  const generalOnly = [{ id: 3, character_id: 'heroine1', image_pool: 'general' }];
+  assert.equal(selectImageId(generalOnly, 'heroine1', 999, null, true), 3);
+});
+
+test('the default general fallback prefers the lowest curation_rank, and an unranked image sorts last', () => {
+  const catalog = [
+    { id: 1, character_id: 'heroine1', image_pool: 'general', curation_rank: 5 },
+    { id: 2, character_id: 'heroine1', image_pool: 'general', curation_rank: 1 },
+    { id: 3, character_id: 'heroine1', image_pool: 'general' }
+  ];
+  assert.equal(selectImageId(catalog, 'heroine1', 999, null, false), 2);
 });
 
 test('Extract keeps all unique dialogue from the main NPC only', () => {
@@ -373,6 +480,41 @@ test('extract prompt receives raw player input separately from the narrative', (
   assert.match(prompt, /npc_stat_changes만 반환한다/);
   assert.doesNotMatch(prompt, /절대값으로 환산/);
   assert.match(prompt, /\[방금 생성된 서사\]\n진행자가 플레이어의 답을 되묻는다/);
+});
+
+test('extract prompt image library includes curated tags/short_description and excludes image_url and raw filenames', () => {
+  const prompt = buildExtractPrompt(
+    '서사', '입력',
+    { master: {}, save: {} },
+    [{
+      id: 123, character_id: 'heroine9', situation: '기존 원본 설명',
+      short_description: '면회실에서 긴장한 표정으로 앉아 있는 장면',
+      tags: ['긴장', '착석', '면회실', '상반신'],
+      image_pool: 'general', is_sexual: false, curation_rank: 1,
+      image_url: 'https://example.com/should-not-leak/sujin_slender_malepov.png'
+    }],
+    1
+  );
+  assert.match(prompt, /면회실에서 긴장한 표정으로 앉아 있는 장면/);
+  assert.match(prompt, /"긴장"/);
+  assert.match(prompt, /"tags"/);
+  assert.match(prompt, /"curation_rank":1/);
+  assert.doesNotMatch(prompt, /image_url/);
+  assert.doesNotMatch(prompt, /should-not-leak/);
+  assert.doesNotMatch(prompt, /sujin_slender_malepov/);
+});
+
+test('extract image library keeps working with legacy entries that have no curated metadata', () => {
+  const prompt = buildExtractPrompt(
+    '서사', '입력',
+    { master: {}, save: {} },
+    [{ id: 5, character_id: 'heroine1', situation: '복도', is_sexual: false }],
+    1
+  );
+  assert.match(prompt, /"situation":"복도"/);
+  assert.match(prompt, /"short_description":""/);
+  assert.match(prompt, /"tags":\[\]/);
+  assert.match(prompt, /"image_pool":null/);
 });
 
 test('save patch nests NPC state under character ID', () => {

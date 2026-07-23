@@ -7,7 +7,8 @@ export default defineConfig({
   expect: { timeout: 30 * 1000 },
   fullyParallel: false,
   workers: 1,
-  retries: process.env.CI ? 1 : 0,
+  // one_turn이 Commit 뒤 실패하면 재시도가 추가 턴을 만들 수 있으므로 자동 재시도 금지
+  retries: 0,
   reporter: [
     ['list'],
     ['html', { outputFolder: 'playwright-report', open: 'never' }],

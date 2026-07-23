@@ -5,6 +5,7 @@ const stream = {
   // Worker가 DeepSeek OpenAI 호환 SSE를 그대로 중계
   // 파싱은 브라우저에서 한 번만 수행
   async story(gameId, playerInput, turnCount, onChunk, feedback = []) {
+    const overallStart = Date.now();
     const res = await fetch(`${API_BASE}/api/story`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -15,10 +16,15 @@ const stream = {
         feedback
       })
     });
+    const fetchHeadersMs = Date.now() - overallStart;
+    const requestId = res.headers.get('X-Request-ID') || null;
 
     if (!res.ok) {
       const text = await res.text();
-      throw new Error(`story failed: ${res.status} ${text}`);
+      const error = new Error(`story failed: ${res.status} ${text}`);
+      error.status = res.status;
+      error.requestId = requestId;
+      throw error;
     }
 
     if (!res.body) {
@@ -31,6 +37,16 @@ const stream = {
     const decoder = new TextDecoder();
     let buffer = '';
     let fullText = '';
+    let firstContentMs = null;
+    const recordFirstContent = () => {
+      if (firstContentMs === null) firstContentMs = Date.now() - overallStart;
+    };
+    const finish = () => ({
+      text: fullText,
+      mode,
+      requestId,
+      timing: { fetch_headers_ms: fetchHeadersMs, first_content_ms: firstContentMs, stream_total_ms: Date.now() - overallStart }
+    });
 
     while (true) {
       const { done, value } = await reader.read();
@@ -46,7 +62,7 @@ const stream = {
 
         const payload = trimmed.slice(6);
         if (payload === '[DONE]') {
-          return { text: fullText, mode };
+          return finish();
         }
 
         try {
@@ -55,6 +71,7 @@ const stream = {
           const delta = json.choices?.[0]?.delta?.content;
           if (delta) {
             fullText += delta;
+            recordFirstContent();
             onChunk(delta);
           }
         } catch (e) {
@@ -74,6 +91,7 @@ const stream = {
             const delta = json.choices?.[0]?.delta?.content;
             if (delta) {
               fullText += delta;
+              recordFirstContent();
               onChunk(delta);
             }
           } catch (e) {
@@ -83,6 +101,6 @@ const stream = {
       }
     }
 
-    return { text: fullText, mode };
+    return finish();
   }
 };

@@ -517,24 +517,38 @@
       state.isStreaming = true; ui.setLoading(true, '서사 생성 중');
       try {
         const result = await stream.story(state.gameId, pending.input, state.turnCount, chunk => ui.appendNarrative(chunk), getFeedback());
-        pending.narrative = result.text; pending.mode = result.mode; ui.finalizeNarrative();
+        pending.narrative = result.text; pending.mode = result.mode;
+        pending.timing = { ...(pending.timing || {}), story: result.timing };
+        ui.finalizeNarrative();
         if (result.mode === 'reentry') { ui.renderChoices(ui.parseChoices(result.text), submitChoice); return; }
         await retryExtract(pending);
-      } catch (_) {
+      } catch (error) {
         ui.failCurrentNarrative();
         ui.setChoicesEnabled(true);
-        ui.showRetryNotice('서사 생성에 실패했습니다.', '다시 생성', () => retryStory(pending));
+        const code = error.status || 'UNKNOWN';
+        const suffix = error.requestId ? ` · 요청 ${error.requestId}` : '';
+        ui.showRetryNotice(`서사 생성에 실패했습니다. [${code}]${suffix}`, '다시 생성', () => retryStory(pending));
       } finally { state.isStreaming = false; ui.setLoading(false); }
     }
 
     async function retryExtract(pending) {
       state.isStreaming = true; ui.setLoading(true, '상태 분석 중');
       try {
-        pending.extract = await api.extract(state.gameId, pending.narrative, pending.nextTurn, pending.input);
+        const result = await api.extract(state.gameId, pending.narrative, pending.nextTurn, pending.input);
+        console.info('[extract-timing]', result.timing);
+        pending.extract = result.extract;
+        pending.timing = { ...(pending.timing || {}), extract: result.timing };
         ui.removeTrailingChoiceBlock(pending.extract.choices);
         await retryCommit(pending);
-      } catch (_) {
-        ui.showRetryNotice('서사는 생성되었지만 상태 분석에 실패했습니다.', '상태 분석 다시 시도', () => retryExtract(pending));
+      } catch (error) {
+        const code = error.details?.error_code || error.status || 'UNKNOWN';
+        const requestId = error.details?.request_id;
+        const suffix = requestId ? ` · 요청 ${requestId}` : '';
+        ui.showRetryNotice(
+          `서사는 생성되었지만 상태 분석에 실패했습니다. [${code}]${suffix}`,
+          '상태 분석 다시 시도',
+          () => retryExtract(pending)
+        );
       } finally { state.isStreaming = false; ui.setLoading(false); }
     }
 
@@ -543,6 +557,7 @@
       try {
         const saved = await api.commitTurn(state.gameId, pending.nextTurn, pending.narrative, pending.extract, pending.mode === 'opening' ? { opening_started: true } : {}, pending.input);
         state.turnCount = saved.turn_count; ui.updateMeta(null, state.turnCount);
+        pending.timing = { ...(pending.timing || {}), commit: saved.timing };
         if (saved.npc_stats) pending.extract.npc_stats = saved.npc_stats;
         if (saved.npc_stat_changes) pending.extract.npc_stat_changes = saved.npc_stat_changes;
         if (Number.isInteger(saved.image_id)) pending.extract.image_id = saved.image_id;
@@ -551,12 +566,30 @@
         sidebar.updateCharacter(pending.extract.character_id); sidebar.updateMind(pending.extract.npc_emotion); sidebar.renderStats(pending.extract.npc_stats, pending.extract.character_id, pending.extract.npc_stat_changes);
         ui.renderGameplayChoices(pending.extract.choices, submitChoice, { setup: pending.mode === 'player_setup' });
         prepareMedia(pending.extract);
+        console.info('[turn-timing]', {
+          turn: pending.nextTurn,
+          story_first_content_ms: pending.timing?.story?.first_content_ms ?? null,
+          story_total_ms: pending.timing?.story?.stream_total_ms ?? null,
+          extract_total_ms: pending.timing?.extract?.deepseek_total_ms ?? null,
+          commit_total_ms: pending.timing?.commit?.total_ms ?? null,
+          total_ms: [pending.timing?.story?.stream_total_ms, pending.timing?.extract?.total_ms, pending.timing?.commit?.total_ms]
+            .reduce((sum, value) => sum + (value || 0), 0)
+        });
       } catch (error) {
         if (error.status === 409) {
           document.getElementById('chat-input').value = pending.input;
           ui.showSystemMessage('다른 창에서 게임이 먼저 진행되었습니다. 최신 상태를 다시 불러왔습니다.');
           await loadGameContext();
-        } else ui.showRetryNotice('서사와 상태 분석은 완료됐지만 저장에 실패했습니다.', '저장 다시 시도', () => retryCommit(pending));
+        } else {
+          const code = error.details?.error_code || error.status || 'UNKNOWN';
+          const requestId = error.details?.request_id;
+          const suffix = requestId ? ` · 요청 ${requestId}` : '';
+          ui.showRetryNotice(
+            `서사와 상태 분석은 완료됐지만 저장에 실패했습니다. [${code}]${suffix}`,
+            '저장 다시 시도',
+            () => retryCommit(pending)
+          );
+        }
       } finally { state.isStreaming = false; ui.setLoading(false); }
     }
 
@@ -575,8 +608,17 @@
       const save = state.context?.save || {};
       const progress = save.player_progress || { level: 1, exp: 0, next_level_exp: 10 };
       const csa = Array.isArray(save.csa_active) ? save.csa_active.filter(item => item?.active) : [];
-      const suggestions = Array.isArray(save.active_suggestions) ? save.active_suggestions : [];
-      ui.showSystemMessage(`📱 어플 정보\n레벨 ${progress.level || 1} · 경험치 ${progress.exp || 0}/${progress.next_level_exp || 10}\n기능: 개인 대상 일반 최면·암시 / 마인드 모니터 / 공간 범위 상식 개변\n활성 암시: ${suggestions.length ? suggestions.join(', ') : '없음'}\n상식 개변: ${csa.length ? csa.map(item => `${item.content} (${item.scope_label || item.scope_id})`).join(', ') : '없음'}`);
+      const suggestionMap = save.active_suggestions && typeof save.active_suggestions === 'object' && !Array.isArray(save.active_suggestions)
+        ? save.active_suggestions : {};
+      const characters = state.context?.master?.characters || {};
+      const suggestionLines = Object.entries(suggestionMap)
+        .map(([characterId, list]) => [characterId, (Array.isArray(list) ? list : []).filter(item => item?.active)])
+        .filter(([, list]) => list.length)
+        .map(([characterId, list]) => {
+          const name = characters[characterId]?.name || characters[characterId]?.['이름'] || characterId;
+          return `${name}: ${list.map(item => item.content).join(', ')}`;
+        });
+      ui.showSystemMessage(`📱 어플 정보\n레벨 ${progress.level || 1} · 경험치 ${progress.exp || 0}/${progress.next_level_exp || 10}\n기능: 개인 대상 일반 최면·암시 / 마인드 모니터 / 공간 범위 상식 개변\n활성 암시: ${suggestionLines.length ? suggestionLines.join(' · ') : '없음'}\n상식 개변: ${csa.length ? csa.map(item => `${item.content} (${item.scope_label || item.scope_id})`).join(', ') : '없음'}`);
     }
 
     function submitChoice(choiceText) {
@@ -592,7 +634,7 @@
       try {
         await loadGameContext();
         restoreLastTurn();
-        const savedChoices = state.context?.save?.active_suggestions || [];
+        const savedChoices = Array.isArray(state.context?.save?.last_choices) ? state.context.save.last_choices : [];
         const choices = savedChoices.length ? savedChoices : ui.parseChoices(state.context?.recent_memories?.at(-1)?.content || '');
         const setup = state.context?.save?.player_setup?.status !== 'complete';
         ui.renderGameplayChoices(choices, submitChoice, { setup });
@@ -609,22 +651,6 @@
 
     window.resumeGame = resumeGame;
     window.showAppInfo = showAppInfo;
-
-    async function retryRequest(operation, maxAttempts = 3) {
-      let lastError;
-      for (let attempt = 1; attempt <= maxAttempts; attempt++) {
-        try {
-          return await operation();
-        } catch (error) {
-          lastError = error;
-          if (error.status && error.status < 500) throw error;
-          if (attempt < maxAttempts) {
-            await new Promise(resolve => setTimeout(resolve, 300 * (2 ** (attempt - 1))));
-          }
-        }
-      }
-      throw lastError;
-    }
 
   </script>
 </body>

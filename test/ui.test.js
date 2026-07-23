@@ -5,6 +5,8 @@ import { readFile } from 'node:fs/promises';
 const sidebarSource = await readFile(new URL('../pages/sidebar.js', import.meta.url), 'utf8');
 const pageSource = await readFile(new URL('../pages/index.html', import.meta.url), 'utf8');
 const uiSource = await readFile(new URL('../pages/ui.js', import.meta.url), 'utf8');
+const apiSource = await readFile(new URL('../pages/api.js', import.meta.url), 'utf8');
+const streamSource = await readFile(new URL('../pages/stream.js', import.meta.url), 'utf8');
 
 test('NPC status is rendered as one inline status sentence, not five rows', () => {
   const renderStats = sidebarSource.match(/renderStats\(stats[\s\S]*?\n  signal\(/)?.[0] || '';
@@ -60,4 +62,74 @@ test('loading status follows the narrative and stays above the bottom controls',
   assert.match(pageSource, /\.story-loading\s*{[\s\S]*?flex-shrink: 0;/);
   assert.match(pageSource, /\.story-loading\s*{[\s\S]*?scroll-margin-bottom: 76px;/);
   assert.match(uiSource, /setLoading\(active, label = '처리 중'\)[\s\S]*?if \(active\)[\s\S]*?this\.scrollToBottom\(\)/);
+});
+
+// ─────────────────────────────────────────────
+// Turn speed, Extract stability, and Story continuity (3rd stage)
+// ─────────────────────────────────────────────
+
+test('extract failure surfaces error_code and request_id to the user without leaking raw output or keys', () => {
+  const retryExtract = pageSource.match(/async function retryExtract\(pending\)[\s\S]*?\n    }/)?.[0] || '';
+  assert.match(retryExtract, /error\.details\?\.error_code/);
+  assert.match(retryExtract, /error\.details\?\.request_id/);
+  assert.match(retryExtract, /showRetryNotice/);
+  assert.doesNotMatch(retryExtract, /DEEPSEEK_API_KEY|SUPABASE_SECRET_KEY/);
+  assert.doesNotMatch(retryExtract, /\braw\b/);
+
+  const retryCommit = pageSource.match(/async function retryCommit\(pending\)[\s\S]*?\n    }/)?.[0] || '';
+  assert.match(retryCommit, /error\.details\?\.error_code/);
+  assert.match(retryCommit, /error\.details\?\.request_id/);
+
+  const retryStory = pageSource.match(/async function retryStory\(pending\)[\s\S]*?\n    }/)?.[0] || '';
+  assert.match(retryStory, /error\.status/);
+  assert.match(retryStory, /error\.requestId/);
+});
+
+test('api.js routes context/extract/image/reset through readApiResponse so ApiError carries error_code and request_id', () => {
+  assert.match(apiSource, /class ApiError extends Error/);
+  assert.match(apiSource, /async function readApiResponse\(res, label\)/);
+  const contextFn = apiSource.match(/async context\(gameId\)[\s\S]*?\n  },/)?.[0] || '';
+  assert.match(contextFn, /readApiResponse\(res, 'context'\)/);
+  const extractFn = apiSource.match(/async extract\([\s\S]*?\n  },/)?.[0] || '';
+  assert.match(extractFn, /readApiResponse\(res, 'extract'\)/);
+  assert.doesNotMatch(extractFn, /return data\.extract;/);
+  const imageFn = apiSource.match(/async image\([\s\S]*?\n  },/)?.[0] || '';
+  assert.match(imageFn, /readApiResponse\(res, 'image'\)/);
+  const resetFn = apiSource.match(/async reset\(gameId\)[\s\S]*?\n  }/)?.[0] || '';
+  assert.match(resetFn, /readApiResponse\(res, 'reset'\)/);
+});
+
+test('resumeGame uses save.last_choices, not active_suggestions, for the restored choice list', () => {
+  const resume = pageSource.match(/async function resumeGame\(\)[\s\S]*?\n    }\n\n    async function startPlayerSetup/)?.[0] || '';
+  assert.match(resume, /state\.context\?\.save\?\.last_choices/);
+  assert.doesNotMatch(resume, /state\.context\?\.save\?\.active_suggestions/);
+  assert.match(resume, /ui\.parseChoices/);
+});
+
+test('showAppInfo renders active_suggestions as a per-NPC structured map, not a flat array', () => {
+  const showAppInfo = pageSource.match(/function showAppInfo\(\)[\s\S]*?\n    }/)?.[0] || '';
+  assert.match(showAppInfo, /!Array\.isArray\(save\.active_suggestions\)/);
+  assert.match(showAppInfo, /Object\.entries\(suggestionMap\)/);
+  assert.match(showAppInfo, /characters\[characterId\]/);
+});
+
+test('the frontend never duplicates the Worker\'s own DeepSeek retry loop', () => {
+  assert.doesNotMatch(pageSource, /async function retryRequest\(/);
+});
+
+test('stream.story measures fetch_headers_ms, first_content_ms, and stream_total_ms separately, and forwards X-Request-ID', () => {
+  assert.match(streamSource, /fetch_headers_ms/);
+  assert.match(streamSource, /first_content_ms/);
+  assert.match(streamSource, /stream_total_ms/);
+  assert.match(streamSource, /X-Request-ID/);
+  assert.match(streamSource, /recordFirstContent/);
+});
+
+test('the frontend logs per-stage turn timing without exposing a permanent on-screen dev timer', () => {
+  const retryCommit = pageSource.match(/async function retryCommit\(pending\)[\s\S]*?\n    }/)?.[0] || '';
+  assert.match(retryCommit, /console\.info\('\[turn-timing\]'/);
+  assert.match(retryCommit, /story_first_content_ms/);
+  assert.match(retryCommit, /extract_total_ms/);
+  assert.match(retryCommit, /commit_total_ms/);
+  assert.doesNotMatch(pageSource, /id="turn-timing-display"/);
 });

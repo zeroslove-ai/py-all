@@ -28,14 +28,15 @@ const api = {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ game_id: gameId })
     });
-    if (!res.ok) throw new Error(`context failed: ${res.status}`);
-    return await res.json();
+    return readApiResponse(res, 'context');
   },
 
   // ─── 2. 서사 생성 (SSE) — stream.js에서 직접 호출 ───
   // story()는 stream.js의 streamStory()가 담당
 
   // ─── 3. 상태 추출 ───
+  // extract·request_id·timing을 모두 담은 전체 응답을 반환한다. 호출부에서
+  // result.extract로 실제 값을, result.timing으로 [extract-timing] 로그를 남긴다.
   async extract(gameId, narrativeText, turnCount, playerInput = '') {
     const res = await fetch(`${API_BASE}/api/extract`, {
       method: 'POST',
@@ -47,9 +48,7 @@ const api = {
         turn_count: turnCount
       })
     });
-    if (!res.ok) throw new Error(`extract failed: ${res.status}`);
-    const data = await res.json();
-    return data.extract;
+    return readApiResponse(res, 'extract');
   },
 
   // ─── 4. 이미지 URL 조회 ───
@@ -63,8 +62,7 @@ const api = {
         image_id: imageId || null
       })
     });
-    if (!res.ok) throw new Error(`image failed: ${res.status}`);
-    return await res.json();
+    return readApiResponse(res, 'image');
   },
 
   // ─── 5. TTS 생성 ───
@@ -108,7 +106,6 @@ const api = {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ game_id: gameId })
     });
-    if (!res.ok) throw new Error(`reset failed: ${res.status}`);
-    return await res.json();
+    return readApiResponse(res, 'reset');
   }
 };

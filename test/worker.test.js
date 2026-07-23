@@ -37,7 +37,12 @@ import {
   parseCurationRank,
   normalizeSceneRole,
   resolveSpecialSceneRole,
-  selectSceneRoleImageId
+  selectSceneRoleImageId,
+  detectRegisteredCharacterIds,
+  parseJsonContent,
+  buildStoryStateSnapshot,
+  clipHeadTail,
+  buildCurrentSceneSection
 } from '../worker/game-proxy-v2.js';
 import worker from '../worker/game-proxy-v2.js';
 
@@ -358,13 +363,15 @@ test('commit-turn re-sanitizes a manipulated unregistered character_id', async (
   let committedPatch;
   globalThis.fetch = async (url, init = {}) => {
     const requestUrl = String(url);
-    if (requestUrl.includes('/rpc/get_context')) {
+    if (requestUrl.includes('/rpc/get_commit_context')) {
       return new Response(JSON.stringify({
         turn_count: 2,
-        image_catalog: [],
         master: { characters: { heroine1: { name: '한소영' } } },
         save: { last_character_id: 'heroine1', npc_stats: { heroine1: { 호감도: 20 } } }
       }), { headers: { 'content-type': 'application/json' } });
+    }
+    if (requestUrl.includes('/rpc/get_image_catalog_for_characters')) {
+      return new Response(JSON.stringify([]), { headers: { 'content-type': 'application/json' } });
     }
     if (requestUrl.includes('/rpc/commit_turn')) {
       committedPatch = JSON.parse(init.body).p_patch;
@@ -847,23 +854,28 @@ test('legacy array-shaped active_suggestions normalizes to an empty map instead 
   assert.deepEqual(normalizeLegacyActiveSuggestions(undefined), {});
 });
 
-test("Story prompt injects only the current NPC's active suggestions as established facts", () => {
+test('Story prompt injects every registered NPC\'s active suggestions, each clearly labeled', () => {
   const characters = { heroine9: { name: '박소현' }, heroine1: { name: '한소영' } };
   const save = {
     last_character_id: 'heroine9',
     active_suggestions: {
       heroine9: [{ id: 'suggestion_32_1', content: '금태양의 도움 요청에 최선을 다해야 한다', strength: 'surface', created_turn: 32, active: true }],
-      heroine1: [{ id: 'suggestion_10_1', content: '다른 NPC 암시', strength: 'surface', created_turn: 10, active: true }]
+      heroine1: [
+        { id: 'suggestion_10_1', content: '다른 NPC 암시', strength: 'surface', created_turn: 10, active: true },
+        { id: 'suggestion_5_1', content: '해제된 암시', strength: 'surface', created_turn: 5, active: false }
+      ]
     }
   };
   const prompt = buildStoryPrompt({ master: { characters }, save, recent_memories: [] }, '계속', 32);
   const content = prompt.messages[0].content;
-  assert.match(content, /CURRENT NPC ACTIVE SUGGESTIONS/);
-  assert.match(content, /박소현\(heroine9\)/);
-  assert.match(content, /금태양의 도움 요청에 최선을 다해야 한다/);
-  const section = content.slice(content.indexOf('[CURRENT NPC ACTIVE SUGGESTIONS'), content.indexOf('[게임 설정]'));
-  assert.doesNotMatch(section, /다른 NPC 암시/);
-  assert.match(content, /암시가 먹힌 것 같다/);
+  assert.match(content, /ACTIVE PERSONAL SUGGESTIONS/);
+  const section = content.slice(content.indexOf('[ACTIVE PERSONAL SUGGESTIONS'), content.indexOf('[게임 설정]'));
+  assert.match(section, /박소현\(heroine9\)/);
+  assert.match(section, /금태양의 도움 요청에 최선을 다해야 한다/);
+  assert.match(section, /한소영\(heroine1\)/);
+  assert.match(section, /다른 NPC 암시/);
+  assert.doesNotMatch(section, /해제된 암시/);
+  assert.match(section, /암시가 먹힌 것 같다/);
 });
 
 test('Story prompt omits the active-suggestion section when there is no current NPC', () => {
@@ -903,13 +915,15 @@ test('commit-turn persists first_encounter_stats, suggestion_action, and world_s
   let committedPatch;
   globalThis.fetch = async (url, init = {}) => {
     const requestUrl = String(url);
-    if (requestUrl.includes('/rpc/get_context')) {
+    if (requestUrl.includes('/rpc/get_commit_context')) {
       return new Response(JSON.stringify({
         turn_count: 32,
-        image_catalog: [],
         master: { characters: { heroine9: { name: '박소현' } } },
         save: {}
       }), { headers: { 'content-type': 'application/json' } });
+    }
+    if (requestUrl.includes('/rpc/get_image_catalog_for_characters')) {
+      return new Response(JSON.stringify([]), { headers: { 'content-type': 'application/json' } });
     }
     if (requestUrl.includes('/rpc/commit_turn')) {
       committedPatch = JSON.parse(init.body).p_patch;
@@ -1019,4 +1033,425 @@ test('selectSceneRoleImageId keeps character and general-pool boundaries and pre
   ];
   assert.equal(selectSceneRoleImageId(catalog, 'heroine1', 'hypnosis_onset'), 2);
   assert.equal(selectSceneRoleImageId(catalog, 'heroine1', 'heart_eyes'), null);
+});
+
+// ─────────────────────────────────────────────
+// Turn speed, Extract stability, and Story continuity (3rd stage)
+// ─────────────────────────────────────────────
+
+test('buildSavePatch stores UI choice strings in last_choices, fully separate from active_suggestions', () => {
+  const patch = buildSavePatch({ character_id: 'heroine1', choices: ['① 선택1', '② 선택2', '', 42, null] }, {}, null, {}, 5, '');
+  assert.deepEqual(patch.last_choices, ['① 선택1', '② 선택2']);
+  assert.equal('active_suggestions' in patch, false);
+});
+
+test('clipHeadTail preserves both the start and the end of long text instead of only keeping the head', () => {
+  const text = 'A'.repeat(3000) + 'MIDDLE' + 'B'.repeat(3000);
+  const clipped = clipHeadTail(text, 100);
+  assert.equal(clipped.startsWith('AAAA'), true);
+  assert.equal(clipped.endsWith('BBBB'), true);
+  assert.match(clipped, /\[중간 생략\]/);
+  assert.ok(clipped.length < text.length);
+  assert.equal(clipHeadTail('short text', 100), 'short text');
+  assert.equal(clipHeadTail(undefined, 100), '');
+});
+
+test('buildCurrentSceneSection injects the saved location and current NPC as an established fact, and is empty with no state', () => {
+  const characters = { heroine9: { name: '박소현' } };
+  const save = { world_state: { location_label: '서울중앙병원 3병동 면회실' }, last_character_id: 'heroine9' };
+  const section = buildCurrentSceneSection(save, characters);
+  assert.match(section, /CURRENT SCENE — ESTABLISHED FACT/);
+  assert.match(section, /서울중앙병원 3병동 면회실/);
+  assert.match(section, /박소현\(heroine9\)/);
+  assert.equal(buildCurrentSceneSection({}, {}), '');
+});
+
+test('buildStoryStateSnapshot narrows npc_stats/npc_emotion to the current NPC only, never dumping all ten heroines', () => {
+  const save = {
+    npc_stats: { heroine1: { 호감도: 1 }, heroine9: { 호감도: 20 } },
+    npc_emotion: { heroine1: { surface: 'x' }, heroine9: { surface: 'y' } },
+    last_character_id: 'heroine9',
+    world_state: { ward: 'hospital_3ward' },
+    active_suggestions: ['legacy array']
+  };
+  const snapshot = buildStoryStateSnapshot(save, {});
+  assert.deepEqual(snapshot.current_npc_stats, { 호감도: 20 });
+  assert.deepEqual(snapshot.current_npc_emotion, { surface: 'y' });
+  assert.equal('heroine1' in snapshot, false);
+  assert.deepEqual(snapshot.active_suggestions, {});
+  assert.deepEqual(snapshot.world_state, { ward: 'hospital_3ward' });
+});
+
+test('Story prompt injects the current scene and a turn-continuity contract forbidding repeated actions', () => {
+  const save = { world_state: { location_label: '서울중앙병원 3병동 면회실' }, last_character_id: 'heroine9' };
+  const prompt = buildStoryPrompt({ master: { characters: { heroine9: { name: '박소현' } } }, save, recent_memories: [] }, '계속', 32);
+  const content = prompt.messages[0].content;
+  assert.match(content, /CURRENT SCENE — ESTABLISHED FACT/);
+  assert.match(content, /TURN CONTINUITY CONTRACT/);
+  assert.match(content, /직전 턴에서 완료된 행동을 다시 실행하지 않는다/);
+  assert.match(content, /이미 성공한 암시를 다시 시도하지 않는다/);
+});
+
+test('Story prompt no longer truncates the save state with a raw character slice', () => {
+  const save = {
+    last_character_id: 'heroine9',
+    world_state: { location_label: '아주 긴 위치 설명'.repeat(50) },
+    active_suggestions: { heroine9: [{ id: 's1', content: '숨겨지면 안 되는 암시 내용', strength: 'surface', created_turn: 1, active: true }] }
+  };
+  const prompt = buildStoryPrompt({ master: { characters: { heroine9: { name: '박소현' } } }, save, recent_memories: [] }, '계속', 1);
+  assert.match(prompt.messages[0].content, /숨겨지면 안 되는 암시 내용/);
+});
+
+test('detectRegisteredCharacterIds finds only registered heroines named in the text, caps at three, and falls back to last_character_id', () => {
+  const characters = { heroine1: { name: '한소영' }, heroine2: { name: '강세라' }, heroine3: { name: '최유리' }, heroine4: { name: '배수진' } };
+  assert.equal(detectRegisteredCharacterIds('한소영이 강세라와 함께 최유리, 배수진을 불렀다', '', characters, null).length, 3);
+  assert.deepEqual(detectRegisteredCharacterIds('아무도 없는 조용한 복도', '', characters, 'heroine2'), ['heroine2']);
+  assert.deepEqual(detectRegisteredCharacterIds('', '', characters, null), []);
+  assert.deepEqual(detectRegisteredCharacterIds('알 수 없는 사람이 지나갔다', '한소영에게 말을 건다', characters, null), ['heroine1']);
+});
+
+test('parseJsonContent reads plain JSON first and falls back to a legacy code-fenced block', () => {
+  assert.deepEqual(parseJsonContent('{"a":1}'), { a: 1 });
+  assert.deepEqual(parseJsonContent('```json\n{"a":2}\n```'), { a: 2 });
+  assert.throws(() => parseJsonContent('not json at all'));
+});
+
+test('/api/context requests get_ui_context', async () => {
+  const originalFetch = globalThis.fetch;
+  let calledFn = null;
+  globalThis.fetch = async (url) => {
+    const requestUrl = String(url);
+    if (requestUrl.includes('/rpc/get_ui_context')) {
+      calledFn = 'get_ui_context';
+      return new Response(JSON.stringify({ turn_count: 5, master: {}, save: {}, recent_memories: [] }), { headers: { 'content-type': 'application/json' } });
+    }
+    throw new Error(`unexpected fetch: ${requestUrl}`);
+  };
+  try {
+    const response = await worker.fetch(apiRequest('/api/context', { game_id: 'test-game' }), {});
+    assert.equal(response.status, 200);
+    assert.equal(calledFn, 'get_ui_context');
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('/api/image calls get_character_image directly and never fetches get_context or a full catalog', async () => {
+  const originalFetch = globalThis.fetch;
+  const calls = [];
+  globalThis.fetch = async (url) => {
+    const requestUrl = String(url);
+    calls.push(requestUrl);
+    if (requestUrl.includes('/rpc/get_character_image')) {
+      return new Response(JSON.stringify('https://example.com/image.jpg'), { headers: { 'content-type': 'application/json' } });
+    }
+    throw new Error(`unexpected fetch: ${requestUrl}`);
+  };
+  try {
+    const response = await worker.fetch(apiRequest('/api/image', { game_id: 'test-game', character_id: 'heroine1', image_id: 5 }), {});
+    assert.equal(response.status, 200);
+    const body = await response.json();
+    assert.equal(body.image_url, 'https://example.com/image.jpg');
+    assert.equal(calls.some(url => url.includes('/rpc/get_context')), false);
+    assert.equal(calls.length, 1);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('/api/story requests get_story_context, disables DeepSeek thinking, and returns request/timing headers', async () => {
+  const originalFetch = globalThis.fetch;
+  let deepseekBody;
+  let calledStoryContext = false;
+  globalThis.fetch = async (url, init = {}) => {
+    const requestUrl = String(url);
+    if (requestUrl.includes('/rpc/get_story_context')) {
+      calledStoryContext = true;
+      return new Response(JSON.stringify({ turn_count: 1, master: { characters: {} }, save: { player: {} }, recent_memories: [] }), { headers: { 'content-type': 'application/json' } });
+    }
+    if (requestUrl.includes('api.deepseek.com')) {
+      deepseekBody = JSON.parse(init.body);
+      return new Response(new ReadableStream({ start(controller) { controller.close(); } }), { status: 200 });
+    }
+    if (requestUrl.includes('/rpc/get_context')) throw new Error('must not call get_context');
+    throw new Error(`unexpected fetch: ${requestUrl}`);
+  };
+  try {
+    const response = await worker.fetch(apiRequest('/api/story', { game_id: 'test-game', player_input: '계속' }), { DEEPSEEK_API_KEY: 'test' });
+    assert.equal(response.status, 200);
+    assert.equal(calledStoryContext, true);
+    assert.deepEqual(deepseekBody.thinking, { type: 'disabled' });
+    assert.equal(deepseekBody.stream, true);
+    assert.equal(deepseekBody.max_tokens, 5000);
+    assert.equal(typeof response.headers.get('X-Request-ID'), 'string');
+    assert.match(response.headers.get('Server-Timing') || '', /context;dur=/);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('/api/extract requests get_extract_context, fetches images only for detected registered NPCs, and uses disabled thinking + JSON response_format', async () => {
+  const originalFetch = globalThis.fetch;
+  let deepseekBody;
+  let imageCatalogParams;
+  globalThis.fetch = async (url, init = {}) => {
+    const requestUrl = String(url);
+    if (requestUrl.includes('/rpc/get_extract_context')) {
+      return new Response(JSON.stringify({
+        turn_count: 1,
+        master: { characters: { heroine9: { name: '박소현' }, heroine1: { name: '한소영' } } },
+        save: {}
+      }), { headers: { 'content-type': 'application/json' } });
+    }
+    if (requestUrl.includes('/rpc/get_image_catalog_for_characters')) {
+      imageCatalogParams = JSON.parse(init.body).p_character_ids;
+      return new Response(JSON.stringify([]), { headers: { 'content-type': 'application/json' } });
+    }
+    if (requestUrl.includes('api.deepseek.com')) {
+      deepseekBody = JSON.parse(init.body);
+      return new Response(JSON.stringify({
+        choices: [{ message: { content: JSON.stringify({ character_id: 'heroine9', npcs_present: ['heroine9'] }) }, finish_reason: 'stop' }]
+      }), { headers: { 'content-type': 'application/json' } });
+    }
+    if (requestUrl.includes('/rpc/get_context')) throw new Error('must not call get_context');
+    throw new Error(`unexpected fetch: ${requestUrl}`);
+  };
+  try {
+    const response = await worker.fetch(apiRequest('/api/extract', {
+      game_id: 'test-game', narrative_text: '박소현이 대답했다.', player_input: '박소현에게 말을 건다'
+    }), { DEEPSEEK_API_KEY: 'test' });
+    assert.equal(response.status, 200);
+    const body = await response.json();
+    assert.equal(typeof body.request_id, 'string');
+    assert.ok(body.timing);
+    assert.deepEqual(deepseekBody.thinking, { type: 'disabled' });
+    assert.deepEqual(deepseekBody.response_format, { type: 'json_object' });
+    assert.deepEqual(imageCatalogParams, ['heroine9']);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('Extract retries once on a retryable HTTP status (502) then succeeds', async () => {
+  const originalFetch = globalThis.fetch;
+  let deepseekCalls = 0;
+  globalThis.fetch = async (url, init = {}) => {
+    const requestUrl = String(url);
+    if (requestUrl.includes('/rpc/get_extract_context')) {
+      return new Response(JSON.stringify({ turn_count: 1, master: { characters: {} }, save: {} }), { headers: { 'content-type': 'application/json' } });
+    }
+    if (requestUrl.includes('/rpc/get_image_catalog_for_characters')) {
+      return new Response(JSON.stringify([]), { headers: { 'content-type': 'application/json' } });
+    }
+    if (requestUrl.includes('api.deepseek.com')) {
+      deepseekCalls += 1;
+      if (deepseekCalls === 1) return new Response('upstream error', { status: 502 });
+      return new Response(JSON.stringify({ choices: [{ message: { content: JSON.stringify({ character_id: 'narrator' }) }, finish_reason: 'stop' }] }), { headers: { 'content-type': 'application/json' } });
+    }
+    throw new Error(`unexpected fetch: ${requestUrl}`);
+  };
+  try {
+    const response = await worker.fetch(apiRequest('/api/extract', { game_id: 'test-game', narrative_text: '텍스트' }), { DEEPSEEK_API_KEY: 'test' });
+    assert.equal(response.status, 200);
+    assert.equal(deepseekCalls, 2);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('Extract does not retry a non-retryable HTTP status (400) and reports the upstream status', async () => {
+  const originalFetch = globalThis.fetch;
+  let deepseekCalls = 0;
+  globalThis.fetch = async (url) => {
+    const requestUrl = String(url);
+    if (requestUrl.includes('/rpc/get_extract_context')) {
+      return new Response(JSON.stringify({ turn_count: 1, master: { characters: {} }, save: {} }), { headers: { 'content-type': 'application/json' } });
+    }
+    if (requestUrl.includes('/rpc/get_image_catalog_for_characters')) {
+      return new Response(JSON.stringify([]), { headers: { 'content-type': 'application/json' } });
+    }
+    if (requestUrl.includes('api.deepseek.com')) {
+      deepseekCalls += 1;
+      return new Response('bad request', { status: 400 });
+    }
+    throw new Error(`unexpected fetch: ${requestUrl}`);
+  };
+  try {
+    const response = await worker.fetch(apiRequest('/api/extract', { game_id: 'test-game', narrative_text: '텍스트' }), { DEEPSEEK_API_KEY: 'test' });
+    assert.equal(response.status, 502);
+    const body = await response.json();
+    assert.equal(body.upstream_status, 400);
+    assert.equal(deepseekCalls, 1);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('Extract retries once on empty model content then succeeds', async () => {
+  const originalFetch = globalThis.fetch;
+  let deepseekCalls = 0;
+  globalThis.fetch = async (url, init = {}) => {
+    const requestUrl = String(url);
+    if (requestUrl.includes('/rpc/get_extract_context')) {
+      return new Response(JSON.stringify({ turn_count: 1, master: { characters: {} }, save: {} }), { headers: { 'content-type': 'application/json' } });
+    }
+    if (requestUrl.includes('/rpc/get_image_catalog_for_characters')) {
+      return new Response(JSON.stringify([]), { headers: { 'content-type': 'application/json' } });
+    }
+    if (requestUrl.includes('api.deepseek.com')) {
+      deepseekCalls += 1;
+      const content = deepseekCalls === 1 ? '' : JSON.stringify({ character_id: 'narrator' });
+      return new Response(JSON.stringify({ choices: [{ message: { content }, finish_reason: 'stop' }] }), { headers: { 'content-type': 'application/json' } });
+    }
+    throw new Error(`unexpected fetch: ${requestUrl}`);
+  };
+  try {
+    const response = await worker.fetch(apiRequest('/api/extract', { game_id: 'test-game', narrative_text: '텍스트' }), { DEEPSEEK_API_KEY: 'test' });
+    assert.equal(response.status, 200);
+    assert.equal(deepseekCalls, 2);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('Extract retries once on JSON parse failure then succeeds', async () => {
+  const originalFetch = globalThis.fetch;
+  let deepseekCalls = 0;
+  globalThis.fetch = async (url, init = {}) => {
+    const requestUrl = String(url);
+    if (requestUrl.includes('/rpc/get_extract_context')) {
+      return new Response(JSON.stringify({ turn_count: 1, master: { characters: {} }, save: {} }), { headers: { 'content-type': 'application/json' } });
+    }
+    if (requestUrl.includes('/rpc/get_image_catalog_for_characters')) {
+      return new Response(JSON.stringify([]), { headers: { 'content-type': 'application/json' } });
+    }
+    if (requestUrl.includes('api.deepseek.com')) {
+      deepseekCalls += 1;
+      const content = deepseekCalls === 1 ? 'not valid json at all' : JSON.stringify({ character_id: 'narrator' });
+      return new Response(JSON.stringify({ choices: [{ message: { content }, finish_reason: 'stop' }] }), { headers: { 'content-type': 'application/json' } });
+    }
+    throw new Error(`unexpected fetch: ${requestUrl}`);
+  };
+  try {
+    const response = await worker.fetch(apiRequest('/api/extract', { game_id: 'test-game', narrative_text: '텍스트' }), { DEEPSEEK_API_KEY: 'test' });
+    assert.equal(response.status, 200);
+    assert.equal(deepseekCalls, 2);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('Extract reports EXTRACT_JSON_PARSE_FAILED with a request_id when both attempts fail, without leaking raw model output', async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (url) => {
+    const requestUrl = String(url);
+    if (requestUrl.includes('/rpc/get_extract_context')) {
+      return new Response(JSON.stringify({ turn_count: 1, master: { characters: {} }, save: {} }), { headers: { 'content-type': 'application/json' } });
+    }
+    if (requestUrl.includes('/rpc/get_image_catalog_for_characters')) {
+      return new Response(JSON.stringify([]), { headers: { 'content-type': 'application/json' } });
+    }
+    if (requestUrl.includes('api.deepseek.com')) {
+      return new Response(JSON.stringify({ choices: [{ message: { content: 'still not json — secret leak check' }, finish_reason: 'stop' }] }), { headers: { 'content-type': 'application/json' } });
+    }
+    throw new Error(`unexpected fetch: ${requestUrl}`);
+  };
+  try {
+    const response = await worker.fetch(apiRequest('/api/extract', { game_id: 'test-game', narrative_text: '텍스트' }), { DEEPSEEK_API_KEY: 'test' });
+    assert.equal(response.status, 502);
+    const body = await response.json();
+    assert.equal(body.error_code, 'EXTRACT_JSON_PARSE_FAILED');
+    assert.equal(typeof body.request_id, 'string');
+    assert.doesNotMatch(JSON.stringify(body), /still not json — secret leak check/);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('mind monitor validation failure triggers a small repair call instead of regenerating the full extract', async () => {
+  const originalFetch = globalThis.fetch;
+  const deepseekCalls = [];
+  globalThis.fetch = async (url, init = {}) => {
+    const requestUrl = String(url);
+    if (requestUrl.includes('/rpc/get_extract_context')) {
+      return new Response(JSON.stringify({
+        turn_count: 1,
+        master: { characters: { heroine1: { name: '한소영', '말투': '부드러운 말투' } } },
+        save: {}
+      }), { headers: { 'content-type': 'application/json' } });
+    }
+    if (requestUrl.includes('/rpc/get_image_catalog_for_characters')) {
+      return new Response(JSON.stringify([]), { headers: { 'content-type': 'application/json' } });
+    }
+    if (requestUrl.includes('api.deepseek.com')) {
+      const body = JSON.parse(init.body);
+      deepseekCalls.push(body);
+      if (deepseekCalls.length === 1) {
+        return new Response(JSON.stringify({
+          choices: [{ message: { content: JSON.stringify({
+            character_id: 'heroine1', npcs_present: ['heroine1'],
+            npc_emotion: { surface: 'too short', inner: 'too short', physical_reaction: 'one sentence only' }
+          }) }, finish_reason: 'stop' }]
+        }), { headers: { 'content-type': 'application/json' } });
+      }
+      return new Response(JSON.stringify({
+        choices: [{ message: { content: JSON.stringify({
+          npc_emotion: {
+            surface: '“낯선 사람이라 조금 긴장되지만 티를 내지 말자. 우선 평소처럼 침착하게 내 할 일부터 하며 신분을 확인하자.”',
+            inner: '“왜 이렇게 자꾸 신경이 쓰이는지 나도 모르겠다. 경계해야 하는데 자꾸 시선이 가고 마음이 흔들린다.”',
+            physical_reaction: '그녀는 옷깃을 매만지며 시선을 살짝 피한다. 짧게 숨을 고른 뒤 낮은 목소리로 대답한다.'
+          }
+        }) }, finish_reason: 'stop' }]
+      }), { headers: { 'content-type': 'application/json' } });
+    }
+    throw new Error(`unexpected fetch: ${requestUrl}`);
+  };
+  try {
+    const response = await worker.fetch(apiRequest('/api/extract', {
+      game_id: 'test-game', narrative_text: '한소영이 응대했다.', player_input: '한소영에게 말을 건다'
+    }), { DEEPSEEK_API_KEY: 'test' });
+    assert.equal(response.status, 200);
+    const body = await response.json();
+    assert.equal(body.mind_monitor_retried, true);
+    assert.equal(deepseekCalls.length, 2);
+    assert.equal(deepseekCalls[1].max_tokens, 1200);
+    assert.deepEqual(deepseekCalls[1].response_format, { type: 'json_object' });
+    assert.ok(deepseekCalls[1].messages[0].content.length < deepseekCalls[0].messages[0].content.length);
+    assert.doesNotMatch(deepseekCalls[1].messages[0].content, /NPC STAT DELTA CONTRACT/);
+    assert.equal(body.extract.npc_emotion.surface.includes('내 할 일부터'), true);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('/api/commit-turn requests get_commit_context and get_image_catalog_for_characters, and reports timing/request_id', async () => {
+  const originalFetch = globalThis.fetch;
+  let calledCommitContext = false;
+  globalThis.fetch = async (url, init = {}) => {
+    const requestUrl = String(url);
+    if (requestUrl.includes('/rpc/get_commit_context')) {
+      calledCommitContext = true;
+      return new Response(JSON.stringify({ turn_count: 1, master: { characters: { heroine1: { name: '한소영' } } }, save: {} }), { headers: { 'content-type': 'application/json' } });
+    }
+    if (requestUrl.includes('/rpc/get_image_catalog_for_characters')) {
+      return new Response(JSON.stringify([]), { headers: { 'content-type': 'application/json' } });
+    }
+    if (requestUrl.includes('/rpc/commit_turn')) {
+      return new Response(JSON.stringify({ status: 'committed', turn_count: 2 }), { headers: { 'content-type': 'application/json' } });
+    }
+    if (requestUrl.includes('/rpc/get_context')) throw new Error('must not call get_context');
+    throw new Error(`unexpected fetch: ${requestUrl}`);
+  };
+  try {
+    const response = await worker.fetch(apiRequest('/api/commit-turn', {
+      game_id: 'test-game', turn_number: 2, content: 'test', extract: { character_id: 'heroine1', npcs_present: ['heroine1'] }
+    }), { SUPABASE_SECRET_KEY: 'test' });
+    assert.equal(response.status, 200);
+    const body = await response.json();
+    assert.equal(calledCommitContext, true);
+    assert.equal(typeof body.request_id, 'string');
+    assert.ok(body.timing);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
 });

@@ -354,8 +354,13 @@ test('player setup: reset auto-shows 4 candidates with no input, and picking one
   await expect(page.locator('#loading')).not.toHaveClass(/active/, { timeout: 60_000 });
 
   const candidateText = await page.locator('body').innerText();
+  // Card headers are freeform text at generation time (only the later
+  // Extract-assigned `slot` is canonical), so check for all 4 candidate
+  // headers rather than one exact role label string.
   expect(candidateText).toMatch(/플레이어 후보 1/);
-  expect(candidateText).toMatch(/병원 직원|hospital_worker/);
+  expect(candidateText).toMatch(/플레이어 후보 2/);
+  expect(candidateText).toMatch(/플레이어 후보 3/);
+  expect(candidateText).toMatch(/플레이어 후보 4/);
   expect(candidateText).toMatch(/환자/);
   expect(candidateText).not.toMatch(/테스트 대상 검색|생체 신호 스캔|대상자 등록|스캔 완료|초기 스캔 안정도|데모 모드|암시 라이브러리 잠금|Lv\.3 암시 해제|Lv\.5 상식 개변 해제/);
 

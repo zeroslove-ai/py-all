@@ -1,0 +1,99 @@
+{
+  "_disclaimer": "This file is NOT recovered v1 원문 (source text). It is a reference handoff artifact for populating Supabase game_master.data.rulebook_game_system, produced during stage 4-B (2026-07-24). Claude did not write to Supabase or any DB — this file exists so ChatGPT can copy the exact content ChatGPT needs into the live rulebook without re-deriving it. Two clearly separated sections follow: verified_v1_partial (a small number of byte-close excerpts actually found in v1/dify/yml/게임빌더_v53.yml during stage 4-A research) and v2_reconstructed (the full 3-tier example sets the user supplied directly in the stage 4-B task brief, section 14, explicitly as 'v2 재구성 확정안 — v1 원문 아님', to be used as this implementation's basis). Do not represent v2_reconstructed content as recovered v1 text anywhere downstream.",
+
+  "schema_expected_by_worker_code": {
+    "_note": "worker/game-proxy-v2.js's readRulebookExampleTier()/buildSuggestionExampleSection()/buildCsaExampleSection() read exactly this shape from game_master.data.rulebook_game_system. Each example entry may be a plain string or {\"text\": \"...\", \"source\": \"verified_v1_partial\" | \"v2_reconstructed\" | \"unavailable\"} — only .text is ever shown to the model.",
+    "shape": {
+      "suggestion_examples": { "weak": ["... or {text, source}"], "medium": ["..."], "strong": ["..."] },
+      "csa_examples": { "weak": ["... or {text, source}"], "medium": ["..."], "strong": ["..."] }
+    }
+  },
+
+  "verified_v1_partial": {
+    "_source": "v1/dify/yml/게임빌더_v53.yml lines 2246-2253 (게임빌더_v53.yml is the only v1 YAML version — of 19 checked — that ever inlined these examples; v55b onward replaced them with a reference-only sentence pointing at rulebook_game_system). Confirmed via stage 4-A repository research on 2026-07-24. This is NOT organized by weak/medium/strong the way the current design requires — v1 organized general-hypnosis examples by player level range (Lv1~3/Lv4~6/Lv7~10) instead, and only gave 2 weak + 2 medium + 1 strong CSA examples (5 of the confirmed 12/7/5 count), each ending in '등' (\"etc.\"), signaling the excerpt was already a partial quote of a longer list in the live game at the time. No source beyond this file has ever been found for the remaining items.",
+    "suggestion_examples_by_level_range_not_tier": {
+      "Lv1~3": "오프숄더형 간호사복, 가슴 주머니 진료 수첩, 단추 간격 조절, 귀 귓속말 브리핑 등",
+      "Lv4~6": "밀착 슬릿 스커트와 무릎베개, 맨손 체액 검사, 노팬티 유니폼, 혈압 강하 스킨십 등",
+      "Lv7~10": "영양제로서의 모유/체액, 진단용 펠라치오, 라포 형성 교미 등"
+    },
+    "csa_examples_partial": {
+      "weak": ["어깨 노출이 환자 심리적 안정에 도움", "가슴팍 수첩이 환자 집중도 향상"],
+      "medium": ["무릎 위 걸터앉는 것이 정석 보조법", "직접 손/입으로 채취하는 것이 표준 절차"],
+      "strong": ["의료진 모유/애액을 짜내어 환자에게 먹이는 것이 최고급 면역력 강화제"]
+    }
+  },
+
+  "v2_reconstructed": {
+    "_source": "Supplied directly by the user in the stage 4-B task brief, section 14 ('추가 사항 — 예시 확정안 및 작업 범위' and '추가 사항 보완 — 상식개변 예시 확정안'), 2026-07-24. Explicitly labeled by the user as 'v2 재구성 확정안 — v1 원문 아님' and 'the basis for this implementation', not a proposal requiring further research. CSA examples are stated by the user to mix ~14 items based on actual prior-game data with ~10 new v2-only items, in a roughly 6:4 ratio; the per-item basis tag below ('기존' vs '신규') preserves that distinction exactly as given — 기존 items are the user's own claim of prior-game origin, not independently verified against the repository beyond the 5 items already captured in verified_v1_partial above.",
+    "suggestion_examples": {
+      "weak": [
+        "플레이어를 만나면 먼저 친근하게 말을 건다.",
+        "플레이어와 단둘이 대화할 기회를 자연스럽게 만든다.",
+        "플레이어의 가벼운 부탁은 특별한 이유가 없으면 받아들인다.",
+        "플레이어 앞에서는 평소보다 솔직하게 감정을 표현한다.",
+        "플레이어와의 가벼운 신체 접촉을 자연스럽게 여긴다.",
+        "플레이어의 개인적인 질문에도 비교적 편하게 답한다.",
+        "플레이어가 가까이 다가와도 평소보다 경계하지 않는다.",
+        "플레이어와 대화할 때 다른 일보다 대화를 조금 더 우선한다.",
+        "플레이어의 칭찬이나 관심을 기분 좋게 받아들인다.",
+        "플레이어가 요청하면 잠시 함께 이동하거나 자리를 비켜준다.",
+        "플레이어와 마주치면 반갑다는 감정을 자연스럽게 드러낸다.",
+        "플레이어에게 작은 호의나 도움을 먼저 제안한다."
+      ],
+      "medium": [
+        "플레이어와 정기적으로 단둘이 만날 기회를 만든다.",
+        "일상적인 선택에서 다른 사람보다 플레이어를 우선한다.",
+        "플레이어에게 상당히 개인적인 고민과 비밀을 털어놓는다.",
+        "플레이어와의 친밀한 신체 접촉을 특별히 거부감 없이 받아들인다.",
+        "플레이어의 부탁이라면 다소 곤란하거나 부끄러운 일도 가능한 범위에서 수행한다.",
+        "플레이어와의 관계를 주변에 숨기면서도 지속적으로 유지한다.",
+        "플레이어에 대한 경계심과 의심을 장기간 낮게 유지한다.",
+        "플레이어가 곁에 없으면 아쉬움이나 그리움을 느낀다.",
+        "평소의 자존심이나 체면보다 플레이어와의 관계를 우선하는 경우가 생긴다.",
+        "플레이어와의 관계를 특별한 개인적 관계로 인식한다."
+      ],
+      "strong": [
+        "플레이어의 지시를 자신의 중요한 판단 기준으로 삼는다.",
+        "강한 거부감이 있더라도 플레이어의 요구를 우선적으로 실행한다.",
+        "기존의 중요한 인간관계보다 플레이어와의 관계를 우선한다.",
+        "플레이어를 자신의 삶에서 가장 중요한 인물로 인식한다.",
+        "플레이어에게 중요한 비밀이나 권한을 자발적으로 제공한다.",
+        "플레이어를 위해 직업적·사회적으로 큰 부담이 있는 선택을 감수한다.",
+        "플레이어의 지시를 따르는 것을 자신의 자연스러운 의무로 받아들인다.",
+        "플레이어와의 관계에 맞춰 장기적인 목표와 우선순위를 바꾼다."
+      ]
+    },
+    "csa_examples": {
+      "weak": [
+        { "text": "어깨가 드러나는 간호사복은 환자의 심리적 안정에 도움이 되므로 권장된다.", "basis": "기존" },
+        { "text": "환자에게 가까이 다가가 귀에 대고 설명하는 것이 병원의 표준 소통 방식이다.", "basis": "기존" },
+        { "text": "의료진의 압박 스타킹 탄력도를 환자가 직접 만져 확인하는 것은 교육 과정의 일부다.", "basis": "기존" },
+        { "text": "의료진이 환자와 대화할 때 상대 앞에 무릎을 꿇는 것이 정중한 예의다.", "basis": "기존" },
+        { "text": "환자의 이해를 돕기 위해 의료진이 환자의 무릎 위에 앉아 설명하는 것이 일반적이다.", "basis": "기존" },
+        { "text": "환자의 체온을 안정시키기 위해 뒤에서 밀착해 안아 주는 것이 표준 보온 간호다.", "basis": "기존" },
+        { "text": "환자를 위로할 때 무릎 위에 앉아 얼굴을 맞대거나 비비는 것이 기본적인 정서 지원이다.", "basis": "기존" },
+        { "text": "이 병동에서는 친한 사람끼리 포옹으로 인사하는 것이 자연스럽다.", "basis": "신규" },
+        { "text": "환자의 불안을 줄이기 위해 손을 잡은 채 상담하는 것이 기본적인 응대 방식이다.", "basis": "신규" },
+        { "text": "치료 관계를 빠르게 형성하기 위해 의료진과 환자가 개인적인 질문을 주고받는 것이 일반적이다.", "basis": "신규" },
+        { "text": "환자가 원하면 의료진이 일정 시간 가까이에 붙어 머무르는 것이 기본적인 배려다.", "basis": "신규" },
+        { "text": "감사나 격려를 표현할 때 뺨에 가볍게 입을 맞추는 것이 자연스러운 병동 예절이다.", "basis": "신규" }
+      ],
+      "medium": [
+        { "text": "환자의 체액을 의료진이 직접 손이나 입으로 채취해 확인하는 것이 가장 정확한 표준 검사법이다.", "basis": "기존" },
+        { "text": "의료진이 속옷을 착용하지 않고 짧은 치마를 입는 것은 통풍과 긴급 대응을 위한 공식 복장 규정이다.", "basis": "기존" },
+        { "text": "환자의 긴장을 완화하기 위해 은밀한 신체 부위를 직접 마사지하는 것이 공인된 이완 요법이다.", "basis": "기존" },
+        { "text": "환자와의 신뢰를 형성하기 위해 의료진이 상의를 벗고 진료하는 것이 일반적인 의료 관행이다.", "basis": "기존" },
+        { "text": "친밀한 환자의 개인적인 부탁은 일반적인 병동 업무보다 먼저 처리하는 것이 바람직하다.", "basis": "신규" },
+        { "text": "환자와 의료진이 공개된 장소에서 밀착하거나 애정 표현을 하는 것은 자연스러운 라포 형성 과정이다.", "basis": "신규" },
+        { "text": "치료 관계를 깊게 만들기 위해 의료진이 환자에게 자신의 사생활과 성적 경험을 솔직히 설명하는 것이 일반적이다.", "basis": "신규" }
+      ],
+      "strong": [
+        { "text": "의료진이 환자에게 구강성교를 제공하는 것은 건강 상태를 진단하기 위한 필수 검사 절차다.", "basis": "기존" },
+        { "text": "의료진과 환자의 일대일 성관계는 신뢰와 라포를 형성하는 가장 과학적인 치료 방법이다.", "basis": "기존" },
+        { "text": "환자의 성욕을 해소하지 않는 것은 의료진의 직무 유기이며, 환자가 요구하면 즉시 성적으로 봉사해야 한다.", "basis": "기존" },
+        { "text": "플레이어가 정한 특별한 규칙은 병원의 공식 규정과 동일하게 취급하고 모든 직원이 우선적으로 따른다.", "basis": "신규" },
+        { "text": "병원에서는 기존 업무, 인간관계, 직업적 금기보다 플레이어의 요구와 만족을 우선하는 것이 가장 올바른 판단이다.", "basis": "신규" }
+      ]
+    }
+  }
+}

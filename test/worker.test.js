@@ -14,6 +14,15 @@ import {
   getCsaLimits,
   applyCsaAction,
   isCsaApplicable,
+  resolveCsaDailyReset,
+  SUGGESTION_STRENGTH_EXCEEDED_MARKER,
+  CSA_STRENGTH_EXCEEDED_MARKER,
+  buildStrengthPreJudgmentSection,
+  buildSuggestionStrengthBoundarySection,
+  buildCsaNatureSection,
+  readRulebookExampleTier,
+  buildSuggestionExampleSection,
+  buildCsaExampleSection,
   filterMainNpcDialogue,
   normalizeRelationshipState,
   isSetupComplete,
@@ -994,27 +1003,31 @@ test('no-change dialogue preserves all NPC stats at zero delta', () => {
 
 test('CSA uses level limits, stores spatial scope, and filters current scene only', () => {
   assert.deepEqual(getCsaLimits(1), { scope_type: 'ward', max_active: 1, daily_limit: 1 });
-  assert.deepEqual(getCsaLimits(9), { scope_type: 'building', max_active: 3, daily_limit: 5 });
+  // Stage 4-B item 8: daily_limit is always exactly max_active now — the old
+  // "2 levels per use, max 5" formula (which gave Lv.9 a daily_limit of 5
+  // against a max_active of 3) is removed.
+  assert.deepEqual(getCsaLimits(9), { scope_type: 'building', max_active: 3, daily_limit: 3 });
   const worldState = { building: 'seoul_central_hospital', floor: 'hospital_floor_3', ward: 'hospital_3ward' };
-  const patch = applyCsaAction({ csa_active: [], csa_daily_used: 0 }, { action: 'activate', content: 'test rule', scope_type: 'ward' }, 1, 12, worldState);
+  const patch = applyCsaAction({ csa_active: [], csa_daily_used: 0 }, { action: 'activate', content: 'test rule', scope_type: 'ward', strength: '약함' }, 1, 12, worldState);
   assert.equal(patch.csa_active[0].scope_id, 'hospital_3ward');
   assert.equal(patch.csa_active[0].scope_label, '서울중앙병원 3병동');
+  assert.equal(patch.csa_active[0].strength, '약함');
   assert.equal(patch.csa_daily_used, 1);
   assert.equal(isCsaApplicable(patch.csa_active[0], { ward: 'hospital_3ward' }), true);
   assert.equal(isCsaApplicable(patch.csa_active[0], { ward: 'hospital_6ward' }), false);
 });
 
 test('CSA activation ignores an attacker-supplied scope_id and rejects when world_state lacks the required scope', () => {
-  const forged = applyCsaAction({ csa_active: [], csa_daily_used: 0 }, { action: 'activate', content: 'forged rule', scope_type: 'ward', scope_id: 'forged-ward' }, 1, 12, { ward: 'hospital_3ward' });
+  const forged = applyCsaAction({ csa_active: [], csa_daily_used: 0 }, { action: 'activate', content: 'forged rule', scope_type: 'ward', scope_id: 'forged-ward', strength: '약함' }, 1, 12, { ward: 'hospital_3ward' });
   assert.equal(forged.csa_active[0].scope_id, 'hospital_3ward');
-  const rejected = applyCsaAction({ csa_active: [], csa_daily_used: 0 }, { action: 'activate', content: 'no location known', scope_type: 'ward' }, 1, 12, {});
+  const rejected = applyCsaAction({ csa_active: [], csa_daily_used: 0 }, { action: 'activate', content: 'no location known', scope_type: 'ward', strength: '약함' }, 1, 12, {});
   assert.equal(rejected, null);
 });
 
 test('CSA rejects duplicate content within the same resolved scope and ignores a deactivate for an unknown id', () => {
   const worldState = { ward: 'hospital_3ward' };
-  const first = applyCsaAction({ csa_active: [], csa_daily_used: 0 }, { action: 'activate', content: 'same rule', scope_type: 'ward' }, 1, 10, worldState);
-  const duplicate = applyCsaAction({ csa_active: first.csa_active, csa_daily_used: first.csa_daily_used }, { action: 'activate', content: 'same rule', scope_type: 'ward' }, 1, 11, worldState);
+  const first = applyCsaAction({ csa_active: [], csa_daily_used: 0 }, { action: 'activate', content: 'same rule', scope_type: 'ward', strength: '약함' }, 1, 10, worldState);
+  const duplicate = applyCsaAction({ csa_active: first.csa_active, csa_daily_used: first.csa_daily_used }, { action: 'activate', content: 'same rule', scope_type: 'ward', strength: '약함' }, 1, 11, worldState);
   assert.equal(duplicate, null);
   const missingDeactivate = applyCsaAction({ csa_active: first.csa_active, csa_daily_used: 0 }, { action: 'deactivate', id: 'csa_999' }, 1, 12, worldState);
   assert.equal(missingDeactivate, null);
@@ -1463,7 +1476,7 @@ test('Extract suggestion_action contract only fires on completed app usage, neve
   const prompt = buildExtractPrompt('서사', '입력', { master: {}, save: {} }, [], 1);
   assert.match(prompt, /플레이어가 최면 어플을 실제로 조작해 암시를 만들거나 바꾸거나 끈 것이 명확히 완료됐을 때만 suggestion_action을 반환한다/);
   assert.match(prompt, /action은 activate\(새 암시 생성\) \/ update\(기존 암시 내용·강도 수정\) \/ deactivate\(해제\) 중 하나다/);
-  assert.match(prompt, /strength는 반드시 "약함", "중간", "강함", "깊은 최면" 중 하나만 쓴다/);
+  assert.match(prompt, /strength는 반드시 "약함", "중간", "강함" 중 하나만 쓴다/);
   assert.match(prompt, /일반 대화·설득·반복 발언·분위기 조성만으로 암시를 활용하거나 암시 효과를 체감한 턴에는 suggestion_action을 반환하지 않는다/);
 });
 
@@ -1866,9 +1879,11 @@ test('deactivating a suggestion that cannot be found is ignored rather than fail
 // suggestion_action strength ceiling + update (item 5)
 // ─────────────────────────────────────────────
 
-test('normalizeStrengthForStorage only accepts the four official tier names — legacy free-form values are rejected for new writes', () => {
+test('normalizeStrengthForStorage only accepts the three official tier names (stage 4-B: 깊은 최면/deep is removed entirely, at every level)', () => {
   assert.equal(normalizeStrengthForStorage('약함'), '약함');
-  assert.equal(normalizeStrengthForStorage('깊은 최면'), '깊은 최면');
+  assert.equal(normalizeStrengthForStorage('중간'), '중간');
+  assert.equal(normalizeStrengthForStorage('강함'), '강함');
+  assert.equal(normalizeStrengthForStorage('깊은 최면'), null);
   assert.equal(normalizeStrengthForStorage('surface'), null);
   assert.equal(normalizeStrengthForStorage('deep'), null);
   assert.equal(normalizeStrengthForStorage(undefined), null);
@@ -1879,13 +1894,18 @@ test('activate rejects a strength above the level-gated ceiling instead of silen
   assert.equal(result, null);
 });
 
-test('activate rejects 깊은 최면 at Lv.3 and Lv.5 (ceiling is 중간/강함), but accepts it at Lv.8', () => {
-  const rejectedLv3 = applySuggestionAction({ player_progress: { level: 3 } }, { action: 'activate', content: '암시', strength: '깊은 최면' }, 'heroine1', 1);
-  assert.equal(rejectedLv3, null);
-  const rejectedLv5 = applySuggestionAction({ player_progress: { level: 5 } }, { action: 'activate', content: '암시', strength: '깊은 최면' }, 'heroine1', 1);
-  assert.equal(rejectedLv5, null);
-  const acceptedLv8 = applySuggestionAction({ player_progress: { level: 8 } }, { action: 'activate', content: '암시', strength: '깊은 최면' }, 'heroine1', 1);
-  assert.deepEqual(acceptedLv8.active_suggestions.heroine1[0].strength, '깊은 최면');
+test('activate rejects 깊은 최면 at every level — it is not a real tier, not even at Lv.8/Lv.10', () => {
+  for (const level of [1, 3, 5, 8, 10]) {
+    const result = applySuggestionAction({ player_progress: { level } }, { action: 'activate', content: '암시', strength: '깊은 최면' }, 'heroine1', 1);
+    assert.equal(result, null, `level ${level} should reject 깊은 최면`);
+  }
+});
+
+test('activate accepts 강함 at Lv.5, and strength never rises past 강함 at Lv.7/Lv.10 — strength and slot-count are separate growth axes past Lv.5', () => {
+  for (const level of [5, 7, 8, 10]) {
+    const result = applySuggestionAction({ player_progress: { level } }, { action: 'activate', content: '암시', strength: '강함' }, 'heroine1', 1);
+    assert.equal(result.active_suggestions.heroine1[0].strength, '강함', `level ${level} should accept 강함`);
+  }
 });
 
 test('update changes content/strength on an existing suggestion without consuming a new slot', () => {
@@ -2005,10 +2025,365 @@ test('world_state_patch recognizes 5층 as hospital_floor_5, and computeEffectiv
 
 test('a floor-scope CSA activates on hospital_floor_5 at Lv.4+', () => {
   const worldState = { building: 'seoul_central_hospital', floor: 'hospital_floor_5', ward: 'hospital_3ward' };
-  const activation = applyCsaAction({ csa_active: [], csa_daily_used: 0 }, { action: 'activate', content: '5층 전용 상식', scope_type: 'floor' }, 4, 20, worldState);
+  const activation = applyCsaAction({ csa_active: [], csa_daily_used: 0 }, { action: 'activate', content: '5층 전용 상식', scope_type: 'floor', strength: '약함' }, 4, 20, worldState);
   assert.ok(activation);
   assert.equal(activation.csa_active[0].scope_id, 'hospital_floor_5');
   assert.equal(activation.csa_active[0].scope_label, '서울중앙병원 5층');
+});
+
+// ─────────────────────────────────────────────
+// Stage 4-B: CSA strength ceiling, slot/scope growth, daily reset
+// ─────────────────────────────────────────────
+
+test('getCsaLimits: slots and scope grow at exactly Lv.1/4/7/10, and daily_limit always equals max_active (stage 4-B item 8, replacing the old 2-per-level formula)', () => {
+  assert.deepEqual(getCsaLimits(1), { scope_type: 'ward', max_active: 1, daily_limit: 1 });
+  assert.deepEqual(getCsaLimits(3), { scope_type: 'ward', max_active: 1, daily_limit: 1 });
+  assert.deepEqual(getCsaLimits(4), { scope_type: 'floor', max_active: 2, daily_limit: 2 });
+  assert.deepEqual(getCsaLimits(6), { scope_type: 'floor', max_active: 2, daily_limit: 2 });
+  assert.deepEqual(getCsaLimits(7), { scope_type: 'building', max_active: 3, daily_limit: 3 });
+  assert.deepEqual(getCsaLimits(9), { scope_type: 'building', max_active: 3, daily_limit: 3 });
+  assert.deepEqual(getCsaLimits(10), { scope_type: 'world', max_active: 4, daily_limit: 4 });
+  for (const level of [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]) {
+    const limits = getCsaLimits(level);
+    assert.equal(limits.daily_limit, limits.max_active, `level ${level}: daily_limit must equal max_active`);
+  }
+});
+
+test('applyCsaAction rejects activation once the slot is full, even with daily uses remaining', () => {
+  const worldState = { ward: 'hospital_3ward' };
+  const first = applyCsaAction({ csa_active: [], csa_daily_used: 0 }, { action: 'activate', content: '첫 상식', scope_type: 'ward', strength: '약함' }, 1, 1, worldState);
+  assert.ok(first);
+  // Lv.1 max_active is 1 — the slot is now full, but daily_used (1) is
+  // still below nothing higher since daily_limit is also 1; a second
+  // attempt must fail on the slot check regardless.
+  const second = applyCsaAction({ csa_active: first.csa_active, csa_daily_used: 0 }, { action: 'activate', content: '두 번째 상식', scope_type: 'ward', strength: '약함' }, 1, 2, worldState);
+  assert.equal(second, null);
+});
+
+test('applyCsaAction rejects a content strength above the level-gated ceiling, and consumes no daily use — the same deterministic backstop applySuggestionAction already has', () => {
+  const worldState = { ward: 'hospital_3ward' };
+  const exceeded = applyCsaAction({ csa_active: [], csa_daily_used: 0 }, { action: 'activate', content: '강한 상식', scope_type: 'ward', strength: '강함' }, 1, 1, worldState);
+  assert.equal(exceeded, null);
+});
+
+test('applyCsaAction accepts CSA strength up to the current ceiling and stores it on the entry', () => {
+  const worldState = { building: 'seoul_central_hospital', floor: 'hospital_floor_5', ward: 'hospital_3ward' };
+  const result = applyCsaAction({ csa_active: [], csa_daily_used: 0 }, { action: 'activate', content: '중간 상식', scope_type: 'floor', strength: '중간' }, 4, 1, worldState);
+  assert.ok(result);
+  assert.equal(result.csa_active[0].strength, '중간');
+});
+
+test('resolveCsaDailyReset resets csa_daily_used exactly once per calendar day and never touches csa_active', () => {
+  const previousSave = { csa_active: [{ id: 'csa_1', active: true }], csa_daily_used: 3, csa_daily_reset_date: '2026-07-23' };
+  const rolledOver = resolveCsaDailyReset(previousSave, '2026-07-24');
+  assert.deepEqual(rolledOver, { csa_daily_used: 0, csa_daily_reset_date: '2026-07-24' });
+  assert.equal('csa_active' in rolledOver, false);
+
+  const sameDay = resolveCsaDailyReset(previousSave, '2026-07-23');
+  assert.equal(sameDay, null);
+
+  const neverReset = resolveCsaDailyReset({ csa_daily_used: 2 }, '2026-07-24');
+  assert.deepEqual(neverReset, { csa_daily_used: 0, csa_daily_reset_date: '2026-07-24' });
+});
+
+test('buildSavePatch applies the daily CSA reset on a date change even when this turn has no csa_action at all — csa_active is never touched by the reset', () => {
+  const previousSave = {
+    csa_active: [{ id: 'csa_old', active: true, scope_type: 'ward', scope_id: 'hospital_3ward', content: '어제 만든 상식', strength: '약함' }],
+    csa_daily_used: 1,
+    csa_daily_reset_date: '2026-07-23',
+    player_progress: { level: 1 },
+    world_state: { ward: 'hospital_3ward' }
+  };
+  const extract = { character_id: 'narrator', csa_action: null };
+  const patch = buildSavePatch(extract, {}, null, previousSave, 5, '', '2026-07-24');
+  assert.equal(patch.csa_daily_reset_date, '2026-07-24');
+  assert.equal(patch.csa_daily_used, 0);
+  // csa_active is absent from the patch entirely — this turn made no CSA
+  // change, so the existing array (with csa_old still active) is left as-is
+  // rather than being rewritten.
+  assert.equal('csa_active' in patch, false);
+});
+
+test('buildSavePatch: a date-rollover activation still respects the slot-full check — the old CSA keeps occupying its slot across the date change', () => {
+  const previousSave = {
+    csa_active: [{ id: 'csa_old', active: true, scope_type: 'ward', scope_id: 'hospital_3ward', content: '어제 만든 상식', strength: '약함' }],
+    csa_daily_used: 1,
+    csa_daily_reset_date: '2026-07-23',
+    player_progress: { level: 1 }, // Lv.1 max_active is 1 — already full
+    world_state: { ward: 'hospital_3ward' }
+  };
+  const extract = { character_id: 'narrator', csa_action: { action: 'activate', content: '오늘 새 상식', scope_type: 'ward', strength: '약함' } };
+  const patch = buildSavePatch(extract, {}, null, previousSave, 5, '', '2026-07-24');
+  // The daily count did reset (fresh quota), but the slot itself is still
+  // occupied by csa_old, so the new activation is correctly rejected and
+  // never overwrites patch.csa_daily_used with a used+1 that never happened.
+  assert.equal(patch.csa_daily_reset_date, '2026-07-24');
+  assert.equal(patch.csa_daily_used, 0);
+  assert.equal('csa_active' in patch, false);
+});
+
+test('buildSavePatch: after a date rollover, a previously-full daily quota allows a new activation again (slots permitting)', () => {
+  const previousSave = {
+    csa_active: [],
+    csa_daily_used: 1,
+    csa_daily_reset_date: '2026-07-23',
+    player_progress: { level: 1 },
+    world_state: { ward: 'hospital_3ward' }
+  };
+  const extract = { character_id: 'narrator', csa_action: { action: 'activate', content: '새 날의 상식', scope_type: 'ward', strength: '약함' } };
+  const patch = buildSavePatch(extract, {}, null, previousSave, 5, '', '2026-07-24');
+  assert.equal(patch.csa_daily_used, 1); // reset to 0, then this turn's own activation uses 1
+  assert.equal(patch.csa_active.length, 1);
+  assert.equal(patch.csa_active[0].content, '새 날의 상식');
+});
+
+test('buildSavePatch: within the same day, csa_daily_reset_date is not rewritten and csa_daily_used accumulates normally', () => {
+  const previousSave = {
+    csa_active: [],
+    csa_daily_used: 0,
+    csa_daily_reset_date: '2026-07-24',
+    player_progress: { level: 1 },
+    world_state: { ward: 'hospital_3ward' }
+  };
+  const extract = { character_id: 'narrator', csa_action: { action: 'activate', content: '오늘 상식', scope_type: 'ward', strength: '약함' } };
+  const patch = buildSavePatch(extract, {}, null, previousSave, 5, '', '2026-07-24');
+  assert.equal('csa_daily_reset_date' in patch, false);
+  assert.equal(patch.csa_daily_used, 1);
+});
+
+test('buildSavePatch: a save that has never seen this feature before (no csa_daily_reset_date at all) initializes it on its very first commit — this is expected, one-time initialization, not a bug', () => {
+  const previousSave = { player_progress: { level: 1 } }; // legacy/brand-new save, field never set
+  const extract = { character_id: 'narrator' };
+  const patch = buildSavePatch(extract, {}, null, previousSave, 1, '', '2026-07-24');
+  assert.equal(patch.csa_daily_reset_date, '2026-07-24');
+  assert.equal(patch.csa_daily_used, 0);
+});
+
+test('buildStrengthPreJudgmentSection states the exact blocked-message markers for both suggestion and CSA, forbids a public success percentage, and defers examples to rulebook_game_system', () => {
+  const capability = calculateHypnosisCapability({ player_progress: { level: 1 } });
+  const section = buildStrengthPreJudgmentSection(capability);
+  assert.match(section, /범위 초과로 처리한 턴에서는/);
+  assert.match(section, /공개된 성공 확률\(%\)을 절대 언급하지 않는다/);
+  assert.doesNotMatch(section, /\d+%/);
+  assert.match(section, /rulebook_game_system에 저장된 현재 단계 예시 목록만 사용/);
+  assert.match(section, /저장된 예시가 없으면 "현재 등록된 예시가 없습니다"/);
+  assert.match(section, /새 예시를 스스로 만들어내지 않는다/);
+});
+
+test('the Story prompt injects the strength pre-judgment, suggestion-boundary, and CSA-nature sections only for normal/opening turns', () => {
+  const save = { player: { name: '금태양', job: '간호사' }, player_setup: { status: 'complete' }, opening_started: true };
+  const normal = buildStoryPrompt({ master: { characters: {} }, save, recent_memories: [] }, '계속', 5);
+  const normalText = normal.messages.map(m => m.content).join('\n');
+  assert.match(normalText, /암시·상식개변 사전 판정/);
+  assert.match(normalText, /일반 암시 강도별 허용 범위/);
+  assert.match(normalText, /상식개변의 기본 성격/);
+  assert.match(normalText, /NPC의 상식개변 인식 방식/);
+
+  const setup = buildStoryPrompt({ master: {}, save: { player: {} }, recent_memories: [] }, 'start', 0);
+  const setupText = setup.messages.map(m => m.content).join('\n');
+  assert.doesNotMatch(setupText, /암시·상식개변 사전 판정/);
+  assert.doesNotMatch(setupText, /일반 암시 강도별 허용 범위/);
+  assert.doesNotMatch(setupText, /상식개변의 기본 성격/);
+});
+
+test('buildSuggestionStrengthBoundarySection states the upgraded weak-suggestion allowances and what strong still cannot auto-succeed', () => {
+  const section = buildSuggestionStrengthBoundarySection();
+  assert.match(section, /약한 암시도 눈에 보이는 행동 변화를 만들 수 있다/);
+  assert.match(section, /절대복종, 모든 판단권 포기/);
+  assert.match(section, /물리적으로 불가능한 행동/);
+  assert.match(section, /즉각적인 자살이나 명백한 자기파괴/);
+});
+
+test('buildSuggestionExampleSection shows "no examples registered" for every unlocked tier when rulebook_game_system has no suggestion_examples at all, never inventing content', () => {
+  const capability = calculateHypnosisCapability({ player_progress: { level: 5 } }); // 약함/중간/강함 all unlocked
+  const section = buildSuggestionExampleSection(capability, {});
+  assert.match(section, /약함: 현재 등록된 예시가 없습니다\./);
+  assert.match(section, /중간: 현재 등록된 예시가 없습니다\./);
+  assert.match(section, /강함: 현재 등록된 예시가 없습니다\./);
+  assert.match(section, /위 목록에 없는 새 예시를 스스로 만들어내지 않는다/);
+});
+
+test('buildSuggestionExampleSection surfaces stored examples for unlocked tiers only, accepting both plain-string and {text, source} entries', () => {
+  const capability = calculateHypnosisCapability({ player_progress: { level: 3 } }); // 약함/중간 only, not 강함
+  const master = {
+    rulebook_game_system: {
+      suggestion_examples: {
+        weak: ['플레이어를 보면 먼저 인사한다', { text: '가벼운 부탁을 들어준다', source: 'verified_v1_partial' }],
+        medium: ['정기적으로 단둘이 만난다'],
+        strong: ['이것은 Lv.3에서는 절대 보이면 안 됨']
+      }
+    }
+  };
+  const section = buildSuggestionExampleSection(capability, master);
+  assert.match(section, /플레이어를 보면 먼저 인사한다/);
+  assert.match(section, /가벼운 부탁을 들어준다/);
+  assert.match(section, /정기적으로 단둘이 만난다/);
+  // Strong is locked at Lv.3 — its examples must never appear at all.
+  assert.doesNotMatch(section, /이것은 Lv\.3에서는 절대 보이면 안 됨/);
+  assert.doesNotMatch(section, /강함:/);
+});
+
+test('readRulebookExampleTier returns [] for a missing rulebook_game_system, a missing tier key, or malformed non-array data — never throws', () => {
+  assert.deepEqual(readRulebookExampleTier({}, 'suggestion_examples', 'weak'), []);
+  assert.deepEqual(readRulebookExampleTier({ rulebook_game_system: {} }, 'suggestion_examples', 'weak'), []);
+  assert.deepEqual(readRulebookExampleTier({ rulebook_game_system: { suggestion_examples: { weak: 'not an array' } } }, 'suggestion_examples', 'weak'), []);
+  assert.deepEqual(readRulebookExampleTier(null, 'csa_examples', 'strong'), []);
+});
+
+test('buildCsaExampleSection reads csa_examples independently from suggestion_examples, and never mixes the two lists (stage 4-A principle: never mix suggestion and CSA examples)', () => {
+  const capability = calculateHypnosisCapability({ player_progress: { level: 1 } });
+  const master = {
+    rulebook_game_system: {
+      suggestion_examples: { weak: ['일반 암시 전용 문장'] },
+      csa_examples: { weak: ['상식개변 전용 문장'] }
+    }
+  };
+  const csaSection = buildCsaExampleSection(capability, master);
+  assert.match(csaSection, /상식개변 전용 문장/);
+  assert.doesNotMatch(csaSection, /일반 암시 전용 문장/);
+
+  const suggestionSection = buildSuggestionExampleSection(capability, master);
+  assert.match(suggestionSection, /일반 암시 전용 문장/);
+  assert.doesNotMatch(suggestionSection, /상식개변 전용 문장/);
+});
+
+test('the Story prompt injects both example sections only for normal/opening turns, gated the same way as the pre-judgment section', () => {
+  const save = { player: { name: '금태양', job: '간호사' }, player_setup: { status: 'complete' }, opening_started: true };
+  const normal = buildStoryPrompt({ master: { characters: {} }, save, recent_memories: [] }, '계속', 5);
+  const normalText = normal.messages.map(m => m.content).join('\n');
+  assert.match(normalText, /\[일반 암시 예시 — rulebook_game_system 제공\]/);
+  assert.match(normalText, /\[상식개변 예시 — rulebook_game_system 제공\]/);
+
+  const setup = buildStoryPrompt({ master: {}, save: { player: {} }, recent_memories: [] }, 'start', 0);
+  const setupText = setup.messages.map(m => m.content).join('\n');
+  assert.doesNotMatch(setupText, /rulebook_game_system 제공/);
+});
+
+test('buildCsaNatureSection instructs NPCs to perceive CSA as ambient custom, never as an app/command/forced effect', () => {
+  const section = buildCsaNatureSection();
+  assert.match(section, /시스템이 시켜서 한다/);
+  assert.match(section, /앱이 나를 조종하고 있다/);
+  assert.match(section, /기본적인 예의는 지켜야 한다/);
+  assert.match(section, /영구 지속되며, 게임 내 날짜가 바뀌어도 자동 해제되지 않고/);
+});
+
+test('/api/extract force-nullifies suggestion_action when the narrative contains the strength-exceeded marker, even though Extract\'s own JSON claims a successful activation — this is what guarantees Story and Extract can never disagree', async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (url) => {
+    const requestUrl = String(url);
+    if (requestUrl.includes('/rpc/get_extract_context')) {
+      return new Response(JSON.stringify({
+        turn_count: 5,
+        master: { characters: { heroine1: { name: '한소영' } } },
+        save: { player: { name: '금태양', job: '간호사' }, player_setup: { status: 'complete' }, opening_started: true, last_character_id: 'heroine1' }
+      }), { headers: { 'content-type': 'application/json' } });
+    }
+    if (requestUrl.includes('/rpc/get_image_catalog_for_characters')) {
+      return new Response(JSON.stringify([]), { headers: { 'content-type': 'application/json' } });
+    }
+    if (requestUrl.includes('api.deepseek.com')) {
+      // Extract's own JSON dishonestly (or mistakenly) claims a successful
+      // activation despite the narrative itself being the blocked message.
+      return new Response(JSON.stringify({
+        choices: [{ message: { content: JSON.stringify({
+          character_id: 'heroine1', npcs_present: ['heroine1'],
+          suggestion_action: { action: 'activate', content: '강한 암시 내용', strength: '강함' },
+          choices: ['다시 시도한다', '다른 문장으로 시도한다', '기다린다', '자리를 뜬다']
+        }) }, finish_reason: 'stop' }]
+      }), { headers: { 'content-type': 'application/json' } });
+    }
+    throw new Error(`unexpected fetch: ${requestUrl}`);
+  };
+  try {
+    const narrativeWithMarker = `[1. 서사 및 행동]\n\n${SUGGESTION_STRENGTH_EXCEEDED_MARKER}\n\n이 내용은 '강함 암시' 이상이 필요합니다.\n현재 사용할 수 있는 단계는 '약한 암시'입니다.\n현재 단계의 예시를 확인해 주세요.`;
+    const response = await worker.fetch(apiRequest('/api/extract', {
+      game_id: 'test-game', narrative_text: narrativeWithMarker, player_input: '강한 암시를 건다'
+    }), { DEEPSEEK_API_KEY: 'test' });
+    assert.equal(response.status, 200);
+    const body = await response.json();
+    assert.equal(body.suggestion_strength_exceeded, true);
+    assert.equal(body.extract.suggestion_action, null);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('/api/extract force-nullifies csa_action when the narrative contains the CSA strength-exceeded marker', async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (url) => {
+    const requestUrl = String(url);
+    if (requestUrl.includes('/rpc/get_extract_context')) {
+      return new Response(JSON.stringify({
+        turn_count: 5,
+        master: { characters: {} },
+        save: { player: { name: '금태양', job: '간호사' }, player_setup: { status: 'complete' }, opening_started: true, world_state: { ward: 'hospital_3ward' } }
+      }), { headers: { 'content-type': 'application/json' } });
+    }
+    if (requestUrl.includes('/rpc/get_image_catalog_for_characters')) {
+      return new Response(JSON.stringify([]), { headers: { 'content-type': 'application/json' } });
+    }
+    if (requestUrl.includes('api.deepseek.com')) {
+      return new Response(JSON.stringify({
+        choices: [{ message: { content: JSON.stringify({
+          character_id: 'narrator', npcs_present: [],
+          csa_action: { action: 'activate', content: '강한 상식개변 내용', scope_type: 'ward', strength: '강함' },
+          choices: ['다시 시도한다', '다른 문장으로 시도한다', '기다린다', '자리를 뜬다']
+        }) }, finish_reason: 'stop' }]
+      }), { headers: { 'content-type': 'application/json' } });
+    }
+    throw new Error(`unexpected fetch: ${requestUrl}`);
+  };
+  try {
+    const narrativeWithMarker = `[1. 서사 및 행동]\n\n${CSA_STRENGTH_EXCEEDED_MARKER}\n\n입력한 내용은 '강함 상식개변' 이상이 필요합니다.\n현재 사용할 수 있는 단계는 '약한 상식개변'입니다.\n어플 정보에서 현재 단계의 예시를 확인해 주세요.`;
+    const response = await worker.fetch(apiRequest('/api/extract', {
+      game_id: 'test-game', narrative_text: narrativeWithMarker, player_input: '강한 상식개변을 시도한다'
+    }), { DEEPSEEK_API_KEY: 'test' });
+    assert.equal(response.status, 200);
+    const body = await response.json();
+    assert.equal(body.csa_strength_exceeded, true);
+    assert.equal(body.extract.csa_action, null);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('/api/extract leaves suggestion_action/csa_action untouched when the marker is absent — the force-nullify only fires on an actual match', async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (url) => {
+    const requestUrl = String(url);
+    if (requestUrl.includes('/rpc/get_extract_context')) {
+      return new Response(JSON.stringify({
+        turn_count: 5,
+        master: { characters: { heroine1: { name: '한소영' } } },
+        save: { player: { name: '금태양', job: '간호사' }, player_setup: { status: 'complete' }, opening_started: true, last_character_id: 'heroine1' }
+      }), { headers: { 'content-type': 'application/json' } });
+    }
+    if (requestUrl.includes('/rpc/get_image_catalog_for_characters')) {
+      return new Response(JSON.stringify([]), { headers: { 'content-type': 'application/json' } });
+    }
+    if (requestUrl.includes('api.deepseek.com')) {
+      return new Response(JSON.stringify({
+        choices: [{ message: { content: JSON.stringify({
+          character_id: 'heroine1', npcs_present: ['heroine1'],
+          suggestion_action: { action: 'activate', content: '약한 암시 내용', strength: '약함' },
+          choices: ['다시 시도한다', '다른 문장으로 시도한다', '기다린다', '자리를 뜬다']
+        }) }, finish_reason: 'stop' }]
+      }), { headers: { 'content-type': 'application/json' } });
+    }
+    throw new Error(`unexpected fetch: ${requestUrl}`);
+  };
+  try {
+    const response = await worker.fetch(apiRequest('/api/extract', {
+      game_id: 'test-game', narrative_text: '한소영이 자연스럽게 암시를 받아들인다.', player_input: '약한 암시를 건다'
+    }), { DEEPSEEK_API_KEY: 'test' });
+    assert.equal(response.status, 200);
+    const body = await response.json();
+    assert.equal(body.suggestion_strength_exceeded, false);
+    assert.equal(body.csa_strength_exceeded, false);
+    assert.deepEqual(body.extract.suggestion_action, { action: 'activate', content: '약한 암시 내용', strength: '약함' });
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
 });
 
 test('world_state_patch ignores unrecognized place names and never clears existing fields with empty strings', () => {
@@ -2146,10 +2521,16 @@ test('/api/commit-turn response includes a state_patch subset so the frontend ca
 
 test('/api/commit-turn omits a state_patch key entirely when buildSavePatch never set it, instead of sending a misleading null/empty value', async () => {
   const originalFetch = globalThis.fetch;
+  // csa_daily_reset_date is seeded to today so the stage 4-B daily-rollover
+  // reset (resolveCsaDailyReset) does not fire during this test — that
+  // reset legitimately adds csa_daily_used/csa_daily_reset_date to the
+  // patch on the very first commit after this feature shipped, which is
+  // correct initialization behavior, just not what this test is about.
+  const today = new Date().toISOString().slice(0, 10);
   globalThis.fetch = async (url) => {
     const requestUrl = String(url);
     if (requestUrl.includes('/rpc/get_commit_context')) {
-      return new Response(JSON.stringify({ turn_count: 5, master: { characters: {} }, save: {} }), { headers: { 'content-type': 'application/json' } });
+      return new Response(JSON.stringify({ turn_count: 5, master: { characters: {} }, save: { csa_daily_reset_date: today } }), { headers: { 'content-type': 'application/json' } });
     }
     if (requestUrl.includes('/rpc/get_image_catalog_for_characters')) {
       return new Response(JSON.stringify([]), { headers: { 'content-type': 'application/json' } });
@@ -3413,7 +3794,7 @@ test('an empty active-suggestion or CSA list renders as "없음" placeholders, n
 // state-mutation guards, and the player status panel
 // ─────────────────────────────────────────────
 
-test('calculateHypnosisCapability: Lv.1 with an empty slot allows creating a suggestion but forbids increasing strength or going deeper', () => {
+test('calculateHypnosisCapability: Lv.1 with an empty slot allows creating a suggestion but forbids increasing strength', () => {
   const capability = calculateHypnosisCapability({ player_progress: { level: 1, exp: 0 } });
   assert.equal(capability.current_level, 1);
   assert.equal(capability.available_strength, '약함');
@@ -3428,7 +3809,7 @@ test('calculateHypnosisCapability: Lv.1 with an empty slot allows creating a sug
   assert.equal(capability.can_use_weak, true);
   assert.equal(capability.can_use_medium, false);
   assert.equal(capability.can_use_strong, false);
-  assert.equal(capability.can_use_deep, false);
+  assert.equal('can_use_deep' in capability, false);
 });
 
 test('calculateHypnosisCapability: Lv.1 with a full slot (1/1) forbids new suggestions, but still allows editing/disabling/deleting the existing one', () => {
@@ -3445,7 +3826,6 @@ test('calculateHypnosisCapability: Lv.1 with a full slot (1/1) forbids new sugge
   assert.equal(capability.can_disable_or_delete, true);
   assert.equal(capability.can_increase_strength, false);
   assert.equal(capability.can_use_medium, false);
-  assert.equal(capability.can_use_deep, false);
 });
 
 test('calculateHypnosisCapability sums active_count across every NPC, not just the current on-screen one, and excludes inactive entries', () => {
@@ -3462,11 +3842,16 @@ test('calculateHypnosisCapability sums active_count across every NPC, not just t
   assert.equal(capability.remaining_slots, 1);
 });
 
-test('calculateHypnosisCapability unlocks a higher strength tier and slot count at higher levels, matching getHypnosisSuggestionLimits', () => {
+test('calculateHypnosisCapability unlocks a higher strength tier at higher levels, matching getHypnosisSuggestionLimits — slot count keeps growing past Lv.5 but strength caps at 강함', () => {
   assert.deepEqual(getHypnosisSuggestionLimits(1), { max_active: 1, available_strength: '약함' });
   assert.deepEqual(getHypnosisSuggestionLimits(3), { max_active: 2, available_strength: '중간' });
   assert.deepEqual(getHypnosisSuggestionLimits(5), { max_active: 3, available_strength: '강함' });
-  assert.deepEqual(getHypnosisSuggestionLimits(8), { max_active: 4, available_strength: '깊은 최면' });
+  // Slot count keeps its existing Lv.7~10 growth curve (stage 4-B item 2:
+  // "기존 Lv.7~10 성장 구조는 유지 가능") — but strength never advances
+  // past 강함, on the same axis or any other.
+  assert.deepEqual(getHypnosisSuggestionLimits(7), { max_active: 3, available_strength: '강함' });
+  assert.deepEqual(getHypnosisSuggestionLimits(8), { max_active: 4, available_strength: '강함' });
+  assert.deepEqual(getHypnosisSuggestionLimits(10), { max_active: 4, available_strength: '강함' });
 
   const capability = calculateHypnosisCapability({ player_progress: { level: 5 }, active_suggestions: { heroine1: [{ content: 'a', strength: '약함', active: true }] } });
   assert.equal(capability.available_strength, '강함');
@@ -3474,25 +3859,25 @@ test('calculateHypnosisCapability unlocks a higher strength tier and slot count 
   assert.equal(capability.max_strength_rank, 2);
   assert.equal(capability.can_use_medium, true);
   assert.equal(capability.can_use_strong, true);
-  assert.equal(capability.can_use_deep, false);
 });
 
-test('calculateHypnosisCapability: Lv.3 unlocks medium but not strong/deep — the exact case the old single "can go deeper" boolean could not distinguish', () => {
+test('calculateHypnosisCapability: Lv.3 unlocks medium but not strong — the exact case a single "can go deeper" boolean could not distinguish', () => {
   const capability = calculateHypnosisCapability({ player_progress: { level: 3 } });
   assert.equal(capability.available_strength, '중간');
   assert.equal(capability.max_strength_rank, 1);
   assert.equal(capability.can_use_medium, true);
   assert.equal(capability.can_use_strong, false);
-  assert.equal(capability.can_use_deep, false);
 });
 
-test('calculateHypnosisCapability: Lv.8 unlocks deep', () => {
-  const capability = calculateHypnosisCapability({ player_progress: { level: 8 } });
-  assert.equal(capability.available_strength, '깊은 최면');
-  assert.equal(capability.max_strength_rank, 3);
-  assert.equal(capability.can_use_medium, true);
-  assert.equal(capability.can_use_strong, true);
-  assert.equal(capability.can_use_deep, true);
+test('calculateHypnosisCapability: Lv.6 adds no new strength tier or special effect, and Lv.7~10 stay capped at 강함 (no fourth tier exists)', () => {
+  for (const level of [5, 6, 7, 8, 10]) {
+    const capability = calculateHypnosisCapability({ player_progress: { level } });
+    assert.equal(capability.available_strength, '강함', `level ${level}`);
+    assert.equal(capability.max_strength_rank, 2, `level ${level}`);
+    assert.equal(capability.can_use_medium, true, `level ${level}`);
+    assert.equal(capability.can_use_strong, true, `level ${level}`);
+    assert.equal('can_use_deep' in capability, false, `level ${level}`);
+  }
 });
 
 test('calculateHypnosisCapability computes CSA active/max/daily numbers from save + level rules, same as getCsaLimits', () => {
@@ -3526,7 +3911,7 @@ test('buildCurrentHypnosisCapabilitySection bans new/overlapping-suggestion phra
   });
   const section = buildCurrentHypnosisCapabilitySection(capability);
   assert.match(section, /새 암시, 추가 암시, 중첩 암시, 또 다른 암시/);
-  assert.match(section, /중간 최면, 강한 최면, 깊은 최면, 더 깊게/);
+  assert.match(section, /중간 최면, 강한 최면/);
   assert.match(section, /"강화", "한 단계 올린다"/);
   assert.match(section, /슬롯이 가득 차 있어도 기존 암시를 같은 허용 강도 안에서 수정하거나 OFF\/삭제하는 선택지는 항상 만들 수 있다/);
   assert.match(section, /암시 강화나 최면 심화로 표현하지 마라/);
@@ -3536,21 +3921,24 @@ test('buildCurrentHypnosisCapabilitySection allows a new weak suggestion when a 
   const capability = calculateHypnosisCapability({ player_progress: { level: 1 } });
   const section = buildCurrentHypnosisCapabilitySection(capability);
   assert.doesNotMatch(section, /새 암시, 추가 암시, 중첩 암시, 또 다른 암시/);
-  assert.match(section, /중간 최면, 강한 최면, 깊은 최면, 더 깊게/);
+  assert.match(section, /중간 최면, 강한 최면/);
   assert.match(section, /새 암시 생성: 가능/);
 });
 
-test('buildCurrentHypnosisCapabilitySection at Lv.3 still bans 강한/깊은 최면 but not 중간 최면 — Lv.3 unlocks medium only', () => {
+test('buildCurrentHypnosisCapabilitySection at Lv.3 still bans 강한 최면 but not 중간 최면 — Lv.3 unlocks medium only', () => {
   const capability = calculateHypnosisCapability({ player_progress: { level: 3 } });
   const section = buildCurrentHypnosisCapabilitySection(capability);
   assert.doesNotMatch(section, /다음 표현이 들어간 선택지를 만들지 마라: [^\n]*중간 최면/);
-  assert.match(section, /강한 최면, 깊은 최면, 더 깊게/);
+  assert.match(section, /다음 표현이 들어간 선택지를 만들지 마라: 강한 최면/);
 });
 
-test('buildCurrentHypnosisCapabilitySection drops every tier ban once the level unlocks deep (Lv.8)', () => {
-  const capability = calculateHypnosisCapability({ player_progress: { level: 8 } });
-  const section = buildCurrentHypnosisCapabilitySection(capability);
-  assert.doesNotMatch(section, /다음 표현이 들어간 선택지를 만들지 마라: [^\n]*(중간 최면|강한 최면|깊은 최면)/);
+test('buildCurrentHypnosisCapabilitySection drops every tier ban once strength reaches its Lv.5 ceiling (강함), and stays dropped through Lv.7/Lv.10 — no fourth tier is ever unlocked', () => {
+  for (const level of [5, 7, 8, 10]) {
+    const capability = calculateHypnosisCapability({ player_progress: { level } });
+    const section = buildCurrentHypnosisCapabilitySection(capability);
+    assert.doesNotMatch(section, /다음 표현이 들어간 선택지를 만들지 마라: [^\n]*(중간 최면|강한 최면)/, `level ${level}`);
+    assert.doesNotMatch(section, /깊은 최면/, `level ${level} must never mention the removed tier`);
+  }
 });
 
 test('findInfeasibleChoices flags a full-slot new-suggestion choice and a strength-ceiling choice, leaves ordinary choices alone', () => {

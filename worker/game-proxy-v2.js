@@ -687,6 +687,22 @@ async function handleExtract(req, env) {
     }
   }
 
+  // Stage 4-B strength pre-judgment enforcement: Story is instructed
+  // (buildStrengthPreJudgmentSection) to output a fixed literal marker when
+  // it internally determines a suggestion/CSA request exceeds the current
+  // strength ceiling, instead of narrating success. The Worker deterministically
+  // detects that marker in the FINAL narrative text and force-nullifies the
+  // corresponding structured action, regardless of what Extract's own JSON
+  // claims — this is what guarantees Story and Extract can never disagree
+  // about whether this turn's app action actually took effect (item 4), and
+  // it means a strength-exceeded turn can never advance csa_daily_used,
+  // active_suggestions, or npc_stats (items 5/10) since buildSavePatch reads
+  // extract.suggestion_action/csa_action, which are null here.
+  const suggestionStrengthExceeded = finalNarrativeText.includes(SUGGESTION_STRENGTH_EXCEEDED_MARKER);
+  if (suggestionStrengthExceeded) extract.suggestion_action = null;
+  const csaStrengthExceeded = finalNarrativeText.includes(CSA_STRENGTH_EXCEEDED_MARKER);
+  if (csaStrengthExceeded) extract.csa_action = null;
+
   // Unified final-choice validation (item 3): every rule — hypnosis
   // capability, unregistered target, location-ineligible target, near-
   // duplicate — is re-checked together after any repair, so fixing one
@@ -735,6 +751,8 @@ async function handleExtract(req, env) {
     choices_repaired: choicesRepaired,
     choices_fallback_used: choicesFallbackUsed,
     first_encounter_repaired: firstEncounterRepaired,
+    suggestion_strength_exceeded: suggestionStrengthExceeded,
+    csa_strength_exceeded: csaStrengthExceeded,
     json_repaired: jsonRepaired,
     content_addition: null, // superseded by narrative_replacement; kept only for legacy clients
     timing
@@ -1375,6 +1393,25 @@ ${recentMemorySlice.map((m, index) => clipHeadTail(m.content || '', index === re
   const hypnosisCapabilitySection = mode === 'normal' || mode === 'opening'
     ? buildCurrentHypnosisCapabilitySection(hypnosisCapability)
     : '';
+  // Stage 4-B: the pre-judgment/blocked-message contract, the per-tier
+  // suggestion behavior boundaries, and the CSA nature/NPC-perception rules
+  // — same gating as hypnosisCapabilitySection since none of this applies
+  // outside actual gameplay turns.
+  const strengthPreJudgmentSection = mode === 'normal' || mode === 'opening'
+    ? buildStrengthPreJudgmentSection(hypnosisCapability)
+    : '';
+  const suggestionStrengthBoundarySection = mode === 'normal' || mode === 'opening'
+    ? buildSuggestionStrengthBoundarySection()
+    : '';
+  const csaNatureSection = mode === 'normal' || mode === 'opening'
+    ? buildCsaNatureSection()
+    : '';
+  const suggestionExampleSection = mode === 'normal' || mode === 'opening'
+    ? buildSuggestionExampleSection(hypnosisCapability, master)
+    : '';
+  const csaExampleSection = mode === 'normal' || mode === 'opening'
+    ? buildCsaExampleSection(hypnosisCapability, master)
+    : '';
   // Same recency-favoring end position — [등록 상호작용 NPC] in coreRules
   // already bans naming an unregistered individual as a choice target, but
   // that rule sits at the very top of a long prompt; restating it right
@@ -1392,7 +1429,7 @@ ${recentMemorySlice.map((m, index) => clipHeadTail(m.content || '', index === re
     ? `\n\n[REMINDER — CHOICE LENGTH]\n[3. 선택지]의 각 문장은 35~80자를 목표로 하고 120자를 넘기지 않는다. 화면 버튼에 그대로 표시되므로 지나치게 길게 쓰지 않는다.\n`
     : '';
   const eligibleNpcRosterSection = buildEligibleNpcRosterSection(save.world_state, master.characters || {});
-  const systemPrompt = coreRules + playerGate + modeSection + rulebookSection + eligibleNpcRosterSection + buildAppSystemRulesSection() + currentSceneSection + npcProfileSection + explicitMentionSection + csaSection + suggestionSection + narrativeLengthSection + npcDialogueSection + antiRepetitionSection + playerStatusPanel + contextSection + feedbackSection + continuitySection + finalFormatRules + openingFlow + playerSetupReminder + hypnosisCapabilitySection + registeredNpcChoiceReminder + choiceLengthReminder + buildAddressAbbreviationSection();
+  const systemPrompt = coreRules + playerGate + modeSection + rulebookSection + eligibleNpcRosterSection + buildAppSystemRulesSection() + currentSceneSection + npcProfileSection + explicitMentionSection + csaSection + csaNatureSection + suggestionSection + suggestionStrengthBoundarySection + narrativeLengthSection + npcDialogueSection + antiRepetitionSection + playerStatusPanel + contextSection + feedbackSection + continuitySection + finalFormatRules + openingFlow + playerSetupReminder + hypnosisCapabilitySection + strengthPreJudgmentSection + suggestionExampleSection + csaExampleSection + registeredNpcChoiceReminder + choiceLengthReminder + buildAddressAbbreviationSection();
 
   return {
     mode,
@@ -1488,7 +1525,7 @@ npc_stat_changes만 반환한다. 서사에 숫자가 없어도 대사·행동·
 저장된 npc_encounters에 현재 NPC(character_id) 기록이 없고 이번이 실제로 처음 직접 조우한 장면일 때만 first_encounter_stats에 호감도·신뢰도를 0~35 사이 정수로 판단해 반환한다. 단순히 배경에 등장했거나 멀리서 본 것만으로는 첫 직접 조우가 아니다 — 직접 대화, 응대, 신체 접촉처럼 명확한 상호작용이 있어야 첫 직접 조우로 판단한다. 공식이나 랜덤 없이, 플레이어의 저장된 외형·복장·직업·말투·현재 태도와 NPC의 성격·가치관·경계심·현재 상황을 근거로 종합적으로 정한다. 제공되지 않은 정보를 지어내지 마라. 두 수치는 같을 필요가 없고 NPC 성격에 따라 결과가 달라져야 한다. 이미 조우한 NPC이거나 처음 만나는 장면이 아니면 first_encounter_stats는 반드시 null이다. 실제로 처음 직접 조우한 장면인데 이 판단을 빠뜨리지 마라 — 반드시 first_encounter_stats를 채워야 한다.
 
 [SUGGESTION ACTION CONTRACT]
-이번 서사에서 플레이어가 최면 어플을 실제로 조작해 암시를 만들거나 바꾸거나 끈 것이 명확히 완료됐을 때만 suggestion_action을 반환한다. action은 activate(새 암시 생성) / update(기존 암시 내용·강도 수정) / deactivate(해제) 중 하나다. strength는 반드시 "약함", "중간", "강함", "깊은 최면" 중 하나만 쓴다 — 다른 표현은 쓰지 마라.
+이번 서사에서 플레이어가 최면 어플을 실제로 조작해 암시를 만들거나 바꾸거나 끈 것이 명확히 완료됐을 때만 suggestion_action을 반환한다. action은 activate(새 암시 생성) / update(기존 암시 내용·강도 수정) / deactivate(해제) 중 하나다. strength는 반드시 "약함", "중간", "강함" 중 하나만 쓴다 — 다른 표현은 쓰지 마라.
 - activate: content(암시 내용 문장)와 strength를 채운다. 새 슬롯을 하나 사용하는 행동이다.
 - update: 이미 활성 상태인 암시의 내용이나 강도만 바꾼다. old_content에 그 암시의 기존 내용 문장을 그대로 적어 어떤 암시를 수정하는지 특정한다. 새 content(바뀐 내용, 안 바뀌면 생략)와 strength(바뀐 강도, 안 바뀌면 생략)만 채운다. 슬롯을 추가로 쓰지 않는다.
 - deactivate: content에 해제할 암시의 기존 내용 문장을 그대로 적는다.
@@ -1498,7 +1535,7 @@ npc_stat_changes만 반환한다. 서사에 숫자가 없어도 대사·행동·
 플레이어가 실제로 출발해서 새 장소에 도착했고 장면이 그 새 장소로 전환된 경우, world_state_patch에 building, floor, ward, location_label을 모두 채워서 반환한다. 바뀌지 않은 필드는 이전 저장값의 기존 명칭을 그대로 다시 적고, 실제로 바뀐 필드만 새 값으로 적는다. building/floor/ward는 장소를 설명하는 한국어 명칭으로 적으면 Worker가 표준 ID로 정규화하며, 표준 ID로 정규화되지 않는 값은 무시된다. 이동을 제안하거나 준비만 했을 뿐 아직 도착하지 않았다면 world_state_patch를 채우지 말고 비워둔다. 빈 문자열로 기존 값을 덮어쓰지 마라. 알 수 없는 장소를 지어내지 마라.
 
 [CSA ACTION CONTRACT]
-현재 장소 범위 안에서 플레이어가 상식개변을 실제로 성공시켰을 때만 csa_action.action="activate"로 content(바뀐 상식 문장)와 scope_type(ward/floor/building/world 중 현재 상황에 맞는 범위)을 반환한다. scope_id는 채우지 마라. Worker가 현재 world_state로 결정한다. 시도·계획·상상만으로는 저장하지 마라. 플레이어가 기존 상식개변을 명확히 해제했을 때만 action="deactivate"와 해제 대상 id를 반환한다. 변화가 없으면 csa_action은 null이다.
+현재 장소 범위 안에서 플레이어가 상식개변을 실제로 성공시켰을 때만 csa_action.action="activate"로 content(바뀐 상식 문장), scope_type(ward/floor/building/world 중 현재 상황에 맞는 범위), strength(그 내용이 실제로 요구하는 강도 — "약함", "중간", "강함" 중 하나)를 반환한다. scope_id는 채우지 마라. Worker가 현재 world_state로 결정한다. 시도·계획·상상만으로는 저장하지 마라. 플레이어가 기존 상식개변을 명확히 해제했을 때만 action="deactivate"와 해제 대상 id를 반환한다. 변화가 없으면 csa_action은 null이다.
 ${buildCsaApplicationCheckSection(save)}
 
 [이미지 선택]
@@ -1778,7 +1815,7 @@ function validateNpcEmotion(emotion = {}, characterId = null) {
   return { ok: errors.length === 0, errors, fieldErrors };
 }
 
-function buildSavePatch(extract, enginePatch = {}, summaryPlan = null, previousSave = {}, turnNumber = 0, playerInput = '') {
+function buildSavePatch(extract, enginePatch = {}, summaryPlan = null, previousSave = {}, turnNumber = 0, playerInput = '', today = currentUtcDateString()) {
   const characterId = typeof extract.character_id === 'string'
     ? extract.character_id
     : null;
@@ -1893,7 +1930,18 @@ function buildSavePatch(extract, enginePatch = {}, summaryPlan = null, previousS
     patch.opening_started = true;
   }
   patch.player_progress = calculateProgress(previousSave?.player_progress, extract.growth_event);
-  const csaState = applyCsaAction(previousSave, extract.csa_action, patch.player_progress.level, turnNumber, mergedWorldState);
+
+  // A calendar-day rollover resets csa_daily_used exactly once — csa_active
+  // itself is NEVER touched by a date change (stage 4-B item 6: an active
+  // CSA persists until the player explicitly deactivates or changes it).
+  const csaDailyReset = resolveCsaDailyReset(previousSave, today);
+  if (csaDailyReset) Object.assign(patch, csaDailyReset);
+  // applyCsaAction must see the already-reset csa_daily_used (not the stale
+  // pre-reset value) when deciding whether this turn's own action is within
+  // today's limit — csaState (if any) is assigned after and correctly
+  // overwrites csaDailyReset's csa_daily_used: 0 with used+1.
+  const csaSaveView = csaDailyReset ? { ...previousSave, ...csaDailyReset } : previousSave;
+  const csaState = applyCsaAction(csaSaveView, extract.csa_action, patch.player_progress.level, turnNumber, mergedWorldState);
   if (csaState) Object.assign(patch, csaState);
   return patch;
 }
@@ -2005,11 +2053,29 @@ function applyNpcStatChanges(previous = {}, proposed = {}) {
   return { stats, changes, errors };
 }
 
+// Stage 4-B item 8: daily_limit is no longer a level-based formula (the old
+// "2 levels per use, max 5" rule is removed entirely) — it is now always
+// exactly equal to the current level's max_active slot count.
 function getCsaLimits(level) {
-  if (level >= 10) return { scope_type: 'world', max_active: 4, daily_limit: 5 };
-  if (level >= 7) return { scope_type: 'building', max_active: 3, daily_limit: level >= 9 ? 5 : 4 };
-  if (level >= 4) return { scope_type: 'floor', max_active: 2, daily_limit: level >= 5 ? 3 : 2 };
-  return { scope_type: 'ward', max_active: 1, daily_limit: level >= 3 ? 2 : 1 };
+  const clamped = Math.max(1, Number(level) || 1);
+  if (clamped >= 10) return { scope_type: 'world', max_active: 4, daily_limit: 4 };
+  if (clamped >= 7) return { scope_type: 'building', max_active: 3, daily_limit: 3 };
+  if (clamped >= 4) return { scope_type: 'floor', max_active: 2, daily_limit: 2 };
+  return { scope_type: 'ward', max_active: 1, daily_limit: 1 };
+}
+
+function currentUtcDateString() {
+  return new Date().toISOString().slice(0, 10);
+}
+
+// A calendar-day rollover resets csa_daily_used exactly once — csa_active
+// is deliberately untouched here (stage 4-B item 6: an activation persists
+// until the player explicitly deactivates or changes it, never auto-expires
+// on a date change). Returns null when no reset is due yet today.
+function resolveCsaDailyReset(previousSave = {}, today = currentUtcDateString()) {
+  const lastResetDate = typeof previousSave?.csa_daily_reset_date === 'string' ? previousSave.csa_daily_reset_date : null;
+  if (lastResetDate === today) return null;
+  return { csa_daily_used: 0, csa_daily_reset_date: today };
 }
 
 const CSA_SCOPE_LABELS = {
@@ -2041,6 +2107,15 @@ function applyCsaAction(save, action, level, turnNumber, worldState = {}) {
   const limits = getCsaLimits(level);
   const scope = action.scope_type;
   if (!CSA_SCOPE_RANK[scope] || CSA_SCOPE_RANK[scope] > CSA_SCOPE_RANK[limits.scope_type] || typeof action.content !== 'string' || !action.content.trim()) return null;
+  // CSA content strength shares the same level-gated ceiling as general
+  // suggestions (stage 4-B: no separate CSA-strength table was specified) —
+  // a request above it is rejected outright, never silently downgraded,
+  // mirroring applySuggestionAction's own ceiling check. This is the
+  // deterministic backstop independent of whether Story's own narrative
+  // used the strength-exceeded marker (see SUGGESTION_STRENGTH_EXCEEDED_MARKER).
+  const strength = normalizeStrengthForStorage(action.strength);
+  const { available_strength: availableCsaStrength } = getHypnosisSuggestionLimits(level);
+  if (!strength || hypnosisStrengthRank(strength) > hypnosisStrengthRank(availableCsaStrength)) return null;
   const scopeId = resolveCsaScopeId(scope, worldState);
   if (!scopeId) {
     console.error('CSA activation rejected: world_state missing required scope', { scope, worldState });
@@ -2055,6 +2130,7 @@ function applyCsaAction(save, action, level, turnNumber, worldState = {}) {
     csa_active: [...active, {
       id: `csa_${turnNumber}`,
       content,
+      strength,
       scope_type: scope,
       scope_id: scopeId,
       scope_label: CSA_SCOPE_LABELS[scopeId] || scopeId,
@@ -2337,19 +2413,24 @@ function buildCsaPanelText(save = {}) {
 // 서로 다른 곳에서 다른 슬롯/강도 숫자를 보는 불일치를 막는다.
 // ─────────────────────────────────────────────
 
-const HYPNOSIS_STRENGTH_TIERS = ['약함', '중간', '강함', '깊은 최면'];
+// Exactly three tiers — a fourth "깊은 최면"(deep) tier existed before this
+// stage and is now removed entirely (stage 4-B item 2). Never reintroduce it.
+const HYPNOSIS_STRENGTH_TIERS = ['약함', '중간', '강함'];
 
 function hypnosisStrengthRank(strength) {
   const index = HYPNOSIS_STRENGTH_TIERS.indexOf(strength);
   return index === -1 ? 0 : index;
 }
 
+// Strength and slot-count are deliberately separate growth axes (stage
+// 4-B item 2): strength caps at Lv.5 ("강함", forever — Lv.6 adds no new
+// tier and Lv.7~10 never exceed it), while the slot count keeps its
+// existing Lv.7~10 growth curve unchanged.
 function getHypnosisSuggestionLimits(level) {
   const clamped = Math.max(1, Number(level) || 1);
-  if (clamped >= 8) return { max_active: 4, available_strength: '깊은 최면' };
-  if (clamped >= 5) return { max_active: 3, available_strength: '강함' };
-  if (clamped >= 3) return { max_active: 2, available_strength: '중간' };
-  return { max_active: 1, available_strength: '약함' };
+  const availableStrength = clamped >= 5 ? '강함' : clamped >= 3 ? '중간' : '약함';
+  const maxActive = clamped >= 8 ? 4 : clamped >= 5 ? 3 : clamped >= 3 ? 2 : 1;
+  return { max_active: maxActive, available_strength: availableStrength };
 }
 
 // active_count sums every registered NPC's active personal suggestions, not
@@ -2379,13 +2460,13 @@ function calculateHypnosisCapability(save = {}, master = {}) {
     next_level_exp: nextLevelExp,
     available_strength: availableStrength,
     // Explicit per-tier flags instead of one ambiguous "can go deeper"
-    // boolean — Lv.3 unlocks 중간 but must still reject 강한/깊은 최면,
-    // which a single strengthRank>0 check couldn't distinguish.
+    // boolean — Lv.3 unlocks 중간 but must still reject 강한, which a
+    // single strengthRank>0 check couldn't distinguish. Only three tiers
+    // exist (no "깊은 최면"/deep) — see HYPNOSIS_STRENGTH_TIERS.
     max_strength_rank: maxStrengthRank,
     can_use_weak: true,
     can_use_medium: maxStrengthRank >= 1,
     can_use_strong: maxStrengthRank >= 2,
-    can_use_deep: maxStrengthRank >= 3,
     active_count: activeCount,
     max_active: maxActive,
     remaining_slots: remainingSlots,
@@ -2398,6 +2479,86 @@ function calculateHypnosisCapability(save = {}, master = {}) {
     csa_daily_used: csaDailyUsed,
     csa_daily_limit: csaLimits.daily_limit
   };
+}
+
+// Deterministic anchors the Worker can detect in the finalized narrative
+// text without needing its own separate strength judgment — Story is
+// instructed (buildStrengthPreJudgmentSection) to output this exact literal
+// text when it internally determines a request exceeds the current
+// strength ceiling. handleExtract then force-nullifies suggestion_action/
+// csa_action whenever the marker is present, so Extract's structured output
+// can never disagree with what was actually narrated (stage 4-B item 4:
+// "Worker가 판정 결과를 고정해 양쪽에 주입").
+const SUGGESTION_STRENGTH_EXCEEDED_MARKER = '[현재 단계의 암시 범위를 초과했습니다.]';
+const CSA_STRENGTH_EXCEEDED_MARKER = '[현재 단계에서 설정할 수 없는 상식입니다.]';
+
+// Stage 4-B item 4/5/10: Story judges required_strength internally (same
+// single generation pass — no separate pre-call, matching how this prompt
+// already handles other internal classifications like the A/B/C narrative-
+// length judgment) and, if it exceeds what's currently allowed, outputs the
+// fixed blocked-message format instead of narrating success. No public
+// success-probability percentage is ever produced by this contract.
+function buildStrengthPreJudgmentSection(capability) {
+  return `\n\n[암시·상식개변 사전 판정 — HARD CONSTRAINT]\n\n플레이어가 이번 턴에 최면 어플로 암시를 만들거나 바꾸거나 상식개변을 시도하면, 서사에서 성공을 서술하기 전에 다음을 먼저 내부적으로 판정한다(판정 이름표는 출력하지 않는다):\n1. 요청 내용이 실제로 요구하는 강도(약함/중간/강함)를 판단한다. 사용자가 스스로 "약하게"라고 말했어도 내용 자체가 더 강한 효과를 요구하면 실제 요구 강도를 따른다.\n2. 그 실제 요구 강도가 현재 사용 가능한 강도(${capability.available_strength})를 넘는지 확인한다.\n3. 넘으면 성공도 실패도 저항도 아닌 "범위 초과"로 처리한다 — 시도 자체가 무효다.\n\n[일반 암시 범위 초과 시 — 정확히 이 형식으로만 출력]\n서사에서 암시가 적용된 것처럼 서술하지 말고, 대신 다음 문단을 그대로 포함한다(괄호 안 강도명만 실제 상황에 맞게 채운다):\n\n${SUGGESTION_STRENGTH_EXCEEDED_MARKER}\n\n이 내용은 '(실제 필요 강도) 암시' 이상이 필요합니다.\n현재 사용할 수 있는 단계는 '(현재 사용 가능 강도) 암시'입니다.\n현재 단계의 예시를 확인해 주세요.\n\n[상식개변 범위 초과 시 — 정확히 이 형식으로만 출력]\n서사에서 상식개변이 적용된 것처럼 서술하지 말고, 대신 다음 문단을 그대로 포함한다:\n\n${CSA_STRENGTH_EXCEEDED_MARKER}\n\n입력한 내용은 '(실제 필요 강도) 상식개변' 이상이 필요합니다.\n현재 사용할 수 있는 단계는 '(현재 사용 가능 강도) 상식개변'입니다.\n어플 정보에서 현재 단계의 예시를 확인해 주세요.\n\n범위 초과로 처리한 턴에서는:\n- 암시나 상식개변이 적용된 것처럼 서술하지 않는다.\n- 활성 암시 목록, 슬롯, 경험치, NPC 수치를 변화시키지 않는다.\n- 최면 성공이나 실패로 기록하지 않는다 — 시도 자체가 애초에 유효하지 않았던 것으로 처리한다.\n- 공개된 성공 확률(%)을 절대 언급하지 않는다.\n- 같은 턴에서 플레이어가 문장을 바꿔 다시 시도할 수 있다.\n\n예시를 추천할 때는 rulebook_game_system에 저장된 현재 단계 예시 목록만 사용한다. 저장된 예시가 없으면 "현재 등록된 예시가 없습니다"처럼 안전하게 안내하고, 새 예시를 스스로 만들어내지 않는다.`;
+}
+
+// Stage 4-B item 3: weak suggestions were upgraded to allow visible
+// behavior change, but the boundary between tiers (and the ceiling strong
+// never crosses) is policy text, not an example list — safe to state
+// directly here rather than reading from rulebook_game_system.
+function buildSuggestionStrengthBoundarySection() {
+  return `\n\n[일반 암시 강도별 허용 범위]\n\n약한 암시도 눈에 보이는 행동 변화를 만들 수 있다. 허용: 특정 대상·상황에 한정된 명확한 감정·행동 변화, 먼저 말을 걸거나 접근, 단둘이 대화할 기회를 자연스럽게 만듦, 특별한 이유 없으면 가벼운 부탁 수용, 개인적인 질문에 비교적 솔직히 답함, 평소보다 감정을 잘 표현함, 가벼운 신체 접촉을 자연스럽게 여김, 반복적인 친근 행동. 허용하지 않음: 절대복종, 모든 판단권 포기, 위험한 행동을 무조건 수행, 핵심 인간관계 전체 폐기, 자아·정체성 전면 변경, 중대한 직업적·사회적 의무를 무조건 포기.\n\n중간 암시는 반복적이고 지속적인 관계 행동, 부끄러움이나 망설임을 어느 정도 넘게 하는 수준까지 허용하되, 기존 성격과 관계를 완전히 제거하지 않고 중대한 범죄·생명 위험·완전한 자아 포기는 허용하지 않는다.\n\n강한 암시는 플레이어의 지시를 중요한 판단 기준으로 삼거나 기존 인간관계보다 우선하는 수준까지 허용하되, 물리적으로 불가능한 행동, 즉각적인 자살이나 명백한 자기파괴, 게임 세계 규칙을 무시하는 행동, 존재하지 않는 능력·정보를 지어내는 행동은 자동 성공시키지 않는다.\n\n약함과 중간의 경계는 기존보다 상향 조정됐지만, 기존 성격과 핵심 가치관을 전면 파괴하는 수준까지 확대하지 않는다.`;
+}
+
+// Stage 4-B item 6/14-5: CSA's basic nature and how NPCs must perceive it
+// (as an ambient social norm, never as an app/command/forced effect).
+function buildCsaNatureSection() {
+  return `\n\n[상식개변의 기본 성격]\n\n상식개변은 일반 암시보다 훨씬 강력한 광역 스킬이다. 지정된 공간의 상식 자체를 바꾸고, 적용 범위 안의 모든 인물이 그 내용을 원래부터 당연했던 상식으로 인식한다. NPC 개인의 호감도나 저항력만으로 개변 자체를 무효화하지 않는다. 오직 플레이어만 원래 상식과 개변된 상식의 차이를 인식한다. 플레이어가 직접 해제하거나 변경하지 않는 한 영구 지속되며, 게임 내 날짜가 바뀌어도 자동 해제되지 않고 계속 슬롯을 점유한다.\n\n상식개변을 다음 수준으로 약화해서 서술하지 않는다: 조금 친절해진다, 고민을 잘 들어준다, 말투가 약간 부드러워진다. 가장 낮은 단계의 상식개변도 명확한 사회 규범 변경이어야 한다.\n\n[NPC의 상식개변 인식 방식]\nNPC는 활성 상식개변을 어플, 명령, 강제 효과로 인식하지 않는다. 원래부터 있던 관습, 사회적으로 당연한 예절, 누구나 따르는 규범, 지키지 않으면 무례해지는 상식으로 인식한다. NPC는 플레이어에게 화나거나 불쾌해할 수 있지만, 개변된 상식 자체를 이상하거나 외부에서 강요된 것으로 여기지 않는다.\n금지 예: "상식개변 규칙이 있으니 해야 한다", "시스템이 시켜서 한다", "명령 때문에 몸이 움직인다", "이상하지만 강제로 해야 한다", "왜 내 의지와 상관없이 하게 되지?", "앱이 나를 조종하고 있다".\n허용 예: "저 남자는 마음에 들지 않지만 기본적인 예의는 지켜야 한다", "불쾌해도 이 병동에서는 뺨에 입을 맞추며 감사하는 것이 상식이다", "개인적으로는 싫지만 이런 상황에서는 손을 잡아 주는 게 당연하다".`;
+}
+
+// Stage 4-B item 1/9/18: the tier example lists live only in Supabase
+// game_master.data.rulebook_game_system (populated separately, outside this
+// codebase) — never hardcoded here. Schema this code expects:
+//   rulebook_game_system.suggestion_examples: { weak: [...], medium: [...], strong: [...] }
+//   rulebook_game_system.csa_examples:        { weak: [...], medium: [...], strong: [...] }
+// Each list entry may be a plain string or { text, source } (source e.g.
+// "verified_v1_partial" / "v2_reconstructed" / "unavailable" — item 1's
+// optional provenance metadata); only .text is ever surfaced to the prompt.
+function readRulebookExampleTier(master, rulebookKey, tier) {
+  const rulebook = isPlainObject(master?.rulebook_game_system) ? master.rulebook_game_system : null;
+  const group = isPlainObject(rulebook?.[rulebookKey]) ? rulebook[rulebookKey] : null;
+  const list = Array.isArray(group?.[tier]) ? group[tier] : [];
+  return list
+    .map(item => typeof item === 'string' ? item.trim() : (isPlainObject(item) && typeof item.text === 'string' ? item.text.trim() : null))
+    .filter(Boolean);
+}
+
+const STRENGTH_TIER_KEYS = ['weak', 'medium', 'strong'];
+const STRENGTH_TIER_LABELS = { weak: '약함', medium: '중간', strong: '강함' };
+
+// Only the tiers currently unlocked are shown — a locked tier's examples
+// would just invite the model to reference a strength it can't use yet.
+// A tier with no stored examples renders as an explicit "no examples
+// registered" line instead of being silently omitted (so the model can
+// never mistake an empty list for "make something up").
+function buildExampleTierLines(master, rulebookKey, maxStrengthRank) {
+  return STRENGTH_TIER_KEYS
+    .filter((_, index) => index <= maxStrengthRank)
+    .map(tier => {
+      const list = readRulebookExampleTier(master, rulebookKey, tier);
+      const label = STRENGTH_TIER_LABELS[tier];
+      if (!list.length) return `${label}: 현재 등록된 예시가 없습니다.`;
+      return `${label}:\n${list.map(text => `- ${text}`).join('\n')}`;
+    })
+    .join('\n\n');
+}
+
+function buildSuggestionExampleSection(capability, master) {
+  return `\n\n[일반 암시 예시 — rulebook_game_system 제공]\n\n${buildExampleTierLines(master, 'suggestion_examples', capability.max_strength_rank)}\n\n위 목록에 없는 새 예시를 스스로 만들어내지 않는다. "현재 등록된 예시가 없습니다"로 표시된 단계는 그 안내 그대로 전달하고, 임의로 채워 넣지 않는다.`;
+}
+
+function buildCsaExampleSection(capability, master) {
+  return `\n\n[상식개변 예시 — rulebook_game_system 제공]\n\n${buildExampleTierLines(master, 'csa_examples', capability.max_strength_rank)}\n\n위 목록에 없는 새 예시를 스스로 만들어내지 않는다. "현재 등록된 예시가 없습니다"로 표시된 단계는 그 안내 그대로 전달하고, 임의로 채워 넣지 않는다.`;
 }
 
 // HARD CONSTRAINT block for the Story prompt: tells the model exactly which
@@ -2417,8 +2578,7 @@ function buildCurrentHypnosisCapabilitySection(capability) {
     can_disable_or_delete: canDisableOrDelete,
     can_increase_strength: canIncreaseStrength,
     can_use_medium: canUseMedium,
-    can_use_strong: canUseStrong,
-    can_use_deep: canUseDeep
+    can_use_strong: canUseStrong
   } = capability;
 
   const slotBan = !canCreateSuggestion
@@ -2427,7 +2587,6 @@ function buildCurrentHypnosisCapabilitySection(capability) {
   const tierBans = [];
   if (!canUseMedium) tierBans.push('중간 최면');
   if (!canUseStrong) tierBans.push('강한 최면');
-  if (!canUseDeep) tierBans.push('깊은 최면', '더 깊게');
   const strengthBan = tierBans.length
     ? `\n- 현재 사용 가능한 최면 강도는 "${availableStrength}"이 최고치이므로 [3. 선택지]에 다음 표현이 들어간 선택지를 만들지 마라: ${tierBans.join(', ')}.`
     : '';
@@ -2435,7 +2594,7 @@ function buildCurrentHypnosisCapabilitySection(capability) {
     ? `\n- 강도를 올릴 활성 암시가 없거나 이미 최고 강도이므로 "강화", "한 단계 올린다" 같은 표현이 들어간 선택지를 만들지 마라.`
     : '';
 
-  return `\n\n[CURRENT HYPNOSIS APP CAPABILITY — HARD CONSTRAINT]\n\n현재 레벨: Lv.${currentLevel}\n사용 가능한 최면 강도: ${availableStrength}\n암시 슬롯: 활성 ${activeCount} / 최대 ${maxActive} (남은 슬롯 ${remainingSlots})\n\n이번 턴 실제로 가능한 어플 행동:\n- 새 암시 생성: ${canCreateSuggestion ? '가능' : '불가능'}\n- 기존 암시를 현재 허용 강도 안에서 수정: ${canEditSameStrength ? '가능' : '불가능(활성 암시 없음)'}\n- 기존 암시 OFF 또는 삭제: ${canDisableOrDelete ? '가능' : '불가능(활성 암시 없음)'}\n- 기존 암시 강도 올리기: ${canIncreaseStrength ? '가능' : '불가능'}\n- 중간 강도 사용: ${canUseMedium ? '가능' : '불가능'}\n- 강한 강도 사용: ${canUseStrong ? '가능' : '불가능'}\n- 깊은 최면 사용: ${canUseDeep ? '가능' : '불가능'}\n${slotBan}${strengthBan}${increaseBan}\n- 슬롯이 가득 차 있어도 기존 암시를 같은 허용 강도 안에서 수정하거나 OFF/삭제하는 선택지는 항상 만들 수 있다.\n- 이미 활성 상태인 암시의 효과를 이용해 평범한 대화나 부탁을 하는 선택지는 항상 만들 수 있다. 단, 그 대화 자체를 암시 강화나 최면 심화로 표현하지 마라.\n- [3. 선택지] 네 개는 위 조건을 모두 만족해야 한다. 하나라도 위반하면 안 된다.`;
+  return `\n\n[CURRENT HYPNOSIS APP CAPABILITY — HARD CONSTRAINT]\n\n현재 레벨: Lv.${currentLevel}\n사용 가능한 최면 강도: ${availableStrength}\n암시 슬롯: 활성 ${activeCount} / 최대 ${maxActive} (남은 슬롯 ${remainingSlots})\n\n이번 턴 실제로 가능한 어플 행동:\n- 새 암시 생성: ${canCreateSuggestion ? '가능' : '불가능'}\n- 기존 암시를 현재 허용 강도 안에서 수정: ${canEditSameStrength ? '가능' : '불가능(활성 암시 없음)'}\n- 기존 암시 OFF 또는 삭제: ${canDisableOrDelete ? '가능' : '불가능(활성 암시 없음)'}\n- 기존 암시 강도 올리기: ${canIncreaseStrength ? '가능' : '불가능'}\n- 중간 강도 사용: ${canUseMedium ? '가능' : '불가능'}\n- 강한 강도 사용: ${canUseStrong ? '가능' : '불가능'}\n${slotBan}${strengthBan}${increaseBan}\n- 슬롯이 가득 차 있어도 기존 암시를 같은 허용 강도 안에서 수정하거나 OFF/삭제하는 선택지는 항상 만들 수 있다.\n- 이미 활성 상태인 암시의 효과를 이용해 평범한 대화나 부탁을 하는 선택지는 항상 만들 수 있다. 단, 그 대화 자체를 암시 강화나 최면 심화로 표현하지 마라.\n- [3. 선택지] 네 개는 위 조건을 모두 만족해야 한다. 하나라도 위반하면 안 된다.`;
 }
 
 // Pre-computed display text for [2. 플레이어 상황판]'s 최면 어플 요약 4줄 — the
@@ -2460,7 +2619,9 @@ const GENERIC_INCREASE_FORBIDDEN_PHRASES = ['강화', '한 단계 올린다', '�
 const TIER_NAME_FORBIDDEN_PHRASES = [
   { phrases: ['중간 최면'], allowedWhen: capability => capability.can_use_medium },
   { phrases: ['강한 최면'], allowedWhen: capability => capability.can_use_strong },
-  { phrases: ['깊은 최면', '더 깊게'], allowedWhen: capability => capability.can_use_deep }
+  // "깊은 최면"(deep) is not a real tier — a choice naming it is always
+  // infeasible, regardless of level.
+  { phrases: ['깊은 최면', '더 깊게'], allowedWhen: () => false }
 ];
 
 function findInfeasibleChoices(choices, capability) {
@@ -2505,7 +2666,6 @@ ${(narrativeText || '').slice(-1500)}
 새 암시 생성 가능: ${capability.can_create_suggestion ? '가능' : '불가능'}
 중간 강도 사용 가능: ${capability.can_use_medium ? '가능' : '불가능'}
 강한 강도 사용 가능: ${capability.can_use_strong ? '가능' : '불가능'}
-깊은 최면 사용 가능: ${capability.can_use_deep ? '가능' : '불가능'}
 
 [방금 실패한 선택지와 이유]
 ${reasonLines}
@@ -3571,6 +3731,16 @@ export {
   findProfessionRankErrors,
   hasRoleWordNearName,
   buildAddressAbbreviationSection,
+  SUGGESTION_STRENGTH_EXCEEDED_MARKER,
+  CSA_STRENGTH_EXCEEDED_MARKER,
+  buildStrengthPreJudgmentSection,
+  buildSuggestionStrengthBoundarySection,
+  buildCsaNatureSection,
+  readRulebookExampleTier,
+  buildSuggestionExampleSection,
+  buildCsaExampleSection,
+  resolveCsaDailyReset,
+  currentUtcDateString,
   findUnregisteredNamedIndividualsInNarrative,
   findUnregisteredDialogueSpeakers,
   deriveChoiceNamedTargets,

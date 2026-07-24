@@ -37,8 +37,13 @@ const ui = {
   setLoading(active, label = '처리 중') {
     this.els.loading.classList.toggle('active', active);
     this.els.loading.textContent = label;
-    this.els.chatSend.disabled = active;
-    this.els.chatInput.disabled = active;
+    // An outer caller's own loading spinner clearing (e.g. retryStory's
+    // finally running after retryExtract already returned) must not
+    // silently re-enable input while a failed-turn retry/discard lock
+    // (state.inputLocked) is in effect.
+    const locked = typeof state !== 'undefined' && state.inputLocked;
+    this.els.chatSend.disabled = active || locked;
+    this.els.chatInput.disabled = active || locked;
     if (active) {
       requestAnimationFrame(() => {
         this.scrollToBottom();
@@ -160,6 +165,11 @@ const ui = {
     });
   },
 
+  setChatInputEnabled(enabled) {
+    this.els.chatInput.disabled = !enabled;
+    this.els.chatSend.disabled = !enabled;
+  },
+
   showRetryNotice(text, actionLabel, onRetry, blocking = true) {
     const div = document.createElement('div');
     div.className = 'narrative';
@@ -171,6 +181,58 @@ const ui = {
     button.addEventListener('click', onRetry, { once: true });
     div.appendChild(button);
     this.els.storyStream.appendChild(div);
+    this.scrollToBottom();
+  },
+
+  // Same shape as showRetryNotice but supports more than one action button —
+  // used when the user must make a real choice (retry vs. discard) rather
+  // than just acknowledging a single retry.
+  showActionNotice(text, actions) {
+    const div = document.createElement('div');
+    div.className = 'narrative';
+    div.style.color = 'var(--warning)';
+    div.textContent = text + ' ';
+    actions.forEach(({ label, onClick }) => {
+      const button = document.createElement('button');
+      button.className = 'choice-btn';
+      button.style.marginRight = '8px';
+      button.textContent = label;
+      button.addEventListener('click', onClick, { once: true });
+      div.appendChild(button);
+    });
+    this.els.storyStream.appendChild(div);
+    this.scrollToBottom();
+  },
+
+  // Flags the most recently finalized narrative as not yet committed —
+  // called only after a downstream step (Extract) fails, never eagerly,
+  // so a normal successful turn never shows this badge even briefly.
+  markLastNarrativeUncommitted() {
+    const narratives = [...this.els.storyStream.querySelectorAll('.narrative')];
+    const target = narratives[narratives.length - 1];
+    if (!target || target.querySelector('.uncommitted-badge')) return;
+    const badge = document.createElement('div');
+    badge.className = 'uncommitted-badge';
+    badge.style.color = 'var(--warning)';
+    badge.style.fontWeight = 'bold';
+    badge.style.marginBottom = '4px';
+    badge.textContent = '⚠️ 이 서사는 아직 저장(Commit)되지 않았습니다';
+    target.insertBefore(badge, target.firstChild);
+  },
+
+  clearUncommittedNarrativeBadges() {
+    this.els.storyStream.querySelectorAll('.uncommitted-badge').forEach(node => node.remove());
+  },
+
+  // Appends a short repair addition (e.g. a missed forced CSA action) to the
+  // already-finalized narrative div, rather than starting a new block —
+  // this text becomes part of the same committed turn.
+  appendToLastNarrative(text) {
+    if (!text) return;
+    const narratives = [...this.els.storyStream.querySelectorAll('.narrative')];
+    const target = narratives[narratives.length - 1];
+    if (!target) return;
+    target.textContent = `${target.textContent}\n\n${text}`;
     this.scrollToBottom();
   },
 

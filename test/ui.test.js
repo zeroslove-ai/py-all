@@ -25,9 +25,13 @@ test('sidebar resume button and slash command share resumeGame without turn APIs
   assert.match(sidebarSource, /window\.showAppInfo/);
   assert.match(sidebarSource, /window\.resumeGame/);
   assert.match(pageSource, /command === '\/플레이'[\s\S]*?await resumeGame\(\)/);
-  const resume = pageSource.match(/async function resumeGame\(\)[\s\S]*?\n    }\n\n    async function startPlayerSetup/)?.[0] || '';
-  assert.match(resume, /loadGameContext\(\)/);
-  assert.match(resume, /restoreLastTurn\(\)/);
+  // resumeGame delegates the actual load+restore logic to a shared helper
+  // (also used by discardFailedTurn) rather than duplicating it.
+  const restore = pageSource.match(/async function restoreToLastCommittedTurn\(message\)[\s\S]*?\n    }/)?.[0] || '';
+  assert.match(restore, /loadGameContext\(\)/);
+  assert.match(restore, /restoreLastTurn\(\)/);
+  assert.doesNotMatch(restore, /stream\.story|api\.extract|api\.commitTurn/);
+  const resume = pageSource.match(/async function resumeGame\(\)[\s\S]*?\n    }/)?.[0] || '';
   assert.doesNotMatch(resume, /stream\.story|api\.extract|api\.commitTurn/);
 });
 
@@ -99,7 +103,7 @@ test('extract failure surfaces error_code and request_id to the user without lea
   const retryExtract = pageSource.match(/async function retryExtract\(pending\)[\s\S]*?\n    }/)?.[0] || '';
   assert.match(retryExtract, /error\.details\?\.error_code/);
   assert.match(retryExtract, /error\.details\?\.request_id/);
-  assert.match(retryExtract, /showRetryNotice/);
+  assert.match(retryExtract, /showActionNotice/);
   assert.doesNotMatch(retryExtract, /DEEPSEEK_API_KEY|SUPABASE_SECRET_KEY/);
   assert.doesNotMatch(retryExtract, /\braw\b/);
 
@@ -110,6 +114,30 @@ test('extract failure surfaces error_code and request_id to the user without lea
   const retryStory = pageSource.match(/async function retryStory\(pending\)[\s\S]*?\n    }/)?.[0] || '';
   assert.match(retryStory, /error\.status/);
   assert.match(retryStory, /error\.requestId/);
+});
+
+test('an Extract failure locks the choice buttons and chat input, offers retry and discard, and flags the narrative as uncommitted', () => {
+  const retryExtract = pageSource.match(/async function retryExtract\(pending\)[\s\S]*?\n    }/)?.[0] || '';
+  assert.match(retryExtract, /ui\.markLastNarrativeUncommitted\(\)/);
+  assert.match(retryExtract, /상태 분석 다시 시도/);
+  assert.match(retryExtract, /이번 서사 버리고 이전 턴으로 돌아가기/);
+  assert.match(retryExtract, /discardFailedTurn\(\)/);
+  assert.match(retryExtract, /ui\.setChoicesEnabled\(false\)/);
+  assert.match(retryExtract, /state\.inputLocked = true/);
+  assert.match(retryExtract, /아직 저장되지 않았습니다/);
+
+  const discardFn = pageSource.match(/async function discardFailedTurn\(\)[\s\S]*?\n    }/)?.[0] || '';
+  assert.match(discardFn, /restoreToLastCommittedTurn/);
+  assert.match(discardFn, /state\.inputLocked = false/);
+  assert.match(discardFn, /ui\.setChatInputEnabled/);
+
+  assert.match(uiSource, /showActionNotice\(text, actions\)/);
+  assert.match(uiSource, /markLastNarrativeUncommitted\(\)/);
+  assert.match(uiSource, /setChatInputEnabled\(enabled\)/);
+  // setLoading(false) must not silently override the failure lock —
+  // this is what actually keeps retryStory's own redundant setLoading(false)
+  // (called right after retryExtract returns) from re-enabling input.
+  assert.match(uiSource, /setLoading\(active, label = '처리 중'\)[\s\S]*?state\.inputLocked/);
 });
 
 test('api.js routes context/extract/image/reset through readApiResponse so ApiError carries error_code and request_id', () => {
@@ -127,10 +155,17 @@ test('api.js routes context/extract/image/reset through readApiResponse so ApiEr
 });
 
 test('resumeGame uses save.last_choices, not active_suggestions, for the restored choice list', () => {
-  const resume = pageSource.match(/async function resumeGame\(\)[\s\S]*?\n    }\n\n    async function startPlayerSetup/)?.[0] || '';
-  assert.match(resume, /state\.context\?\.save\?\.last_choices/);
-  assert.doesNotMatch(resume, /state\.context\?\.save\?\.active_suggestions/);
-  assert.match(resume, /ui\.parseChoices/);
+  // resumeGame and discardFailedTurn both delegate to this shared helper —
+  // the actual last_choices/parseChoices logic lives there now, not
+  // duplicated in either caller.
+  const restore = pageSource.match(/async function restoreToLastCommittedTurn\(message\)[\s\S]*?\n    }/)?.[0] || '';
+  assert.match(restore, /state\.context\?\.save\?\.last_choices/);
+  assert.doesNotMatch(restore, /state\.context\?\.save\?\.active_suggestions/);
+  assert.match(restore, /ui\.parseChoices/);
+
+  const resume = pageSource.match(/async function resumeGame\(\)[\s\S]*?\n    }/)?.[0] || '';
+  assert.match(resume, /restoreToLastCommittedTurn/);
+  assert.doesNotMatch(resume, /stream\.story|api\.extract|api\.commitTurn/);
 });
 
 test('showAppInfo renders active_suggestions as a per-NPC structured map, not a flat array', () => {

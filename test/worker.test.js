@@ -34,6 +34,7 @@ import {
   normalizeLegacyActiveSuggestions,
   applySuggestionAction,
   buildActiveSuggestionSection,
+  buildAppSystemRulesSection,
   buildActiveSuggestionPanelText,
   buildCsaPanelText,
   calculateHypnosisCapability,
@@ -42,6 +43,10 @@ import {
   buildCurrentHypnosisCapabilitySection,
   buildHypnosisStatusPanelData,
   findInfeasibleChoices,
+  getApplicableCsaEntries,
+  buildCsaApplicationCheckSection,
+  stripBoldMarkers,
+  findUnregisteredChoiceTargets,
   hasLegacyEncounterEvidence,
   resolveIsSexual,
   normalizeImagePool,
@@ -2932,6 +2937,314 @@ test('/api/extract does not call the repair path when every choice is already fe
   } finally {
     globalThis.fetch = originalFetch;
   }
+});
+
+// ─────────────────────────────────────────────
+// Live-turn error fixes: Extract JSON recovery, CSA enforcement,
+// suggestion scope, ** stripping, unregistered-NPC choice targets
+// ─────────────────────────────────────────────
+
+const VALID_NPC_EMOTION = {
+  surface: '“낯선 사람이라 조금 긴장되지만 티를 내지 말자. 우선 평소처럼 침착하게 내 할 일부터 하며 신분을 확인하자.”',
+  inner: '“왜 이렇게 자꾸 신경이 쓰이는지 나도 모르겠다. 경계해야 하는데 자꾸 시선이 가고 마음이 흔들린다.”',
+  physical_reaction: '그녀는 옷깃을 매만지며 시선을 살짝 피한다. 짧게 숨을 고른 뒤 낮은 목소리로 대답한다.'
+};
+
+test('parseJsonContent recovers a JSON object surrounded by stray prose by slicing first { to last }', () => {
+  assert.deepEqual(parseJsonContent('여기 결과입니다:\n{"a":1,"b":"x"}\n감사합니다.'), { a: 1, b: 'x' });
+  assert.deepEqual(parseJsonContent('```json\n{"a":2}\n```'), { a: 2 });
+  assert.deepEqual(parseJsonContent('{"a":3}'), { a: 3 });
+  assert.throws(() => parseJsonContent('there is no object here at all'));
+});
+
+test('/api/extract falls back to a one-shot JSON repair call after both full attempts stay unparseable, without regenerating the narrative', async () => {
+  const originalFetch = globalThis.fetch;
+  const deepseekCalls = [];
+  globalThis.fetch = async (url, init = {}) => {
+    const requestUrl = String(url);
+    if (requestUrl.includes('/rpc/get_extract_context')) {
+      return new Response(JSON.stringify({
+        turn_count: 1,
+        master: { characters: { heroine1: { name: '한소영' } } },
+        save: {}
+      }), { headers: { 'content-type': 'application/json' } });
+    }
+    if (requestUrl.includes('/rpc/get_image_catalog_for_characters')) {
+      return new Response(JSON.stringify([]), { headers: { 'content-type': 'application/json' } });
+    }
+    if (requestUrl.includes('api.deepseek.com')) {
+      deepseekCalls.push(JSON.parse(init.body));
+      if (deepseekCalls.length <= 2) {
+        // Both full extraction attempts return garbage with no { at all.
+        return new Response(JSON.stringify({
+          choices: [{ message: { content: 'sorry, here is some broken output with no object' }, finish_reason: 'stop' }]
+        }), { headers: { 'content-type': 'application/json' } });
+      }
+      // The dedicated repair call fixes just the syntax.
+      return new Response(JSON.stringify({
+        choices: [{ message: { content: JSON.stringify({
+          character_id: 'heroine1', npcs_present: ['heroine1'],
+          npc_emotion: VALID_NPC_EMOTION,
+          choices: ['평소처럼 인계를 진행한다', '한소영에게 안부를 묻는다', '자리를 정리한다', '다음 병실로 이동한다']
+        }) }, finish_reason: 'stop' }]
+      }), { headers: { 'content-type': 'application/json' } });
+    }
+    throw new Error(`unexpected fetch: ${requestUrl}`);
+  };
+  try {
+    const response = await worker.fetch(apiRequest('/api/extract', {
+      game_id: 'test-game', narrative_text: '한소영이 응대했다.', player_input: '한소영에게 말을 건다'
+    }), { DEEPSEEK_API_KEY: 'test' });
+    assert.equal(response.status, 200);
+    const body = await response.json();
+    assert.equal(deepseekCalls.length, 3);
+    assert.equal(body.json_repaired, true);
+    assert.equal(body.extract.character_id, 'heroine1');
+    assert.deepEqual(body.extract.choices, ['평소처럼 인계를 진행한다', '한소영에게 안부를 묻는다', '자리를 정리한다', '다음 병실로 이동한다']);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('/api/extract still returns EXTRACT_JSON_PARSE_FAILED when even the repair call fails to produce valid JSON', async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (url, init = {}) => {
+    const requestUrl = String(url);
+    if (requestUrl.includes('/rpc/get_extract_context')) {
+      return new Response(JSON.stringify({ turn_count: 1, master: { characters: {} }, save: {} }), { headers: { 'content-type': 'application/json' } });
+    }
+    if (requestUrl.includes('/rpc/get_image_catalog_for_characters')) {
+      return new Response(JSON.stringify([]), { headers: { 'content-type': 'application/json' } });
+    }
+    if (requestUrl.includes('api.deepseek.com')) {
+      return new Response(JSON.stringify({
+        choices: [{ message: { content: 'still not json, no braces anywhere' }, finish_reason: 'stop' }]
+      }), { headers: { 'content-type': 'application/json' } });
+    }
+    throw new Error(`unexpected fetch: ${requestUrl}`);
+  };
+  try {
+    const response = await worker.fetch(apiRequest('/api/extract', {
+      game_id: 'test-game', narrative_text: '텍스트', player_input: ''
+    }), { DEEPSEEK_API_KEY: 'test' });
+    assert.equal(response.status, 502);
+    const body = await response.json();
+    assert.equal(body.error_code, 'EXTRACT_JSON_PARSE_FAILED');
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('getApplicableCsaEntries / buildCsaApplicationCheckSection restrict to in-scope active CSAs and state the forced-rule framing', () => {
+  const save = {
+    world_state: { building: 'seoul_central_hospital', floor: 'hospital_floor_3', ward: 'hospital_3ward' },
+    csa_active: [
+      { id: 'csa_1', content: '1문장을 말할 때마다 볼뽀뽀', scope_type: 'ward', scope_id: 'hospital_3ward', active: true },
+      { id: 'csa_2', content: '6병동 전용 상식', scope_type: 'ward', scope_id: 'hospital_6ward', active: true },
+      { id: 'csa_3', content: '해제된 상식', scope_type: 'ward', scope_id: 'hospital_3ward', active: false }
+    ]
+  };
+  const applicable = getApplicableCsaEntries(save);
+  assert.deepEqual(applicable.map(csa => csa.id), ['csa_1']);
+
+  const section = buildCsaApplicationCheckSection(save);
+  assert.match(section, /\[CSA APPLICATION CHECK CONTRACT\]/);
+  assert.match(section, /\(csa_1\) 1문장을 말할 때마다 볼뽀뽀/);
+  assert.doesNotMatch(section, /csa_2|csa_3/);
+  assert.equal(buildCsaApplicationCheckSection({ csa_active: [] }), '');
+
+  const promptSection = buildApplicableCsaSection(save);
+  assert.match(promptSection, /HARD CONSTRAINT, NOT REFERENCE INFO/);
+  assert.match(promptSection, /단순 배경 설정이 아니라 이번 턴 서사에서 실제로 집행해야 하는 강제 규칙/);
+  assert.match(promptSection, /조건을 충족하는 등록 NPC 전원에게 예외 없이 동일하게 적용/);
+});
+
+test('/api/extract triggers a CSA-omission repair that only appends a short continuation, never rewriting the narrative', async () => {
+  const originalFetch = globalThis.fetch;
+  const deepseekCalls = [];
+  globalThis.fetch = async (url, init = {}) => {
+    const requestUrl = String(url);
+    if (requestUrl.includes('/rpc/get_extract_context')) {
+      return new Response(JSON.stringify({
+        turn_count: 5,
+        master: { characters: { heroine5: { name: '김지은' } } },
+        save: {
+          player: { name: '금태양', job: '간호사' },
+          player_setup: { status: 'complete' },
+          opening_started: true,
+          world_state: { ward: 'hospital_3ward' },
+          csa_active: [{ id: 'csa_9', content: '1문장을 말할 때마다 볼뽀뽀', scope_type: 'ward', scope_id: 'hospital_3ward', active: true }]
+        }
+      }), { headers: { 'content-type': 'application/json' } });
+    }
+    if (requestUrl.includes('/rpc/get_image_catalog_for_characters')) {
+      return new Response(JSON.stringify([]), { headers: { 'content-type': 'application/json' } });
+    }
+    if (requestUrl.includes('api.deepseek.com')) {
+      const body = JSON.parse(init.body);
+      deepseekCalls.push(body);
+      if (deepseekCalls.length === 1) {
+        return new Response(JSON.stringify({
+          choices: [{ message: { content: JSON.stringify({
+            character_id: 'heroine5', npcs_present: ['heroine5'],
+            npc_emotion: VALID_NPC_EMOTION,
+            csa_omission: ['김지은이 여러 문장을 말했지만 볼뽀뽀가 한 번도 실행되지 않음'],
+            choices: ['김지은과 계속 대화한다', '다른 화제를 꺼낸다', '자리를 옮긴다', '병동을 둘러본다']
+          }) }, finish_reason: 'stop' }]
+        }), { headers: { 'content-type': 'application/json' } });
+      }
+      return new Response(JSON.stringify({
+        choices: [{ message: { content: JSON.stringify({ addition: '말을 마치자마자 그녀의 볼에 가볍게 입을 맞춘다.' }) }, finish_reason: 'stop' }]
+      }), { headers: { 'content-type': 'application/json' } });
+    }
+    throw new Error(`unexpected fetch: ${requestUrl}`);
+  };
+  try {
+    const response = await worker.fetch(apiRequest('/api/extract', {
+      game_id: 'test-game', narrative_text: '김지은이 여러 문장을 말했다.', player_input: '계속 대화한다'
+    }), { DEEPSEEK_API_KEY: 'test' });
+    assert.equal(response.status, 200);
+    const body = await response.json();
+    assert.equal(deepseekCalls.length, 2);
+    assert.equal(body.content_addition, '말을 마치자마자 그녀의 볼에 가볍게 입을 맞춘다.');
+    assert.deepEqual(body.extract.choices, ['김지은과 계속 대화한다', '다른 화제를 꺼낸다', '자리를 옮긴다', '병동을 둘러본다']);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('buildAppSystemRulesSection scopes personal suggestions to their literal stored content and bans auto-reinforcement phrases', () => {
+  const section = buildAppSystemRulesSection();
+  assert.match(section, /저장된 content 문장이 문자 그대로 허용하는 반응만 강화한다/);
+  assert.match(section, /포옹 허용, 친밀감 자동 상승, 모든 부탁의 무조건 수락으로 확대하지 않는다/);
+  assert.match(section, /완전히 자리 잡았다/);
+  assert.match(section, /더 깊이 스며들었다/);
+  assert.match(section, /무의식에 강하게 남았다/);
+});
+
+test('stripBoldMarkers removes ** markers while preserving names and dialogue text', () => {
+  assert.equal(
+    stripBoldMarkers('**한소영** (미소를 지으며): "괜찮으세요?"'),
+    '한소영 (미소를 지으며): "괜찮으세요?"'
+  );
+  assert.equal(stripBoldMarkers('마크다운 없는 평범한 문장'), '마크다운 없는 평범한 문장');
+  assert.equal(stripBoldMarkers(undefined), undefined);
+  assert.equal(stripBoldMarkers(null), null);
+});
+
+test('/api/commit-turn strips ** from content and choices before persisting, keeping names and dialogue intact', async () => {
+  const originalFetch = globalThis.fetch;
+  let committedContent = null;
+  let committedPatch = null;
+  globalThis.fetch = async (url, init = {}) => {
+    const requestUrl = String(url);
+    if (requestUrl.includes('/rpc/get_commit_context')) {
+      return new Response(JSON.stringify({ turn_count: 5, master: { characters: {} }, save: {} }), { headers: { 'content-type': 'application/json' } });
+    }
+    if (requestUrl.includes('/rpc/get_image_catalog_for_characters')) {
+      return new Response(JSON.stringify([]), { headers: { 'content-type': 'application/json' } });
+    }
+    if (requestUrl.includes('/rpc/commit_turn')) {
+      const body = JSON.parse(init.body);
+      committedContent = body.p_content;
+      committedPatch = body.p_patch;
+      return new Response(JSON.stringify({ status: 'committed', turn_count: 6 }), { headers: { 'content-type': 'application/json' } });
+    }
+    throw new Error(`unexpected fetch: ${requestUrl}`);
+  };
+  try {
+    const response = await worker.fetch(apiRequest('/api/commit-turn', {
+      game_id: 'test-game', turn_number: 6,
+      content: '**한소영** (미소): "안녕하세요." 그녀가 다가온다.',
+      extract: { character_id: 'narrator', choices: ['**한소영**에게 인사한다', '자리를 옮긴다', '기다린다', '떠난다'] }
+    }), { SUPABASE_SECRET_KEY: 'test' });
+    assert.equal(response.status, 200);
+    assert.equal(committedContent, '한소영 (미소): "안녕하세요." 그녀가 다가온다.');
+    assert.deepEqual(committedPatch.last_choices, ['한소영에게 인사한다', '자리를 옮긴다', '기다린다', '떠난다']);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('findUnregisteredChoiceTargets flags a choice naming someone outside master.characters, leaves a registered name alone', () => {
+  const characters = { heroine1: { name: '한소영' } };
+  const choices = ['이주연 대리에게 물어본다', '한소영에게 인사한다', '자리를 정리한다', '병동을 둘러본다'];
+  const targets = [
+    { choice_index: 0, name: '이주연' },
+    { choice_index: 1, name: '한소영' }
+  ];
+  const problems = findUnregisteredChoiceTargets(choices, targets, characters);
+  assert.equal(problems.length, 1);
+  assert.equal(problems[0].name, '이주연');
+  assert.equal(problems[0].choice, '이주연 대리에게 물어본다');
+});
+
+test('findUnregisteredChoiceTargets returns [] when there are no named targets or the array is empty', () => {
+  assert.deepEqual(findUnregisteredChoiceTargets(['그냥 대화한다'], [], { heroine1: { name: '한소영' } }), []);
+  assert.deepEqual(findUnregisteredChoiceTargets(['그냥 대화한다'], undefined, {}), []);
+});
+
+test('/api/extract repairs choices that name an unregistered person as a direct interaction target', async () => {
+  const originalFetch = globalThis.fetch;
+  const deepseekCalls = [];
+  globalThis.fetch = async (url, init = {}) => {
+    const requestUrl = String(url);
+    if (requestUrl.includes('/rpc/get_extract_context')) {
+      return new Response(JSON.stringify({
+        turn_count: 5,
+        master: { characters: { heroine1: { name: '한소영' } } },
+        save: { player: { name: '금태양', job: '간호사' }, player_setup: { status: 'complete' }, opening_started: true }
+      }), { headers: { 'content-type': 'application/json' } });
+    }
+    if (requestUrl.includes('/rpc/get_image_catalog_for_characters')) {
+      return new Response(JSON.stringify([]), { headers: { 'content-type': 'application/json' } });
+    }
+    if (requestUrl.includes('api.deepseek.com')) {
+      const body = JSON.parse(init.body);
+      deepseekCalls.push(body);
+      if (deepseekCalls.length === 1) {
+        return new Response(JSON.stringify({
+          choices: [{ message: { content: JSON.stringify({
+            character_id: 'narrator', npcs_present: [],
+            choice_named_targets: [{ choice_index: 0, name: '이주연' }],
+            choices: ['이주연 대리에게 물어본다', '한소영에게 인사한다', '자리를 정리한다', '병동을 둘러본다']
+          }) }, finish_reason: 'stop' }]
+        }), { headers: { 'content-type': 'application/json' } });
+      }
+      return new Response(JSON.stringify({
+        choices: [{ message: { content: JSON.stringify({
+          choices: ['같은 과 동료에게 물어본다', '한소영에게 인사한다', '자리를 정리한다', '병동을 둘러본다']
+        }) }, finish_reason: 'stop' }]
+      }), { headers: { 'content-type': 'application/json' } });
+    }
+    throw new Error(`unexpected fetch: ${requestUrl}`);
+  };
+  try {
+    const response = await worker.fetch(apiRequest('/api/extract', {
+      game_id: 'test-game', narrative_text: '이주연 대리가 다가온다.', player_input: ''
+    }), { DEEPSEEK_API_KEY: 'test' });
+    assert.equal(response.status, 200);
+    const body = await response.json();
+    assert.equal(deepseekCalls.length, 2);
+    assert.equal(body.unregistered_npc_choices_repaired, true);
+    assert.deepEqual(body.extract.choices, ['같은 과 동료에게 물어본다', '한소영에게 인사한다', '자리를 정리한다', '병동을 둘러본다']);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('the Story prompt reminds, only for normal/opening turns, that direct-interaction choice targets must be registered NPCs', () => {
+  const save = {
+    player: { name: '금태양', job: '간호사' },
+    player_setup: { status: 'complete' },
+    opening_started: true
+  };
+  const prompt = buildStoryPrompt({ master: { characters: {} }, save, recent_memories: [] }, '계속', 5);
+  assert.match(prompt.messages[0].content, /\[REMINDER — REGISTERED NPC CHOICE TARGETS\]/);
+  assert.match(prompt.messages[0].content, /미등록 의사·간호사·환자·보호자·직원·동료는 이름 없는 배경 인물로만/);
+
+  const setupPrompt = buildStoryPrompt({ master: { characters: {} }, save: { player: {} }, recent_memories: [] }, '계속', 0);
+  assert.doesNotMatch(setupPrompt.messages[0].content, /\[REMINDER — REGISTERED NPC CHOICE TARGETS\]/);
 });
 
 // ─────────────────────────────────────────────

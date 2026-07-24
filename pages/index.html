@@ -557,24 +557,45 @@
     }
 
     async function retryExtract(pending) {
-      state.isStreaming = true; ui.setLoading(true, '상태 분석 중');
+      state.isStreaming = true;
+      state.inputLocked = false;
+      ui.setLoading(true, '상태 분석 중');
+      ui.clearUncommittedNarrativeBadges();
+      let failed = false;
       try {
         const result = await api.extract(state.gameId, pending.narrative, pending.nextTurn, pending.input);
         console.info('[extract-timing]', result.timing);
         pending.extract = result.extract;
         pending.timing = { ...(pending.timing || {}), extract: result.timing };
         ui.removeTrailingChoiceBlock(pending.extract.choices);
+        if (result.content_addition) {
+          pending.narrative = `${pending.narrative}\n\n${result.content_addition}`;
+          ui.appendToLastNarrative(result.content_addition);
+        }
         await retryCommit(pending);
       } catch (error) {
+        failed = true;
         const code = error.details?.error_code || error.status || 'UNKNOWN';
         const requestId = error.details?.request_id;
         const suffix = requestId ? ` · 요청 ${requestId}` : '';
-        ui.showRetryNotice(
-          `서사는 생성되었지만 상태 분석에 실패했습니다. [${code}]${suffix}`,
-          '상태 분석 다시 시도',
-          () => retryExtract(pending)
+        ui.markLastNarrativeUncommitted();
+        ui.showActionNotice(
+          `서사는 생성되었지만 상태 분석에 실패했습니다. [${code}]${suffix} 이 서사는 아직 저장되지 않았습니다.`,
+          [
+            { label: '상태 분석 다시 시도', onClick: () => retryExtract(pending) },
+            { label: '이번 서사 버리고 이전 턴으로 돌아가기', onClick: () => discardFailedTurn() }
+          ]
         );
-      } finally { state.isStreaming = false; ui.setLoading(false); }
+      } finally {
+        state.isStreaming = false;
+        // Set before setLoading(false) — and stays set through it — so that
+        // retryStory's own finally (which also calls ui.setLoading(false)
+        // right after this function returns) can't silently re-enable the
+        // input out from under a still-unresolved failure notice.
+        if (failed) state.inputLocked = true;
+        ui.setLoading(false);
+        if (failed) ui.setChoicesEnabled(false);
+      }
     }
 
     async function retryCommit(pending) {
@@ -652,20 +673,44 @@
       handleTurnInput();
     }
 
+    // Reloads the server's last-committed state and re-renders it — since
+    // nothing about the in-progress turn was ever committed, this is both
+    // "resume" (nothing pending) and "discard the failed turn" (something
+    // pending that never made it to the DB) at once.
+    async function restoreToLastCommittedTurn(message) {
+      await loadGameContext();
+      restoreLastTurn();
+      const savedChoices = Array.isArray(state.context?.save?.last_choices) ? state.context.save.last_choices : [];
+      const choices = savedChoices.length ? savedChoices : ui.parseChoices(state.context?.recent_memories?.at(-1)?.content || '');
+      const setup = state.context?.save?.player_setup?.status !== 'complete';
+      ui.renderGameplayChoices(choices, submitChoice, { setup });
+      ui.showSystemMessage(message);
+    }
+
     async function resumeGame() {
       const button = document.getElementById('resume-game-button');
       if (state.isStreaming) return;
       if (button) button.disabled = true;
       try {
-        await loadGameContext();
-        restoreLastTurn();
-        const savedChoices = Array.isArray(state.context?.save?.last_choices) ? state.context.save.last_choices : [];
-        const choices = savedChoices.length ? savedChoices : ui.parseChoices(state.context?.recent_memories?.at(-1)?.content || '');
-        const setup = state.context?.save?.player_setup?.status !== 'complete';
-        ui.renderGameplayChoices(choices, submitChoice, { setup });
-        ui.showSystemMessage('현재 게임을 이어서 진행합니다.');
+        await restoreToLastCommittedTurn('현재 게임을 이어서 진행합니다.');
       } finally {
         if (button) button.disabled = false;
+      }
+    }
+
+    // The "discard" side of the Extract-failure choice: the failed
+    // narrative was never committed, so reloading the server's truth and
+    // dropping the local uncommitted DOM state is sufficient to undo it.
+    async function discardFailedTurn() {
+      if (state.isStreaming) return;
+      state.isStreaming = true;
+      state.inputLocked = false;
+      ui.setChatInputEnabled(false);
+      try {
+        await restoreToLastCommittedTurn('실패한 서사를 취소하고 이전 턴으로 돌아갔습니다.');
+      } finally {
+        state.isStreaming = false;
+        ui.setChatInputEnabled(true);
       }
     }
 

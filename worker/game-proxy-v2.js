@@ -84,15 +84,21 @@ async function fetchWithTimeout(url, init, timeoutMs) {
   }
 }
 
+// Tries, in order: the raw text as-is, a legacy ```json code-fenced block,
+// then a first-{-to-last-} slice (handles stray prose before/after an
+// otherwise-valid object). Only throws once every strategy fails.
 function parseJsonContent(rawText) {
   const trimmed = typeof rawText === 'string' ? rawText.trim() : '';
-  try {
-    return JSON.parse(trimmed);
-  } catch {
-    const jsonMatch = trimmed.match(/```json\s*([\s\S]*?)\s*```/i) || trimmed.match(/```\s*([\s\S]*?)\s*```/);
-    if (jsonMatch) return JSON.parse(jsonMatch[1]);
-    throw new Error('JSON parse failed');
+  const candidates = [trimmed];
+  const fenceMatch = trimmed.match(/```json\s*([\s\S]*?)\s*```/i) || trimmed.match(/```\s*([\s\S]*?)\s*```/);
+  if (fenceMatch) candidates.push(fenceMatch[1]);
+  const first = trimmed.indexOf('{');
+  const last = trimmed.lastIndexOf('}');
+  if (first !== -1 && last > first) candidates.push(trimmed.slice(first, last + 1));
+  for (const candidate of candidates) {
+    try { return JSON.parse(candidate); } catch {}
   }
+  throw new Error('JSON parse failed');
 }
 
 const RETRYABLE_HTTP_STATUS = new Set([429, 500, 502, 503, 504]);
@@ -369,6 +375,30 @@ async function repairMindMonitor(env, characterName, characterStyle, narrativeTe
   return result.parsed?.npc_emotion;
 }
 
+// Last-resort recovery after both full extraction attempts still produced
+// unparseable JSON: fixes only the syntax (stray prose, code fences,
+// trailing commas, bad quoting) around the model's own already-generated
+// content. Never re-runs the (expensive) narrative-to-JSON extraction.
+function buildJsonRepairPrompt(rawText) {
+  return `다음 텍스트는 유효한 JSON 객체여야 하지만 파싱에 실패했다. 앞뒤 설명문, 마크다운 코드펜스, 트레일링 콤마, 잘못된 따옴표 등 JSON 문법 오류만 고쳐서 정확히 같은 내용을 담은 strict JSON 객체 하나로 다시 출력하라. 필드 값이나 의미를 새로 짓거나 바꾸지 마라. 원본에 없는 내용을 추가하지 마라. 설명문이나 코드펜스 없이 JSON 객체만 출력하라.
+
+[원본 출력]
+${(rawText || '').slice(0, 6000)}`;
+}
+
+async function repairRawJsonOutput(env, rawText) {
+  const prompt = buildJsonRepairPrompt(rawText);
+  const result = await requestDeepSeekJsonWithRetry(env, {
+    model: 'deepseek-v4-flash',
+    thinking: { type: 'disabled' },
+    messages: [{ role: 'system', content: prompt }],
+    response_format: { type: 'json_object' },
+    stream: false,
+    max_tokens: 3000
+  }, { timeoutMs: 30000, maxAttempts: 1 });
+  return result.parsed;
+}
+
 async function handleExtract(req, env) {
   const requestId = crypto.randomUUID();
   const timing = {};
@@ -425,6 +455,7 @@ async function handleExtract(req, env) {
   }));
 
   let result;
+  let jsonRepaired = false;
   try {
     const t3 = Date.now();
     result = await requestDeepSeekJsonWithRetry(env, {
@@ -441,14 +472,34 @@ async function handleExtract(req, env) {
       : /JSON parse failed/.test(error.message) ? 'EXTRACT_JSON_PARSE_FAILED'
       : /Empty content|truncated/.test(error.message) ? 'EXTRACT_EMPTY_OUTPUT'
       : 'EXTRACT_UPSTREAM_FAILED';
-    console.error('Extract request failed:', { request_id: requestId, error_code: errorCode, error: error.message, raw: (error.rawText || '').slice(0, 500) });
-    return jsonResponse({
-      error: error.message,
-      error_code: errorCode,
-      request_id: requestId,
-      upstream_status: error.upstreamStatus ?? null,
-      finish_reason: error.finishReason ?? null
-    }, 502);
+
+    // Both full regeneration attempts still produced unparseable JSON — try
+    // one cheap syntax-only repair of the model's own last output instead of
+    // giving up (or re-running the expensive narrative-to-JSON extraction).
+    let repaired = null;
+    if (errorCode === 'EXTRACT_JSON_PARSE_FAILED' && error.rawText) {
+      const tRepair = Date.now();
+      try {
+        repaired = await repairRawJsonOutput(env, error.rawText);
+      } catch (repairError) {
+        console.error('Extract JSON repair failed:', { request_id: requestId, error: repairError.message });
+      }
+      timing.json_repair_ms = Date.now() - tRepair;
+    }
+
+    if (isPlainObject(repaired)) {
+      result = { parsed: repaired, rawText: error.rawText, finishReason: error.finishReason ?? null, upstreamStatus: error.upstreamStatus ?? null };
+      jsonRepaired = true;
+    } else {
+      console.error('Extract request failed:', { request_id: requestId, error_code: errorCode, error: error.message, raw: (error.rawText || '').slice(0, 500) });
+      return jsonResponse({
+        error: error.message,
+        error_code: errorCode,
+        request_id: requestId,
+        upstream_status: error.upstreamStatus ?? null,
+        finish_reason: error.finishReason ?? null
+      }, 502);
+    }
   }
 
   const t4 = Date.now();
@@ -530,6 +581,54 @@ async function handleExtract(req, env) {
       timing.choice_repair_ms = Date.now() - t7;
     }
   }
+
+  // choice_named_targets is Extract's own semantic read of which choices
+  // name a person; the Worker decides registered-vs-not via a deterministic
+  // roster lookup (findUnregisteredChoiceTargets), so the model's judgment
+  // is never trusted for the actual pass/fail call.
+  let unregisteredNpcChoicesRepaired = false;
+  if (isSetupComplete(compatCtx.save)) {
+    const t9 = Date.now();
+    const unregisteredTargets = findUnregisteredChoiceTargets(extract.choices, extract.choice_named_targets, compatCtx.master?.characters);
+    if (unregisteredTargets.length) {
+      try {
+        const replacement = await repairUnregisteredNpcChoices(env, narrative_text, unregisteredTargets);
+        if (replacement) {
+          extract.choices = replacement;
+          unregisteredNpcChoicesRepaired = true;
+        } else {
+          console.error('Unregistered-NPC choice repair returned no usable replacement:', { request_id: requestId, unregisteredTargets });
+        }
+      } catch (error) {
+        console.error('Unregistered-NPC choice repair failed:', { request_id: requestId, error: error.message });
+      }
+      timing.unregistered_npc_choice_repair_ms = Date.now() - t9;
+    }
+  }
+
+  // A self-reported CSA omission means the narrative had a clear trigger for
+  // an active, applicable forced rule but never executed it. One repair call
+  // produces a short continuation that actually performs the missed action —
+  // it never rewrites the narrative already shown to the player.
+  let contentAddition = null;
+  if (isSetupComplete(compatCtx.save) && extract.csa_omission.length) {
+    const applicableCsa = getApplicableCsaEntries(compatCtx.save);
+    if (applicableCsa.length) {
+      const t8 = Date.now();
+      try {
+        contentAddition = await repairCsaOmission(
+          env,
+          narrative_text,
+          applicableCsa.map(csa => `- (${csa.id}) ${csa.content}`),
+          extract.csa_omission
+        );
+      } catch (error) {
+        console.error('CSA omission repair failed:', { request_id: requestId, error: error.message });
+      }
+      timing.csa_omission_repair_ms = Date.now() - t8;
+    }
+  }
+
   timing.total_ms = Date.now() - totalStart;
 
   console.log(JSON.stringify({ event: 'gamebuilder_timing', endpoint: '/api/extract', request_id: requestId, game_id, turn_number: nextTurn, timing }));
@@ -541,6 +640,9 @@ async function handleExtract(req, env) {
     mind_monitor_retried: mindMonitorRepaired,
     mind_monitor_errors: validation.ok ? [] : validation.errors,
     choices_repaired: choicesRepaired,
+    unregistered_npc_choices_repaired: unregisteredNpcChoicesRepaired,
+    json_repaired: jsonRepaired,
+    content_addition: contentAddition,
     timing
   });
 }
@@ -586,12 +688,18 @@ async function handleTts(req, env) {
   return jsonResponse({ url: data.url });
 }
 
+// Removes markdown bold markers before anything is persisted — names and
+// dialogue text themselves are untouched, only the literal ** characters go.
+function stripBoldMarkers(text) {
+  return typeof text === 'string' ? text.replace(/\*\*/g, '') : text;
+}
+
 async function handleCommitTurn(req, env) {
   const requestId = crypto.randomUUID();
   const timing = {};
   const totalStart = Date.now();
-  const { game_id, turn_number, content, extract, engine_patch, player_input = '' } = await readJson(req);
-  if (!game_id || !Number.isInteger(turn_number) || !content) {
+  const { game_id, turn_number, content: rawContent, extract, engine_patch, player_input = '' } = await readJson(req);
+  if (!game_id || !Number.isInteger(turn_number) || !rawContent) {
     return jsonResponse({
       error: 'game_id, integer turn_number, content and extract required',
       request_id: requestId
@@ -600,12 +708,16 @@ async function handleCommitTurn(req, env) {
   if (!isPlainObject(extract)) {
     return jsonResponse({ error: 'extract must be a non-null JSON object', request_id: requestId }, 400);
   }
+  // Names and dialogue text are preserved — only the ** bold markers
+  // themselves are removed before anything is persisted.
+  const content = stripBoldMarkers(rawContent);
 
   const t0 = Date.now();
   const rawCtx = await supabaseRpc(env, 'get_commit_context', { p_game_id: game_id });
   timing.commit_context_ms = Date.now() - t0;
   const ctx = withSetupCompatibility(rawCtx);
   const safeExtract = normalizeRegisteredNpcExtract({ ...extract, is_sexual: extract.is_sexual === true }, ctx?.master?.characters, ctx?.save?.last_character_id);
+  if (Array.isArray(safeExtract.choices)) safeExtract.choices = safeExtract.choices.map(stripBoldMarkers);
 
   const t1 = Date.now();
   let images = [];
@@ -917,7 +1029,7 @@ function buildPlayerSetupRedisplaySection(recommendations) {
 // and confines all hypnosis mechanics to the in-fiction app rather than
 // verbal suggestion, so ordinary persuasion never silently mutates state.
 function buildAppSystemRulesSection() {
-  return `\n\n[HYPNOSIS APP CONTRACT — HIGH PRIORITY]\n\n실제 게임 규칙:\n- 일반 최면은 대상에게 어플 화면을 2초 이상 보여주면 시도된다.\n- 별도 스캔이나 대상자 등록은 필요 없다.\n- Lv.1부터 약한 최면을 사용할 수 있다.\n- Lv.1부터 병동 1개 범위의 상식 개변을 사용할 수 있다.\n- 마인드 모니터는 등록 절차나 암시 성공 여부에 종속되지 않는다.\n\n만들면 안 되는 기능(최근 기억에 이런 표현이 있어도 절대 따라 하지 않는다): 테스트 대상 검색, 생체 신호 스캔, 대상자 등록, 스캔 완료, 초기 스캔 안정도, 데모 모드, 암시 라이브러리 잠금, Lv.3 암시 해제, Lv.5 상식 개변 해제, 미등록 메뉴·재화·쿨다운·성공률 공식.\n\n플레이어는 선천적인 최면술사나 언어 암시 전문가가 아니다. 모든 최면과 암시 조작은 최면 어플을 통해서만 발생한다. 다음은 반드시 어플 화면에서 실행하는 행동으로 서술한다: 새 암시 생성, 기존 암시 내용 변경, 암시 강화·약화, 암시 ON/OFF, 암시 삭제, 더 강하거나 깊은 최면 시도.\n사용자가 "암시를 건다", "암시를 강화한다"처럼 짧게 입력해도, 플레이어가 스마트폰 어플에 내용을 입력하고 적용하는 장면으로 처리한다. 플레이어가 NPC에게 암시 문구를 직접 말해서 최면을 거는 장면으로 만들지 않는다.\n일반 대화, 설득, 반복 발언, 눈맞춤, 목소리, 분위기 조성만으로는 활성 암시를 생성·변경하지 않고, 기존 암시의 강도를 올리지 않고, 최면깊이를 증가시키지 않고, 더 높은 단계의 최면으로 전환하지 않는다. 일반 대화로 변할 수 있는 것은 호감도·신뢰도·순응도와 NPC의 서사적 판단뿐이다.\n이미 저장된 활성 암시는 일반적인 대화와 행동에 영향을 준다. 플레이어가 그 효과를 이용해 부탁하거나 상황을 유도하는 것은 가능하지만, 그 과정 자체가 암시 강화나 최면 심화로 처리되지는 않는다. NPC나 플레이어가 스스로 암시를 강화·고착·심화했다고 선언하지 않는다. 최면 단계와 암시 상태의 변경은 어플 조작 결과로만 확정한다.`;
+  return `\n\n[HYPNOSIS APP CONTRACT — HIGH PRIORITY]\n\n실제 게임 규칙:\n- 일반 최면은 대상에게 어플 화면을 2초 이상 보여주면 시도된다.\n- 별도 스캔이나 대상자 등록은 필요 없다.\n- Lv.1부터 약한 최면을 사용할 수 있다.\n- Lv.1부터 병동 1개 범위의 상식 개변을 사용할 수 있다.\n- 마인드 모니터는 등록 절차나 암시 성공 여부에 종속되지 않는다.\n\n만들면 안 되는 기능(최근 기억에 이런 표현이 있어도 절대 따라 하지 않는다): 테스트 대상 검색, 생체 신호 스캔, 대상자 등록, 스캔 완료, 초기 스캔 안정도, 데모 모드, 암시 라이브러리 잠금, Lv.3 암시 해제, Lv.5 상식 개변 해제, 미등록 메뉴·재화·쿨다운·성공률 공식.\n\n플레이어는 선천적인 최면술사나 언어 암시 전문가가 아니다. 모든 최면과 암시 조작은 최면 어플을 통해서만 발생한다. 다음은 반드시 어플 화면에서 실행하는 행동으로 서술한다: 새 암시 생성, 기존 암시 내용 변경, 암시 강화·약화, 암시 ON/OFF, 암시 삭제, 더 강하거나 깊은 최면 시도.\n사용자가 "암시를 건다", "암시를 강화한다"처럼 짧게 입력해도, 플레이어가 스마트폰 어플에 내용을 입력하고 적용하는 장면으로 처리한다. 플레이어가 NPC에게 암시 문구를 직접 말해서 최면을 거는 장면으로 만들지 않는다.\n일반 대화, 설득, 반복 발언, 눈맞춤, 목소리, 분위기 조성만으로는 활성 암시를 생성·변경하지 않고, 기존 암시의 강도를 올리지 않고, 최면깊이를 증가시키지 않고, 더 높은 단계의 최면으로 전환하지 않는다. 일반 대화로 변할 수 있는 것은 호감도·신뢰도·순응도와 NPC의 서사적 판단뿐이다.\n이미 저장된 활성 암시는 일반적인 대화와 행동에 영향을 준다. 플레이어가 그 효과를 이용해 부탁하거나 상황을 유도하는 것은 가능하지만, 그 과정 자체가 암시 강화나 최면 심화로 처리되지는 않는다. NPC나 플레이어가 스스로 암시를 강화·고착·심화했다고 선언하지 않는다. 최면 단계와 암시 상태의 변경은 어플 조작 결과로만 확정한다.\n\n[개인 암시 범위 제한 — HARD CONSTRAINT]\n개인 암시는 저장된 content 문장이 문자 그대로 허용하는 반응만 강화한다. 그 문장이 명시하지 않은 행동이나 태도로 확대 해석하지 않는다. 예: content가 "동의하기 쉽다"이면 이는 오직 동의를 더 쉽게 만들 뿐이며, 포옹 허용, 친밀감 자동 상승, 모든 부탁의 무조건 수락으로 확대하지 않는다. 암시 범위 밖의 요청에는 NPC 본래 성격과 판단대로 반응한다.\n어플 조작(새 암시 생성, 강도 변경, 강화) 없이 시간이 흐른다고 암시가 저절로 안정화·고착·강화·심화되지 않는다. 다음 표현으로 암시가 자동으로 깊어졌다고 서술하지 않는다: "완전히 자리 잡았다", "더 깊이 스며들었다", "무의식에 강하게 남았다", 그리고 이와 같은 의미의 자동 강화 표현.`;
 }
 
 // Only the current main NPC's core facts, injected as an established-fact
@@ -1096,7 +1208,15 @@ ${recentMemorySlice.map((m, index) => clipHeadTail(m.content || '', index === re
   const hypnosisCapabilitySection = mode === 'normal' || mode === 'opening'
     ? buildCurrentHypnosisCapabilitySection(hypnosisCapability)
     : '';
-  const systemPrompt = coreRules + playerGate + modeSection + rulebookSection + buildNpcLocationRules() + buildAppSystemRulesSection() + currentSceneSection + npcProfileSection + explicitMentionSection + csaSection + suggestionSection + narrativeLengthSection + npcDialogueSection + antiRepetitionSection + playerStatusPanel + contextSection + feedbackSection + continuitySection + finalFormatRules + openingFlow + playerSetupReminder + hypnosisCapabilitySection;
+  // Same recency-favoring end position — [등록 상호작용 NPC] in coreRules
+  // already bans naming an unregistered individual as a choice target, but
+  // that rule sits at the very top of a long prompt; restating it right
+  // before [3. 선택지] is generated is what actually kept it from being
+  // ignored for the other choice-generation rules above.
+  const registeredNpcChoiceReminder = mode === 'normal' || mode === 'opening'
+    ? `\n\n[REMINDER — REGISTERED NPC CHOICE TARGETS]\n[3. 선택지]에서 직접 상호작용 대상으로 실명을 제시하는 인물은 반드시 master.characters에 등록된 히로인이어야 한다. 미등록 의사·간호사·환자·보호자·직원·동료는 이름 없는 배경 인물로만 표현하고("같은 과 동료", "지나가던 간호사" 등), 그 실명을 선택지에 넣지 않는다.\n`
+    : '';
+  const systemPrompt = coreRules + playerGate + modeSection + rulebookSection + buildNpcLocationRules() + buildAppSystemRulesSection() + currentSceneSection + npcProfileSection + explicitMentionSection + csaSection + suggestionSection + narrativeLengthSection + npcDialogueSection + antiRepetitionSection + playerStatusPanel + contextSection + feedbackSection + continuitySection + finalFormatRules + openingFlow + playerSetupReminder + hypnosisCapabilitySection + registeredNpcChoiceReminder;
 
   return {
     mode,
@@ -1110,6 +1230,17 @@ ${recentMemorySlice.map((m, index) => clipHeadTail(m.content || '', index === re
 // ─────────────────────────────────────────────
 // 추출 프롬프트 (동일)
 // ─────────────────────────────────────────────
+
+// Explicitly lists which CSAs the Worker has already determined are in
+// force this turn (same computation as the Story prompt's HARD CONSTRAINT
+// block), so Extract judges omission against a fixed list instead of
+// re-deriving scope-matching itself.
+function buildCsaApplicationCheckSection(save) {
+  const applicable = getApplicableCsaEntries(save);
+  if (!applicable.length) return '';
+  const lines = applicable.map(csa => `- (${csa.id}) ${csa.content}`).join('\n');
+  return `\n\n[CSA APPLICATION CHECK CONTRACT]\n다음은 이번 턴에 실제로 집행되어야 했던 강제 상식개변 규칙이다. 방금 서사를 다시 확인해, 아래 규칙 중 조건("~마다", "~할 때", "~하면" 등)을 충족하는 상황이 실제로 있었는데도 그 행동이 실행되지 않은 규칙이 있으면 csa_omission에 짧게 설명해 넣는다. 조건이 발생하지 않았거나 정상적으로 실행됐다면 넣지 않는다.\n${lines}`;
+}
 
 function buildExtractPrompt(narrativeText, playerInput, ctx, images, turnCount) {
   const master = ctx?.master || {};
@@ -1188,6 +1319,7 @@ npc_stat_changes만 반환한다. 서사에 숫자가 없어도 대사·행동·
 
 [CSA ACTION CONTRACT]
 현재 장소 범위 안에서 플레이어가 상식개변을 실제로 성공시켰을 때만 csa_action.action="activate"로 content(바뀐 상식 문장)와 scope_type(ward/floor/building/world 중 현재 상황에 맞는 범위)을 반환한다. scope_id는 채우지 마라. Worker가 현재 world_state로 결정한다. 시도·계획·상상만으로는 저장하지 마라. 플레이어가 기존 상식개변을 명확히 해제했을 때만 action="deactivate"와 해제 대상 id를 반환한다. 변화가 없으면 csa_action은 null이다.
+${buildCsaApplicationCheckSection(save)}
 
 [이미지 선택]
 1. is_sexual 판단: 실제 성행위/삽입/성기노출/오르가즘이 구체적이면 true. 키스/포옹/스킨십/분위기만으로는 false. 애매하면 반드시 false.
@@ -1211,6 +1343,9 @@ npc_stat_changes만 반환한다. 서사에 숫자가 없어도 대사·행동·
 - npc_emotion은 기존 최소 길이와 2문장 physical_reaction 계약을 충족하는 범위에서만 작성하고 불필요하게 늘리지 않는다.
 - choices와 dialogue_lines는 Story에서 실제 존재하는 항목만 옮긴다.
 - 같은 근거를 여러 필드에 반복 설명하지 않는다.
+
+[CHOICE NAMED TARGET CHECK]
+choices 각 항목을 확인해, 플레이어가 직접 말을 걸거나 행동 대상으로 삼는 인물의 실명이 등장하면 choice_named_targets에 {"choice_index": 배열 인덱스, "name": "그 실명"}을 추가한다. "동료", "누군가", "직원", "간호사" 같은 이름 없는 지칭은 대상에 포함하지 않는다. 실명이 없거나 등장인물 자신(플레이어)이 아니면 그 선택지는 넣지 않는다. 실명을 지목한 선택지가 하나도 없으면 choice_named_targets는 빈 배열 []이다.
 
 [플레이어의 이번 원본 입력]
 ${typeof playerInput === 'string' && playerInput.trim() ? playerInput : '(없음)'}
@@ -1238,10 +1373,12 @@ ${JSON.stringify(imageCatalog)}
   "suggestion_action": null,
   "world_state_patch": {"building": "이동 완료 시 기존 또는 새 건물명, 이동 없으면 전체 비움", "floor": "이동 완료 시 기존 또는 새 층 명칭", "ward": "이동 완료 시 기존 또는 새 병동 명칭", "location_label": "이동 완료 시 도착한 새 장소, 이동 없으면 전체 비움"},
   "csa_action": null,
+  "csa_omission": ["조건을 충족했는데도 실행되지 않은 강제 상식개변에 대한 짧은 설명. 누락이 없으면 []"],
   "npc_relationship_state": {"player_ejaculation_count": 0, "npc_orgasm_count": 0},
   "turn_summary": "이번 턴에서 변한 핵심 사실 1~3문장",
   "is_sexual": false,
   "choices": ["서사의 선택지를 그대로 옮겨라"],
+  "choice_named_targets": [{"choice_index": 0, "name": "선택지가 직접 상호작용 대상으로 실명을 지목하면 그 이름. 없으면 이 항목 자체를 배열에 넣지 않는다"}],
   "dialogue_lines": [{"speaker": "", "text": "", "direction": ""}],
   "image_id": "후보 목록 안의 image_id 또는 null"
 }`;
@@ -1568,6 +1705,14 @@ function normalizeExtract(extract) {
   if (typeof normalized.turn_summary !== 'string') normalized.turn_summary = '';
   if (!['none', 'minor', 'standard', 'major'].includes(normalized.growth_event)) normalized.growth_event = 'none';
   if (!isPlainObject(normalized.csa_action)) normalized.csa_action = null;
+  normalized.csa_omission = Array.isArray(normalized.csa_omission)
+    ? normalized.csa_omission.filter(item => typeof item === 'string' && item.trim())
+    : [];
+  normalized.choice_named_targets = Array.isArray(normalized.choice_named_targets)
+    ? normalized.choice_named_targets.filter(item =>
+        isPlainObject(item) && Number.isInteger(item.choice_index) && typeof item.name === 'string' && item.name.trim()
+      )
+    : [];
   if (!isPlainObject(normalized.npc_relationship_state)) normalized.npc_relationship_state = null;
   if (!isPlainObject(normalized.first_encounter_stats)) normalized.first_encounter_stats = null;
   if (!isPlainObject(normalized.suggestion_action)) normalized.suggestion_action = null;
@@ -1704,13 +1849,20 @@ function isCsaApplicable(csa, worldState = {}) {
   return csa.scope_id === worldState[csa.scope_type];
 }
 
+// Shared by the Story prompt section and the Extract-side omission check —
+// both must agree on exactly which CSAs are in force this turn.
+function getApplicableCsaEntries(save) {
+  const world = isPlainObject(save?.world_state) ? save.world_state : (isPlainObject(save?.player_location) ? save.player_location : {});
+  return (Array.isArray(save?.csa_active) ? save.csa_active : []).filter(csa => isCsaApplicable(csa, world));
+}
+
 function buildApplicableCsaSection(save) {
   const world = isPlainObject(save?.world_state) ? save.world_state : (isPlainObject(save?.player_location) ? save.player_location : {});
-  const applicable = (Array.isArray(save?.csa_active) ? save.csa_active : []).filter(csa => isCsaApplicable(csa, world));
+  const applicable = getApplicableCsaEntries(save);
   if (!applicable.length) return '';
   const locationLabel = typeof world.location_label === 'string' && world.location_label.trim() ? world.location_label.trim() : '현재 위치';
   const lines = applicable.map(csa => `- ${csa.content}`).join('\n');
-  return `\n\n[CURRENT APPLICABLE COMMON-SENSE CHANGES — ESTABLISHED FACTS]\n\n현재 장소:\n${locationLabel}\n\n적용 중인 상식:\n${lines}\n\n적용 규칙:\n- 현재 장면의 NPC와 배경 인물은 위 내용을 당연한 상식으로 받아들인다.\n- 플레이어만 원래 상식과 변경된 상식의 차이를 기억한다.\n- 이미 적용된 상식개변의 성공 여부를 다시 의심하지 마라.\n- NPC가 이유 없이 위화감을 느끼거나 규칙을 부정하지 않게 한다.\n- 현재 범위를 벗어나면 적용하지 않는다.\n- 해제되거나 비활성인 개변은 적용하지 않는다.\n- NPC의 성격은 유지되지만 판단의 전제가 변경된 상식을 따른다.`;
+  return `\n\n[CURRENT APPLICABLE COMMON-SENSE CHANGES — HARD CONSTRAINT, NOT REFERENCE INFO]\n\n현재 장소:\n${locationLabel}\n\n적용 중인 상식(강제 규칙):\n${lines}\n\n적용 규칙:\n- 아래 상식은 단순 배경 설정이 아니라 이번 턴 서사에서 실제로 집행해야 하는 강제 규칙이다.\n- 규칙에 조건("~마다", "~할 때", "~하면")이 있으면, 이번 턴 서사 안에서 그 조건이 실제로 발생할 때마다 매번 그 행동을 직접 묘사한다. 예: "1문장을 말할 때마다 볼뽀뽀"라면, 이번 턴에 그 NPC가 문장을 말할 때마다 볼뽀뽀 행동을 실제로 서술한다 — 한 번만 언급하고 넘어가지 않는다.\n- 현재 범위 안에 있고 조건을 충족하는 등록 NPC 전원에게 예외 없이 동일하게 적용한다. 특정 NPC만 봐주거나 조용히 생략하지 않는다.\n- 현재 장면의 NPC와 배경 인물은 위 내용을 당연한 상식으로 받아들인다.\n- 플레이어만 원래 상식과 변경된 상식의 차이를 기억한다.\n- 이미 적용된 상식개변의 성공 여부를 다시 의심하지 마라.\n- NPC가 이유 없이 위화감을 느끼거나 규칙을 부정하지 않게 한다.\n- 현재 범위를 벗어나면 적용하지 않는다.\n- 해제되거나 비활성인 개변은 적용하지 않는다.\n- NPC의 성격은 유지되지만 판단의 전제와 행동은 변경된 상식을 따른다.`;
 }
 
 // ─────────────────────────────────────────────
@@ -2067,6 +2219,98 @@ async function repairInfeasibleChoices(env, narrativeText, capability, infeasibl
     ? result.parsed.choices.filter(choice => typeof choice === 'string' && choice.trim())
     : [];
   return choices.length === 4 ? choices : null;
+}
+
+// Extract self-reports which choices name a specific individual as a direct
+// interaction target (choice_named_targets); the Worker does the actual
+// registered/unregistered decision itself via a deterministic roster
+// lookup, so an unregistered name can never slip through on model say-so.
+function findUnregisteredChoiceTargets(choices, namedTargets, characters = {}) {
+  if (!Array.isArray(namedTargets) || !namedTargets.length || !Array.isArray(choices)) return [];
+  const registeredNames = new Set(
+    Object.values(isPlainObject(characters) ? characters : {})
+      .map(character => character?.name || character?.['이름'])
+      .filter(name => typeof name === 'string' && name.trim())
+  );
+  const problems = [];
+  for (const target of namedTargets) {
+    const index = target.choice_index;
+    const name = target.name.trim();
+    if (!choices[index] || registeredNames.has(name)) continue;
+    problems.push({ choice: choices[index], name, reason: `"${name}"은(는) 등록된 NPC가 아님` });
+  }
+  return problems;
+}
+
+function buildUnregisteredNpcChoiceRepairPrompt(narrativeText, problems) {
+  const reasonLines = problems.map(p => `- "${p.choice}" → ${p.reason}`).join('\n');
+  return `너는 인터랙티브 게임의 [3. 선택지] 네 개만 다시 작성하는 역할이다. 서사 본문은 건드리지 않는다. 유효한 JSON 객체 하나만 출력한다. 마크다운 코드펜스와 설명문을 절대 쓰지 마라.
+
+[방금 생성된 서사]
+${(narrativeText || '').slice(-1500)}
+
+[문제]
+아래 선택지가 등록되지 않은 인물을 실명으로 직접 상호작용 대상으로 지목했다. 미등록 인물은 이름 없는 배경 인물로만 표현해야 한다.
+${reasonLines}
+
+규칙:
+- 정확히 4개의 선택지 문자열을 새로 만든다.
+- 지적된 미등록 인물의 실명을 다시 언급하지 않는다. 필요하면 "동료", "직원" 같은 이름 없는 배경 인물 표현으로 바꾼다.
+- 서사의 맥락과 자연스럽게 이어지는 행동이어야 한다.
+
+[요구 JSON 스키마]
+{"choices": ["", "", "", ""]}`;
+}
+
+async function repairUnregisteredNpcChoices(env, narrativeText, problems) {
+  const prompt = buildUnregisteredNpcChoiceRepairPrompt(narrativeText, problems);
+  const result = await requestDeepSeekJsonWithRetry(env, {
+    model: 'deepseek-v4-flash',
+    thinking: { type: 'disabled' },
+    messages: [{ role: 'system', content: prompt }],
+    response_format: { type: 'json_object' },
+    stream: false,
+    max_tokens: 500
+  }, { timeoutMs: 30000, maxAttempts: 1 });
+  const choices = Array.isArray(result.parsed?.choices)
+    ? result.parsed.choices.filter(choice => typeof choice === 'string' && choice.trim())
+    : [];
+  return choices.length === 4 ? choices : null;
+}
+
+// Extract self-reports a missed forced CSA rule in csa_omission (judged
+// against the exact list the Worker computed, not a free guess). The repair
+// never rewrites the already-shown narrative — it only produces a short
+// continuation paragraph that actually executes the missed rule, which the
+// frontend appends to the committed content.
+function buildCsaOmissionRepairPrompt(narrativeText, applicableCsaLines, omissions) {
+  return `너는 방금 생성된 게임 서사에서 누락된 "강제 상식개변 규칙"을 짧게 보충하는 역할이다. 기존 서사를 다시 쓰지 말고, 자연스럽게 이어지는 1~3문장짜리 짧은 보충 단락만 새로 작성해 누락된 강제 행동을 실제로 실행시켜라. 서사의 톤과 인물 말투를 유지한다. 설명문이나 메타 발언 없이 순수 서사 본문만 출력한다. 유효한 JSON 객체 하나만 출력한다.
+
+[방금 생성된 서사]
+${(narrativeText || '').slice(-1500)}
+
+[현재 적용 중인 상식 개변 — 강제 규칙]
+${applicableCsaLines.join('\n')}
+
+[누락된 항목]
+${omissions.join('\n')}
+
+[요구 JSON 스키마]
+{"addition": "이어지는 1~3문장짜리 보충 서사"}`;
+}
+
+async function repairCsaOmission(env, narrativeText, applicableCsaLines, omissions) {
+  const prompt = buildCsaOmissionRepairPrompt(narrativeText, applicableCsaLines, omissions);
+  const result = await requestDeepSeekJsonWithRetry(env, {
+    model: 'deepseek-v4-flash',
+    thinking: { type: 'disabled' },
+    messages: [{ role: 'system', content: prompt }],
+    response_format: { type: 'json_object' },
+    stream: false,
+    max_tokens: 400
+  }, { timeoutMs: 30000, maxAttempts: 1 });
+  const addition = typeof result.parsed?.addition === 'string' ? result.parsed.addition.trim() : '';
+  return addition || null;
 }
 
 function buildCurrentSceneSection(save, characters = {}) {
@@ -2532,6 +2776,13 @@ export {
   buildHypnosisStatusPanelData,
   findInfeasibleChoices,
   repairInfeasibleChoices,
+  repairRawJsonOutput,
+  getApplicableCsaEntries,
+  buildCsaApplicationCheckSection,
+  repairCsaOmission,
+  stripBoldMarkers,
+  findUnregisteredChoiceTargets,
+  repairUnregisteredNpcChoices,
   resolveCsaScopeId,
   resolveIsSexual,
   normalizeImagePool,

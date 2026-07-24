@@ -13,6 +13,11 @@ const state = {
   autoTts: true,
   pendingResetConfirm: false,
   startupRequested: false,
+  // Set while an Extract failure is awaiting the user's retry/discard
+  // choice — setLoading(false) must not silently re-enable the chat input
+  // out from under that lock just because an outer caller's own loading
+  // spinner cleared.
+  inputLocked: false,
 
   // ─── 렌더링 상태 ───
   narrativeText: '',

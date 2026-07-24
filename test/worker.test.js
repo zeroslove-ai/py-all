@@ -109,7 +109,19 @@ import {
   allocateImagePoolSlots,
   selectCharacterImageCandidates,
   selectTopImageCandidates,
-  selectValidatedShortlistImageId
+  selectValidatedShortlistImageId,
+  createRecoveryBudget,
+  consumeRecoveryBudget,
+  buildDegradedTurnSummary,
+  isPotentialAppMutationTurn,
+  hasPotentialUnrecordedFirstEncounter,
+  canUseDegradedExtract,
+  buildDegradedExtract,
+  extractChoicesFromNarrative,
+  buildChoicesFromNarrativeOrFallback,
+  clipChoiceText,
+  buildCapabilitySafeChoice,
+  normalizeFinalChoicesDeterministically
 } from '../worker/game-proxy-v2.js';
 import worker from '../worker/game-proxy-v2.js';
 
@@ -950,7 +962,7 @@ test('buildSafeFallbackChoices returns exactly 4 generic, always-valid choices w
   assert.equal(check.ok, true);
 });
 
-test('commit-turn re-sanitizes a manipulated unregistered character_id', async () => {
+test('commit-turn re-sanitizes a manipulated unregistered character_id (H1: collapses to narrator, never swapped to the previous NPC)', async () => {
   const originalFetch = globalThis.fetch;
   let committedPatch;
   globalThis.fetch = async (url, init = {}) => {
@@ -981,7 +993,9 @@ test('commit-turn re-sanitizes a manipulated unregistered character_id', async (
       }
     }), { SUPABASE_SECRET_KEY: 'test' });
     assert.equal(response.status, 200);
-    assert.equal(committedPatch.last_character_id, 'heroine1');
+    // H1 item 2: never silently swapped to lastCharacterId ('heroine1') —
+    // always collapses to narrator instead.
+    assert.equal(committedPatch.last_character_id, 'narrator');
     assert.equal(committedPatch.last_image_id, null);
     assert.equal(committedPatch.npc_stats, undefined);
     assert.equal(committedPatch.npc_emotion, undefined);
@@ -4027,7 +4041,7 @@ test('the player status panel and the choice-feasibility HARD CONSTRAINT read th
   assert.match(constraintSection, /사용 가능한 최면 강도: 약함/);
 });
 
-test('/api/extract repairs choices that are structurally impossible given the current hypnosis capability, keeping the narrative untouched', async () => {
+test('H2 item 10: /api/extract repairs choices that are structurally impossible given the current hypnosis capability deterministically — no repair LLM call, only the infeasible choices swapped, the rest kept verbatim', async () => {
   const originalFetch = globalThis.fetch;
   const deepseekCalls = [];
   globalThis.fetch = async (url, init = {}) => {
@@ -4055,22 +4069,18 @@ test('/api/extract repairs choices that are structurally impossible given the cu
     if (requestUrl.includes('api.deepseek.com')) {
       const body = JSON.parse(init.body);
       deepseekCalls.push(body);
-      if (deepseekCalls.length === 1) {
-        return new Response(JSON.stringify({
-          choices: [{ message: { content: JSON.stringify({
-            character_id: 'heroine1', npcs_present: ['heroine1'],
-            npc_emotion: {
-              surface: '“낯선 사람이라 조금 긴장되지만 티를 내지 말자. 우선 평소처럼 침착하게 내 할 일부터 하며 신분을 확인하자.”',
-              inner: '“왜 이렇게 자꾸 신경이 쓰이는지 나도 모르겠다. 경계해야 하는데 자꾸 시선이 가고 마음이 흔들린다.”',
-              physical_reaction: '그녀는 옷깃을 매만지며 시선을 살짝 피한다. 짧게 숨을 고른 뒤 낮은 목소리로 대답한다.'
-            },
-            choices: ['한소영에게 추가 암시를 건다', '암시를 강화한다', '깊은 최면을 시도한다', '한소영과 평범하게 대화한다']
-          }) }, finish_reason: 'stop' }]
-        }), { headers: { 'content-type': 'application/json' } });
-      }
       return new Response(JSON.stringify({
         choices: [{ message: { content: JSON.stringify({
-          choices: ['한소영에게 기존 암시 효과를 이용해 부탁해본다', '기존 암시를 OFF로 끈다', '기존 암시를 삭제한다', '한소영과 평범하게 대화한다']
+          character_id: 'heroine1', npcs_present: ['heroine1'],
+          npc_emotion: {
+            surface: '“낯선 사람이라 조금 긴장되지만 티를 내지 말자. 우선 평소처럼 침착하게 내 할 일부터 하며 신분을 확인하자.”',
+            inner: '“왜 이렇게 자꾸 신경이 쓰이는지 나도 모르겠다. 경계해야 하는데 자꾸 시선이 가고 마음이 흔들린다.”',
+            physical_reaction: '그녀는 옷깃을 매만지며 시선을 살짝 피한다. 짧게 숨을 고른 뒤 낮은 목소리로 대답한다.'
+          },
+          // First 3 choices are each infeasible for a different reason (slot
+          // full, can't increase strength, tier not unlocked); the 4th is a
+          // plain, always-valid action and must survive untouched.
+          choices: ['한소영에게 추가 암시를 건다', '암시를 강화한다', '깊은 최면을 시도한다', '한소영과 평범하게 대화한다']
         }) }, finish_reason: 'stop' }]
       }), { headers: { 'content-type': 'application/json' } });
     }
@@ -4083,8 +4093,13 @@ test('/api/extract repairs choices that are structurally impossible given the cu
     assert.equal(response.status, 200);
     const body = await response.json();
     assert.equal(body.choices_repaired, true);
-    assert.equal(deepseekCalls.length, 2);
-    assert.deepEqual(body.extract.choices, ['한소영에게 기존 암시 효과를 이용해 부탁해본다', '기존 암시를 OFF로 끈다', '기존 암시를 삭제한다', '한소영과 평범하게 대화한다']);
+    assert.equal(deepseekCalls.length, 1); // no repair re-call — fully deterministic
+    assert.deepEqual(body.extract.choices, [
+      '현재 활성 암시의 범위 안에서 자연스럽게 부탁한다.',
+      '상대의 반응을 살피며 평범한 대화를 이어간다.',
+      '주변 상황을 확인하며 다음 행동을 결정한다.',
+      '한소영과 평범하게 대화한다' // untouched — was already feasible
+    ]);
   } finally {
     globalThis.fetch = originalFetch;
   }
@@ -4309,7 +4324,7 @@ test('getApplicableCsaEntries / buildCsaApplicationCheckSection restrict to in-s
   assert.match(promptSection, /조건을 충족하는 등록 NPC 전원에게 예외 없이 동일하게 적용/);
 });
 
-test('/api/extract fixes a CSA omission by inserting the correction before [2. 플레이어 상황판] and re-running Extract once against the corrected narrative', async () => {
+test('H2 item 9: /api/extract fixes a CSA omission by inserting the correction before [2. 플레이어 상황판], without re-running Extract a second time — every other structured field stays from the first pass', async () => {
   const originalFetch = globalThis.fetch;
   const deepseekCalls = [];
   const narrativeText = '[1. 서사 및 행동]\n김지은이 여러 문장을 말했다.\n\n[2. 플레이어 상황판]\n상태 정보\n\n[3. 선택지]\n1. 계속한다';
@@ -4337,7 +4352,7 @@ test('/api/extract fixes a CSA omission by inserting the correction before [2. �
       const body = JSON.parse(init.body);
       deepseekCalls.push(body);
       if (deepseekCalls.length === 1) {
-        // First extraction pass: reports the missed forced CSA rule.
+        // First (and only) extraction pass: reports the missed forced CSA rule.
         return new Response(JSON.stringify({
           choices: [{ message: { content: JSON.stringify({
             character_id: 'heroine5', npcs_present: ['heroine5'],
@@ -4347,21 +4362,10 @@ test('/api/extract fixes a CSA omission by inserting the correction before [2. �
           }) }, finish_reason: 'stop' }]
         }), { headers: { 'content-type': 'application/json' } });
       }
-      if (deepseekCalls.length === 2) {
-        // The CSA-omission repair call: produces only the short addition.
-        return new Response(JSON.stringify({
-          choices: [{ message: { content: JSON.stringify({ addition: '말을 마치자마자 그녀의 볼에 가볍게 입을 맞춘다.' }) }, finish_reason: 'stop' }]
-        }), { headers: { 'content-type': 'application/json' } });
-      }
-      // Third call: the single re-extraction against the corrected narrative.
-      // Reports no further omission, proving the repair loop doesn't recurse.
+      // Second (and last) call: the CSA-omission repair — produces only the
+      // short addition. H2: no further re-extraction call happens after this.
       return new Response(JSON.stringify({
-        choices: [{ message: { content: JSON.stringify({
-          character_id: 'heroine5', npcs_present: ['heroine5'],
-          npc_emotion: VALID_NPC_EMOTION,
-          csa_omission: [],
-          choices: ['최종 선택지 1', '최종 선택지 2', '최종 선택지 3', '최종 선택지 4']
-        }) }, finish_reason: 'stop' }]
+        choices: [{ message: { content: JSON.stringify({ addition: '말을 마치자마자 그녀의 볼에 가볍게 입을 맞춘다.' }) }, finish_reason: 'stop' }]
       }), { headers: { 'content-type': 'application/json' } });
     }
     throw new Error(`unexpected fetch: ${requestUrl}`);
@@ -4372,7 +4376,7 @@ test('/api/extract fixes a CSA omission by inserting the correction before [2. �
     }), { DEEPSEEK_API_KEY: 'test' });
     assert.equal(response.status, 200);
     const body = await response.json();
-    assert.equal(deepseekCalls.length, 3);
+    assert.equal(deepseekCalls.length, 2); // H2: no third (re-extraction) call
     assert.equal(body.content_addition, null);
     assert.ok(body.narrative_replacement);
     const addIndex = body.narrative_replacement.indexOf('말을 마치자마자');
@@ -4381,8 +4385,9 @@ test('/api/extract fixes a CSA omission by inserting the correction before [2. �
     assert.ok(addIndex > -1 && statusIndex > -1 && choicesIndex > -1);
     assert.ok(addIndex < statusIndex, 'the addition must land before [2. 플레이어 상황판]');
     assert.ok(statusIndex < choicesIndex, 'and therefore before [3. 선택지] too');
-    // The final extract reflects the corrected (third) pass, not the first.
-    assert.deepEqual(body.extract.choices, ['최종 선택지 1', '최종 선택지 2', '최종 선택지 3', '최종 선택지 4']);
+    // H2: the final extract still reflects the FIRST pass's own choices —
+    // there is no second pass to have replaced them with anything else.
+    assert.deepEqual(body.extract.choices, ['김지은과 계속 대화한다', '다른 화제를 꺼낸다', '자리를 옮긴다', '병동을 둘러본다']);
   } finally {
     globalThis.fetch = originalFetch;
   }
@@ -4589,7 +4594,7 @@ test('H1 item 4: /api/extract no longer repairs (or re-calls the LLM for) choice
   }
 });
 
-test('/api/extract repairs a choice over the 120-character ceiling, replacing only the choices, keeping the narrative untouched', async () => {
+test('H2 item 10: /api/extract clips a choice over the 120-character ceiling deterministically, keeping the narrative and the other 3 choices untouched — no repair LLM call', async () => {
   const originalFetch = globalThis.fetch;
   const deepseekCalls = [];
   const overlong = '가'.repeat(150);
@@ -4610,17 +4615,10 @@ test('/api/extract repairs a choice over the 120-character ceiling, replacing on
     if (requestUrl.includes('api.deepseek.com')) {
       const body = JSON.parse(init.body);
       deepseekCalls.push(body);
-      if (deepseekCalls.length === 1) {
-        return new Response(JSON.stringify({
-          choices: [{ message: { content: JSON.stringify({
-            character_id: 'narrator', npcs_present: [],
-            choices: [overlong, '한소영에게 인사한다', '자리를 정리한다', '병동을 둘러본다']
-          }) }, finish_reason: 'stop' }]
-        }), { headers: { 'content-type': 'application/json' } });
-      }
       return new Response(JSON.stringify({
         choices: [{ message: { content: JSON.stringify({
-          choices: ['간단히 안부를 묻는다', '한소영에게 인사한다', '자리를 정리한다', '병동을 둘러본다']
+          character_id: 'narrator', npcs_present: [],
+          choices: [overlong, '한소영에게 인사한다', '자리를 정리한다', '병동을 둘러본다']
         }) }, finish_reason: 'stop' }]
       }), { headers: { 'content-type': 'application/json' } });
     }
@@ -4632,9 +4630,13 @@ test('/api/extract repairs a choice over the 120-character ceiling, replacing on
     }), { DEEPSEEK_API_KEY: 'test' });
     assert.equal(response.status, 200);
     const body = await response.json();
-    assert.equal(deepseekCalls.length, 2);
-    assert.equal(body.choices_repaired, true);
-    assert.deepEqual(body.extract.choices, ['간단히 안부를 묻는다', '한소영에게 인사한다', '자리를 정리한다', '병동을 둘러본다']);
+    assert.equal(deepseekCalls.length, 1); // no repair re-call — clipped deterministically
+    // Length-only clipping is not a hypnosis-capability replacement, so
+    // choices_repaired stays false — see [H1 #9 #20]-style near-duplicate
+    // tests for the separate warnings-only signal.
+    assert.equal(body.choices_repaired, false);
+    assert.equal(body.extract.choices[0], `${'가'.repeat(119)}…`);
+    assert.deepEqual(body.extract.choices.slice(1), ['한소영에게 인사한다', '자리를 정리한다', '병동을 둘러본다']);
     assert.ok(body.extract.choices.every(choice => choice.length <= CHOICE_MAX_LENGTH));
   } finally {
     globalThis.fetch = originalFetch;
@@ -5121,7 +5123,7 @@ test('[H1 #23] get_extract_context 실패는 기존 오류(502 SUPABASE_ERROR) �
   }
 });
 
-test('[H1 #24] commit_turn RPC 실패는 기존 오류 유지 (H1 이전과 동일하게 여전히 실패로 전파됨, 성공으로 둔갑하지 않음)', async () => {
+test('[H1 #24 / H2 #1-2] commit_turn RPC 실패는 여전히 실패로 취급되고, H2부터는 raw rejected Promise 대신 JSON 500(error_code UNHANDLED_WORKER_ERROR)으로 반환됨', async () => {
   const originalFetch = globalThis.fetch;
   globalThis.fetch = async (url) => {
     const requestUrl = String(url);
@@ -5137,19 +5139,19 @@ test('[H1 #24] commit_turn RPC 실패는 기존 오류 유지 (H1 이전과 동�
     throw new Error(`unexpected fetch: ${requestUrl}`);
   };
   try {
-    // Pre-existing (not H1) top-level dispatcher detail: `return handleCommitTurn(...)`
-    // is not awaited inside the router's try/catch, so a commit_turn RPC
-    // failure surfaces as a rejected promise rather than a caught 500
-    // Response — unchanged by H1, just asserting it still fails outright
-    // instead of silently completing like the fail-open cases above do.
-    await assert.rejects(
-      () => worker.fetch(apiRequest('/api/commit-turn', {
-        game_id: 'test-game', turn_number: 6,
-        content: '평범한 하루.',
-        extract: { character_id: 'narrator' }
-      }), { SUPABASE_SECRET_KEY: 'test' }),
-      /Supabase RPC commit_turn failed/
-    );
+    // H2 item 1: the top-level dispatcher now awaits every handler, so a
+    // commit_turn RPC failure that previously escaped as an unhandled
+    // rejection (H1) is now caught by the router's own try/catch and
+    // returned as a clean JSON 500 — still a hard failure, never success.
+    const response = await worker.fetch(apiRequest('/api/commit-turn', {
+      game_id: 'test-game', turn_number: 6,
+      content: '평범한 하루.',
+      extract: { character_id: 'narrator' }
+    }), { SUPABASE_SECRET_KEY: 'test' });
+    assert.equal(response.status, 500);
+    const body = await response.json();
+    assert.equal(body.error_code, 'UNHANDLED_WORKER_ERROR');
+    assert.match(body.error, /Supabase RPC commit_turn failed/);
   } finally {
     globalThis.fetch = originalFetch;
   }
@@ -5177,6 +5179,440 @@ test('[H1 #25] turn conflict는 409 유지', async () => {
       extract: { character_id: 'narrator' }
     }), { SUPABASE_SECRET_KEY: 'test' });
     assert.equal(response.status, 409);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+// ═════════════════════════════════════════════
+// H2 긴급 안정화 — Extract Degraded Fallback·선택지 결정적 복구·비동기 오류 포착
+// item 14's required test list (1-30 worker, 31-40 frontend — 31-40 live in
+// test/ui.test.js instead, matching that file's static-pattern convention)
+// ═════════════════════════════════════════════
+
+test('[H2 #1,2] top-level dispatcher awaits handlers, so a get_commit_context rejection is returned as JSON 500 with error_code UNHANDLED_WORKER_ERROR (not a raw rejected Promise)', async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (url) => {
+    const requestUrl = String(url);
+    if (requestUrl.includes('/rpc/get_commit_context')) {
+      return new Response('commit context rpc down', { status: 500 });
+    }
+    throw new Error(`unexpected fetch: ${requestUrl}`);
+  };
+  try {
+    const response = await worker.fetch(apiRequest('/api/commit-turn', {
+      game_id: 'test-game', turn_number: 6,
+      content: '평범한 하루.',
+      extract: { character_id: 'narrator' }
+    }), { SUPABASE_SECRET_KEY: 'test' });
+    assert.equal(response.status, 500);
+    const body = await response.json();
+    assert.equal(body.error_code, 'UNHANDLED_WORKER_ERROR');
+    assert.match(body.error, /Supabase RPC get_commit_context failed/);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('[H2 #3,4,5,7,30] an ordinary conversational turn whose Extract call fails outright still saves as a 200 degraded turn: narrator, every persistent field empty/null, and the narrative\'s own 4 choices recovered', async () => {
+  const originalFetch = globalThis.fetch;
+  let deepseekCallCount = 0;
+  const narrativeText = '[1. 서사 및 행동]\n평범한 하루가 흘러갔다. 특별한 일은 없었다.\n\n[2. 플레이어 상황판]\n상태 정보\n\n[3. 선택지]\n① 계속 지켜본다\n② 자리를 옮긴다\n③ 대화를 시도한다\n④ 휴식을 취한다';
+  globalThis.fetch = async (url) => {
+    const requestUrl = String(url);
+    if (requestUrl.includes('/rpc/get_extract_context')) {
+      return new Response(JSON.stringify({
+        turn_count: 5,
+        master: { characters: {} },
+        save: { player: { name: '금태양', job: '간호사' }, player_setup: { status: 'complete' }, opening_started: true }
+      }), { headers: { 'content-type': 'application/json' } });
+    }
+    if (requestUrl.includes('/rpc/get_image_catalog_for_characters')) {
+      return new Response(JSON.stringify([]), { headers: { 'content-type': 'application/json' } });
+    }
+    if (requestUrl.includes('api.deepseek.com')) {
+      deepseekCallCount++;
+      return new Response('deepseek down', { status: 500 });
+    }
+    throw new Error(`unexpected fetch: ${requestUrl}`);
+  };
+  try {
+    const response = await worker.fetch(apiRequest('/api/extract', {
+      game_id: 'test-game', narrative_text: narrativeText, player_input: ''
+    }), { DEEPSEEK_API_KEY: 'test' });
+    assert.equal(response.status, 200); // #3
+    const body = await response.json();
+    assert.equal(body.extract_degraded, true);
+    assert.equal(body.extract_degraded_reason, 'EXTRACT_UPSTREAM_FAILED');
+    assert.equal(body.extract.character_id, 'narrator'); // #4
+    assert.deepEqual(body.extract.npc_stat_changes, {}); // #5
+    assert.deepEqual(body.extract.npc_emotion, { physical_reaction: '' }); // normalizeExtract's own default fill
+    assert.equal(body.extract.npc_relationship_state, null);
+    assert.equal(body.extract.suggestion_action, null);
+    assert.equal(body.extract.csa_action, null);
+    assert.equal(body.extract.world_state_patch, null);
+    assert.equal(body.extract.first_encounter_stats, null);
+    assert.deepEqual(body.extract.choices, ['계속 지켜본다', '자리를 옮긴다', '대화를 시도한다', '휴식을 취한다']); // #7
+    assert.equal(body.choices_repaired, false);
+    assert.equal(body.first_encounter_repaired, false);
+    assert.equal(body.mind_monitor_retried, false);
+    assert.equal(body.json_repaired, false);
+    assert.equal(body.recovery_used, false);
+    assert.equal(body.recovery_kind, null);
+    assert.equal(deepseekCallCount, 1); // maxAttempts=1 — degraded-eligible turn
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('[H2 #30] a normal (non-degraded) /api/extract response always carries extract_degraded: false, extract_degraded_reason: null', async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (url) => {
+    const requestUrl = String(url);
+    if (requestUrl.includes('/rpc/get_extract_context')) {
+      return new Response(JSON.stringify({
+        turn_count: 5,
+        master: { characters: {} },
+        save: { player: { name: '금태양', job: '간호사' }, player_setup: { status: 'complete' }, opening_started: true }
+      }), { headers: { 'content-type': 'application/json' } });
+    }
+    if (requestUrl.includes('/rpc/get_image_catalog_for_characters')) {
+      return new Response(JSON.stringify([]), { headers: { 'content-type': 'application/json' } });
+    }
+    if (requestUrl.includes('api.deepseek.com')) {
+      return new Response(JSON.stringify({
+        choices: [{ message: { content: JSON.stringify({
+          character_id: 'narrator', npcs_present: [],
+          choices: ['A', 'B', 'C', 'D']
+        }) }, finish_reason: 'stop' }]
+      }), { headers: { 'content-type': 'application/json' } });
+    }
+    throw new Error(`unexpected fetch: ${requestUrl}`);
+  };
+  try {
+    const response = await worker.fetch(apiRequest('/api/extract', {
+      game_id: 'test-game', narrative_text: '평범한 하루.', player_input: ''
+    }), { DEEPSEEK_API_KEY: 'test' });
+    assert.equal(response.status, 200);
+    const body = await response.json();
+    assert.equal(body.extract_degraded, false);
+    assert.equal(body.extract_degraded_reason, null);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('[H2 #6] buildDegradedTurnSummary deterministically derives a <=200-char summary from the narrative\'s own [1. 서사 및 행동] text, with no LLM call', () => {
+  const narrativeText = '[1. 서사 및 행동]\n평범한 하루가 흘러갔다. 특별한 일은 없었다.\n\n[2. 플레이어 상황판]\n상태 정보\n\n[3. 선택지]\n① A\n② B\n③ C\n④ D';
+  const summary = buildDegradedTurnSummary(narrativeText);
+  assert.match(summary, /평범한 하루가 흘러갔다/);
+  assert.doesNotMatch(summary, /플레이어 상황판|상태 정보/);
+  assert.ok(summary.length <= 200);
+});
+
+test('[H2 #7] extractChoicesFromNarrative recovers exactly the 4 choices already written under [3. 선택지]', () => {
+  const narrativeText = '[3. 선택지]\n① 첫 번째 선택\n② 두 번째 선택\n③ 세 번째 선택\n④ 네 번째 선택';
+  assert.deepEqual(extractChoicesFromNarrative(narrativeText), ['첫 번째 선택', '두 번째 선택', '세 번째 선택', '네 번째 선택']);
+});
+
+test('[H2 #8] buildChoicesFromNarrativeOrFallback keeps the 2 real choices already in the narrative and only pads the missing 2 with deterministic fallback choices', () => {
+  const narrativeText = '[3. 선택지]\n① 첫 번째 선택\n② 두 번째 선택';
+  const result = buildChoicesFromNarrativeOrFallback(narrativeText);
+  assert.equal(result.length, 4);
+  assert.deepEqual(result.slice(0, 2), ['첫 번째 선택', '두 번째 선택']);
+  const fallback = buildSafeFallbackChoices();
+  assert.ok(result.slice(2).every(choice => fallback.includes(choice)));
+});
+
+test('[H2 #9] an active-suggestion-mutation player input (암시 + 건다) blocks degraded fallback eligibility', () => {
+  const compatCtx = { save: { player_setup: { status: 'complete' }, player: { name: 'a', job: 'b' } }, master: { characters: {} } };
+  assert.equal(isPotentialAppMutationTurn('한소영에게 암시를 건다', ''), true);
+  assert.equal(canUseDegradedExtract(compatCtx, '평범한 서사', '한소영에게 암시를 건다'), false);
+});
+
+test('[H2 #10] a CSA (상식개변) mutation player input also blocks degraded fallback eligibility', () => {
+  const compatCtx = { save: { player_setup: { status: 'complete' }, player: { name: 'a', job: 'b' } }, master: { characters: {} } };
+  assert.equal(isPotentialAppMutationTurn('병동에 새로운 상식개변을 적용한다', ''), true);
+  assert.equal(canUseDegradedExtract(compatCtx, '평범한 서사', '병동에 새로운 상식개변을 적용한다'), false);
+});
+
+test('[H2 #11] a strength-exceeded marker already in the narrative overrides the mutation-turn block — degraded fallback is allowed even for an app-mutation-looking input, since the app action is already deterministically nullified', () => {
+  const compatCtx = { save: { player_setup: { status: 'complete' }, player: { name: 'a', job: 'b' } }, master: { characters: {} } };
+  const narrativeWithMarker = `서사 내용 ${SUGGESTION_STRENGTH_EXCEEDED_MARKER}`;
+  assert.equal(isPotentialAppMutationTurn('한소영에게 암시를 건다', narrativeWithMarker), false);
+  assert.equal(canUseDegradedExtract(compatCtx, narrativeWithMarker, '한소영에게 암시를 건다'), true);
+});
+
+test('[H2 #12] an incomplete player_setup blocks degraded fallback eligibility', () => {
+  const compatCtx = { save: { player_setup: { status: 'recommended' }, player: {} }, master: { characters: {} } };
+  assert.equal(canUseDegradedExtract(compatCtx, '평범한 서사', ''), false);
+});
+
+test('[H2 #13] a potential first direct encounter with a newly-registered NPC (no structured/legacy evidence in the save) blocks degraded fallback eligibility', () => {
+  const compatCtx = {
+    save: { player_setup: { status: 'complete' }, player: { name: 'a', job: 'b' } },
+    master: { characters: { heroine1: { name: '한소영' } } }
+  };
+  assert.equal(hasPotentialUnrecordedFirstEncounter(compatCtx, '한소영이 다가온다.', ''), true);
+  assert.equal(canUseDegradedExtract(compatCtx, '한소영이 다가온다.', ''), false);
+});
+
+test('[H2 #14] ordinary conversation with an already-encountered registered NPC allows degraded fallback eligibility', () => {
+  const compatCtx = {
+    save: {
+      player_setup: { status: 'complete' }, player: { name: 'a', job: 'b' },
+      npc_encounters: { heroine1: { first_turn: 3, initial_affinity: 10, initial_trust: 10, reason: 'x' } }
+    },
+    master: { characters: { heroine1: { name: '한소영' } } }
+  };
+  assert.equal(hasPotentialUnrecordedFirstEncounter(compatCtx, '한소영과 대화한다.', ''), false);
+  assert.equal(canUseDegradedExtract(compatCtx, '한소영과 대화한다.', ''), true);
+});
+
+test('[H2 #15,16] a degraded turn\'s buildSavePatch preserves the previous save\'s last_character_id/last_image_id instead of overwriting them with the degraded stand-in\'s narrator/null', () => {
+  const degradedExtract = buildDegradedExtract('[3. 선택지]\n① A\n② B\n③ C\n④ D', 'EXTRACT_FAILED');
+  const previousSave = { last_character_id: 'heroine1', last_image_id: 42 };
+  const patch = buildSavePatch(degradedExtract, {}, null, previousSave, 10, '');
+  assert.equal(patch.last_character_id, 'heroine1');
+  assert.equal(patch.last_image_id, 42);
+});
+
+test('[H2 #15,16] a degraded turn on a save with no prior character/image falls back to narrator/null without crashing', () => {
+  const degradedExtract = buildDegradedExtract('평범한 서사', 'EXTRACT_FAILED');
+  const patch = buildSavePatch(degradedExtract, {}, null, {}, 1, '');
+  assert.equal(patch.last_character_id, 'narrator');
+  assert.equal(patch.last_image_id, null);
+});
+
+test('[H2 #17] a degraded turn never writes npc_stats/npc_emotion/npc_relationship_state/active_suggestions/csa_active into the save patch', () => {
+  const degradedExtract = buildDegradedExtract('평범한 서사', 'EXTRACT_FAILED');
+  const previousSave = { last_character_id: 'heroine1', npc_stats: { heroine1: { 호감도: 50 } } };
+  const patch = buildSavePatch(degradedExtract, {}, null, previousSave, 10, '');
+  assert.equal(patch.npc_stats, undefined);
+  assert.equal(patch.npc_emotion, undefined);
+  assert.equal(patch.npc_relationship_state, undefined);
+  assert.equal('active_suggestions' in patch, false);
+  assert.equal('csa_active' in patch, false);
+});
+
+test('[H2 #18] a degraded turn\'s growth_event is always none, so calculateProgress leaves level/exp numerically unchanged', () => {
+  const degradedExtract = buildDegradedExtract('평범한 서사', 'EXTRACT_FAILED');
+  assert.equal(degradedExtract.growth_event, 'none');
+  const previousSave = { player_progress: { level: 3, exp: 7 } };
+  const patch = buildSavePatch(degradedExtract, {}, null, previousSave, 10, '');
+  assert.equal(patch.player_progress.level, 3);
+  assert.equal(patch.player_progress.exp, 7);
+  assert.equal(patch.player_progress.leveled_up, false);
+});
+
+test('[H2 #20] normalizeFinalChoicesDeterministically keeps near-duplicate choices as-is and only reports them as a warning, never replacing or dropping either one', () => {
+  const choices = ['한소영에게 말을 건다', '한소영에게 말을 건다.', '자리를 정리한다', '병동을 둘러본다'];
+  const result = normalizeFinalChoicesDeterministically(choices, { narrativeText: '', capability: null, characters: {}, playerName: '', playerJob: '' });
+  assert.deepEqual(result.choices, choices);
+  assert.match(result.warnings.join('\n'), /near-duplicate/);
+});
+
+test('[H2 #21,22] normalizeFinalChoicesDeterministically replaces only the single capability-infeasible choice, leaving the other 3 exactly as written', () => {
+  const capability = calculateHypnosisCapability({
+    player_progress: { level: 1 },
+    active_suggestions: { heroine1: [{ content: '기존', strength: '약함', active: true }] }
+  });
+  const choices = ['새 암시를 건다', '한소영과 대화한다', '자리를 정리한다', '병동을 둘러본다'];
+  const result = normalizeFinalChoicesDeterministically(choices, { narrativeText: '', capability, characters: { heroine1: { name: '한소영' } }, playerName: '', playerJob: '' });
+  assert.equal(result.replaced_count, 1);
+  assert.notEqual(result.choices[0], '새 암시를 건다');
+  assert.deepEqual(result.choices.slice(1), ['한소영과 대화한다', '자리를 정리한다', '병동을 둘러본다']);
+});
+
+test('[H2 #24] a JSON-syntax repair that already consumed the turn\'s recovery budget blocks the first-encounter/CSA/mind-monitor repairs the same turn would otherwise also need', async () => {
+  const originalFetch = globalThis.fetch;
+  const deepseekCalls = [];
+  globalThis.fetch = async (url, init = {}) => {
+    const requestUrl = String(url);
+    if (requestUrl.includes('/rpc/get_extract_context')) {
+      return new Response(JSON.stringify({
+        turn_count: 5,
+        master: { characters: { heroine9: { name: '박소현' } } },
+        save: {
+          player: { name: '금태양', job: '간호사' }, player_setup: { status: 'complete' }, opening_started: true,
+          world_state: { ward: 'hospital_6ward' },
+          csa_active: [{ id: 'csa_9', content: '규칙', scope_type: 'ward', scope_id: 'hospital_6ward', active: true }]
+          // no npc_encounters/last_character_id for heroine9 — a genuine first encounter
+        }
+      }), { headers: { 'content-type': 'application/json' } });
+    }
+    if (requestUrl.includes('/rpc/get_image_catalog_for_characters')) {
+      return new Response(JSON.stringify([]), { headers: { 'content-type': 'application/json' } });
+    }
+    if (requestUrl.includes('api.deepseek.com')) {
+      const body = JSON.parse(init.body);
+      deepseekCalls.push(body);
+      const isRepairCall = body.messages[0].content.includes('[원본 출력]');
+      if (isRepairCall) {
+        // The JSON-syntax repair call — succeeds, producing an extract that
+        // WOULD also need a first-encounter repair, a CSA-omission repair,
+        // and a mind-monitor repair, none of which may now fire.
+        return new Response(JSON.stringify({
+          choices: [{ message: { content: JSON.stringify({
+            character_id: 'heroine9', npcs_present: ['heroine9'],
+            npc_emotion: { surface: 'x', inner: 'y', physical_reaction: 'z' },
+            csa_omission: ['규칙이 실행되지 않음'],
+            choices: ['A', 'B', 'C', 'D']
+          }) }, finish_reason: 'stop' }]
+        }), { headers: { 'content-type': 'application/json' } });
+      }
+      // The main extraction call — deliberately not valid JSON.
+      return new Response(JSON.stringify({
+        choices: [{ message: { content: '이것은 유효한 JSON이 아닌 일반 텍스트 응답입니다.', finish_reason: 'stop' } }]
+      }), { headers: { 'content-type': 'application/json' } });
+    }
+    throw new Error(`unexpected fetch: ${requestUrl}`);
+  };
+  try {
+    const response = await worker.fetch(apiRequest('/api/extract', {
+      game_id: 'test-game', narrative_text: '평범한 하루가 흘러갔다.', player_input: ''
+    }), { DEEPSEEK_API_KEY: 'test' });
+    assert.equal(response.status, 200);
+    const body = await response.json();
+    assert.equal(body.json_repaired, true);
+    assert.equal(deepseekCalls.length, 2); // main (failed) + json-repair only
+    assert.equal(body.first_encounter_repaired, false);
+    assert.equal(body.extract.first_encounter_stats, null);
+    assert.equal(body.mind_monitor_retried, false);
+    assert.equal(body.narrative_replacement, null); // CSA omission never repaired
+    assert.equal(body.recovery_kind, 'json_syntax');
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('[H2 #25] when a genuine first-encounter repair consumes the turn\'s recovery budget, the CSA-omission repair that would otherwise also fire this same turn is skipped', async () => {
+  const originalFetch = globalThis.fetch;
+  const deepseekCalls = [];
+  globalThis.fetch = async (url, init = {}) => {
+    const requestUrl = String(url);
+    if (requestUrl.includes('/rpc/get_extract_context')) {
+      return new Response(JSON.stringify({
+        turn_count: 5,
+        master: { characters: { heroine5: { name: '김지은' } } },
+        save: {
+          player: { name: '금태양', job: '간호사' }, player_setup: { status: 'complete' }, opening_started: true,
+          world_state: { ward: 'hospital_6ward' },
+          csa_active: [{ id: 'csa_9', content: '규칙', scope_type: 'ward', scope_id: 'hospital_6ward', active: true }]
+          // no npc_encounters/last_character_id — a genuine first encounter
+        }
+      }), { headers: { 'content-type': 'application/json' } });
+    }
+    if (requestUrl.includes('/rpc/get_image_catalog_for_characters')) {
+      return new Response(JSON.stringify([]), { headers: { 'content-type': 'application/json' } });
+    }
+    if (requestUrl.includes('api.deepseek.com')) {
+      const body = JSON.parse(init.body);
+      deepseekCalls.push(body);
+      if (deepseekCalls.length === 1) {
+        return new Response(JSON.stringify({
+          choices: [{ message: { content: JSON.stringify({
+            character_id: 'heroine5', npcs_present: ['heroine5'],
+            npc_emotion: VALID_NPC_EMOTION,
+            csa_omission: ['규칙이 실행되지 않음'],
+            choices: ['A', 'B', 'C', 'D']
+          }) }, finish_reason: 'stop' }]
+        }), { headers: { 'content-type': 'application/json' } });
+      }
+      // Should only ever be reached once — the first-encounter repair call.
+      return new Response(JSON.stringify({
+        choices: [{ message: { content: JSON.stringify({
+          is_direct_first_encounter: true, 호감도: 15, 신뢰도: 10, reason: 'x'
+        }) }, finish_reason: 'stop' }]
+      }), { headers: { 'content-type': 'application/json' } });
+    }
+    throw new Error(`unexpected fetch: ${requestUrl}`);
+  };
+  try {
+    const response = await worker.fetch(apiRequest('/api/extract', {
+      game_id: 'test-game', narrative_text: '김지은과 처음 만났다.', player_input: ''
+    }), { DEEPSEEK_API_KEY: 'test' });
+    assert.equal(response.status, 200);
+    const body = await response.json();
+    assert.equal(deepseekCalls.length, 2); // main pass + first-encounter repair only
+    assert.equal(body.first_encounter_repaired, true);
+    assert.equal(body.narrative_replacement, null); // CSA omission never repaired
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('[H2 #27] consumeRecoveryBudget allows at most one auxiliary LLM recovery call per turn', () => {
+  const budget = createRecoveryBudget();
+  assert.equal(consumeRecoveryBudget(budget, 'json_syntax'), true);
+  assert.equal(budget.used, true);
+  assert.equal(budget.kind, 'json_syntax');
+  assert.equal(consumeRecoveryBudget(budget, 'mind_monitor'), false);
+  assert.equal(consumeRecoveryBudget(budget, 'first_encounter'), false);
+  assert.equal(budget.kind, 'json_syntax'); // unchanged by the failed attempts
+});
+
+test('[H2 #29] a degraded-eligible turn passes maxAttempts=1 to the DeepSeek retry loop — a failing Extract call is not retried before degrading', async () => {
+  const originalFetch = globalThis.fetch;
+  let deepseekCallCount = 0;
+  globalThis.fetch = async (url) => {
+    const requestUrl = String(url);
+    if (requestUrl.includes('/rpc/get_extract_context')) {
+      return new Response(JSON.stringify({
+        turn_count: 5, master: { characters: {} },
+        save: { player: { name: 'a', job: 'b' }, player_setup: { status: 'complete' }, opening_started: true }
+      }), { headers: { 'content-type': 'application/json' } });
+    }
+    if (requestUrl.includes('/rpc/get_image_catalog_for_characters')) {
+      return new Response(JSON.stringify([]), { headers: { 'content-type': 'application/json' } });
+    }
+    if (requestUrl.includes('api.deepseek.com')) {
+      deepseekCallCount++;
+      return new Response('deepseek down', { status: 500 });
+    }
+    throw new Error(`unexpected fetch: ${requestUrl}`);
+  };
+  try {
+    const response = await worker.fetch(apiRequest('/api/extract', {
+      game_id: 'test-game', narrative_text: '평범한 하루.', player_input: ''
+    }), { DEEPSEEK_API_KEY: 'test' });
+    assert.equal(response.status, 200); // degraded
+    const body = await response.json();
+    assert.equal(body.extract_degraded, true);
+    assert.equal(deepseekCallCount, 1);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('[H2 #28] a degraded-ineligible (status-critical, app-mutation input) turn passes maxAttempts=2 — a failing Extract call is retried once before returning the original hard error', async () => {
+  const originalFetch = globalThis.fetch;
+  let deepseekCallCount = 0;
+  globalThis.fetch = async (url) => {
+    const requestUrl = String(url);
+    if (requestUrl.includes('/rpc/get_extract_context')) {
+      return new Response(JSON.stringify({
+        turn_count: 5, master: { characters: {} },
+        save: { player: { name: 'a', job: 'b' }, player_setup: { status: 'complete' }, opening_started: true }
+      }), { headers: { 'content-type': 'application/json' } });
+    }
+    if (requestUrl.includes('/rpc/get_image_catalog_for_characters')) {
+      return new Response(JSON.stringify([]), { headers: { 'content-type': 'application/json' } });
+    }
+    if (requestUrl.includes('api.deepseek.com')) {
+      deepseekCallCount++;
+      return new Response('deepseek down', { status: 500 });
+    }
+    throw new Error(`unexpected fetch: ${requestUrl}`);
+  };
+  try {
+    const response = await worker.fetch(apiRequest('/api/extract', {
+      game_id: 'test-game', narrative_text: '평범한 하루.', player_input: '한소영에게 암시를 건다'
+    }), { DEEPSEEK_API_KEY: 'test' });
+    assert.equal(response.status, 502); // hard failure — degraded not allowed
+    const body = await response.json();
+    assert.equal(body.extract_degraded, undefined);
+    assert.equal(deepseekCallCount, 2);
   } finally {
     globalThis.fetch = originalFetch;
   }

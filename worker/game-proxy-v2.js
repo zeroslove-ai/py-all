@@ -24,23 +24,23 @@ export default {
 
     try {
       switch (url.pathname) {
-        case '/api/context':     return handleContext(req, env);
-        case '/api/story':      return handleStory(req, env);
-        case '/api/extract':    return handleExtract(req, env);
-        case '/api/image':      return handleImage(req, env);
-        case '/api/tts':        return handleTts(req, env);
+        case '/api/context':     return await handleContext(req, env);
+        case '/api/story':      return await handleStory(req, env);
+        case '/api/extract':    return await handleExtract(req, env);
+        case '/api/image':      return await handleImage(req, env);
+        case '/api/tts':        return await handleTts(req, env);
         case '/api/save-turn':
         case '/api/set-save':
           return jsonResponse({ error: 'This legacy API is gone. Use /api/commit-turn.' }, 410);
-        case '/api/commit-turn': return handleCommitTurn(req, env);
+        case '/api/commit-turn': return await handleCommitTurn(req, env);
         case '/api/version': return handleVersion(env);
-        case '/api/reset':      return handleReset(req, env);
+        case '/api/reset':      return await handleReset(req, env);
         default:
           return jsonResponse({ error: 'Not Found' }, 404);
       }
     } catch (e) {
       console.error('Worker error:', e);
-      return jsonResponse({ error: e.message || 'Internal Server Error' }, 500);
+      return jsonResponse({ error: e.message || 'Internal Server Error', error_code: 'UNHANDLED_WORKER_ERROR' }, 500);
     }
   }
 };
@@ -159,6 +159,21 @@ async function requestDeepSeekJsonWithRetry(env, requestBody, { timeoutMs = 6000
     }
   }
   throw lastError;
+}
+
+// H2: caps a single turn to at most one auxiliary LLM recovery call (JSON
+// syntax repair, first-encounter stat repair, CSA-omission narrative repair,
+// or mind-monitor repair) — the initial Extract call itself is not counted
+// against this budget, and choice repair never uses the LLM at all.
+function createRecoveryBudget() {
+  return { used: false, kind: null };
+}
+
+function consumeRecoveryBudget(budget, kind) {
+  if (!budget || budget.used) return false;
+  budget.used = true;
+  budget.kind = kind;
+  return true;
 }
 
 // Only an exact, full registered name counts as a mention — a title alone
@@ -405,7 +420,7 @@ async function repairRawJsonOutput(env, rawText) {
 // eligibility, and mind-monitor validation+repair. Factored out so the CSA-
 // omission fix (item 7) can re-run the exact same pipeline once against a
 // corrected narrative without duplicating any of this logic.
-async function performExtractionPass(env, { narrativeText, playerInput, compatCtx, shortlistedImages, nextTurn, requestId }) {
+async function performExtractionPass(env, { narrativeText, playerInput, compatCtx, shortlistedImages, nextTurn, requestId, recoveryBudget, maxAttempts = 1 }) {
   const timing = {};
   const tPrompt = Date.now();
   const prompt = buildExtractPrompt(narrativeText, playerInput, compatCtx, shortlistedImages, nextTurn);
@@ -422,7 +437,7 @@ async function performExtractionPass(env, { narrativeText, playerInput, compatCt
       response_format: { type: 'json_object' },
       stream: false,
       max_tokens: 3000
-    }, { timeoutMs: 60000 });
+    }, { timeoutMs: 60000, maxAttempts });
     timing.deepseek_total_ms = Date.now() - t3;
   } catch (error) {
     const errorCode = error.code === 'UPSTREAM_TIMEOUT' ? 'UPSTREAM_TIMEOUT'
@@ -433,8 +448,10 @@ async function performExtractionPass(env, { narrativeText, playerInput, compatCt
     // Both full regeneration attempts still produced unparseable JSON — try
     // one cheap syntax-only repair of the model's own last output instead of
     // giving up (or re-running the expensive narrative-to-JSON extraction).
+    // H2: this is one of the turn's auxiliary recovery calls, so it only
+    // runs if the shared per-turn recovery budget is still available.
     let repaired = null;
-    if (errorCode === 'EXTRACT_JSON_PARSE_FAILED' && error.rawText) {
+    if (errorCode === 'EXTRACT_JSON_PARSE_FAILED' && error.rawText && consumeRecoveryBudget(recoveryBudget, 'json_syntax')) {
       const tRepair = Date.now();
       try {
         repaired = await repairRawJsonOutput(env, error.rawText);
@@ -479,11 +496,23 @@ async function performExtractionPass(env, { narrativeText, playerInput, compatCt
   let validation = validateNpcEmotion(extract.npc_emotion, npcRejected ? 'narrator' : extract.character_id);
   timing.mind_validation_ms = Date.now() - t5;
 
+  // H2 item 9: don't let a mind-monitor repair spend the turn's one
+  // auxiliary-recovery slot when this turn might also need it for a
+  // higher-priority repair (a first direct encounter's stats, or a CSA
+  // omission) — those are reserved ahead of mind-monitor repair.
+  const potentialFirstEncounter = isSetupComplete(compatCtx?.save)
+    && extract.character_id
+    && extract.character_id !== 'narrator'
+    && !hasStructuredEncounter(compatCtx?.save, extract.character_id)
+    && !hasLegacyEncounterEvidence(compatCtx?.save, extract.character_id)
+    && hasMeaningfulNpcEmotion(extract.npc_emotion);
+  const shouldReserveRecovery = potentialFirstEncounter || extract.csa_omission.length > 0;
+
   let mindMonitorRepaired = false;
   if (!validation.ok) {
     const characterId = npcRejected ? null : extract.character_id;
     const character = characterId ? compatCtx?.master?.characters?.[characterId] : null;
-    if (character) {
+    if (character && !shouldReserveRecovery && consumeRecoveryBudget(recoveryBudget, 'mind_monitor')) {
       const t6 = Date.now();
       try {
         const repaired = await repairMindMonitor(env, character.name || character['이름'], character['말투'], narrativeText, extract.npc_emotion, validation.errors);
@@ -525,6 +554,108 @@ async function performExtractionPass(env, { narrativeText, playerInput, compatCt
   extract.dialogue_lines = filterMainNpcDialogue(extract, compatCtx?.master?.characters || {});
 
   return { ok: true, extract, jsonRepaired, mindMonitorRepaired, validation, rawText: result.rawText, effectiveWorldState, timing };
+}
+
+// ─────────────────────────────────────────────
+// H2: Extract degraded fallback — when Extract's own final JSON generation
+// fails outright (and no auxiliary recovery call fixes it), a turn that
+// can't possibly mutate persistent app state (suggestions/CSA/first
+// encounter) still saves its narrative and choices instead of blocking.
+// ─────────────────────────────────────────────
+
+// Deterministic, LLM-free turn_summary for a degraded turn — takes the
+// narrative's own [1. 서사 및 행동] text (everything before [2. 플레이어
+// 상황판], if present), collapses whitespace, and caps it at 200 chars,
+// matching the length contract Extract's own turn_summary already follows.
+function buildDegradedTurnSummary(narrativeText) {
+  let text = stripBoldMarkers(typeof narrativeText === 'string' ? narrativeText : '');
+
+  const statusMatch = /^.*2\.\s*플레이어\s*상황판.*$/m.exec(text);
+  if (statusMatch) text = text.slice(0, statusMatch.index);
+
+  text = text
+    .replace(/^.*1\.\s*서사\s*및\s*행동.*$/m, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+
+  return text.slice(0, 200);
+}
+
+// A degraded turn must never silently no-op an app-mutating player request
+// (creating/strengthening/removing a suggestion, changing a CSA) — those
+// need the real Extract result or a hard failure, never a degraded stand-in.
+// Exception: the narrative already contains a strength-exceeded marker, which
+// means the app action is already deterministically nullified regardless of
+// what Extract would have said, so degraded is safe there.
+function isPotentialAppMutationTurn(playerInput, narrativeText = '') {
+  const narrative = typeof narrativeText === 'string' ? narrativeText : '';
+
+  if (narrative.includes(SUGGESTION_STRENGTH_EXCEEDED_MARKER) || narrative.includes(CSA_STRENGTH_EXCEEDED_MARKER)) {
+    return false;
+  }
+
+  const input = typeof playerInput === 'string' ? playerInput : '';
+
+  const appTarget = /(?:암시|최면|상식\s*개변|상식개변)/i.test(input);
+  const mutationVerb = /(?:건다|걸다|걸어|적용|생성|추가|변경|수정|강화|해제|삭제|끄기|끈다|off|사용|실행)/i.test(input);
+
+  return appTarget && mutationVerb;
+}
+
+// A degraded turn must never silently skip a genuine first direct encounter
+// with a newly-registered NPC — that first-encounter stat write only ever
+// happens once per NPC, so losing it to a degraded fallback would be
+// unrecoverable later.
+function hasPotentialUnrecordedFirstEncounter(compatCtx, narrativeText, playerInput) {
+  const save = compatCtx?.save || {};
+  const characters = compatCtx?.master?.characters || {};
+
+  const ids = detectRegisteredCharacterIds(narrativeText, playerInput, characters, null);
+
+  return ids.some(characterId =>
+    !hasStructuredEncounter(save, characterId) && !hasLegacyEncounterEvidence(save, characterId)
+  );
+}
+
+function canUseDegradedExtract(compatCtx, narrativeText, playerInput) {
+  const save = compatCtx?.save || {};
+
+  if (!isSetupComplete(save)) return false;
+
+  if (isPotentialAppMutationTurn(playerInput, narrativeText)) return false;
+
+  if (hasPotentialUnrecordedFirstEncounter(compatCtx, narrativeText, playerInput)) return false;
+
+  return true;
+}
+
+// Everything that would otherwise create or change persistent state is
+// neutralized — a degraded turn only ever saves the narrative memory, its
+// deterministically-derived turn summary, and its next 4 choices.
+function buildDegradedExtract(narrativeText, reason = 'EXTRACT_FAILED') {
+  return normalizeExtract({
+    character_id: 'narrator',
+    npcs_present: [],
+    dialogue_lines: [],
+    npc_emotion: {},
+    npc_stat_changes: {},
+    npc_relationship_state: null,
+    first_encounter_stats: null,
+    suggestion_action: null,
+    csa_action: null,
+    csa_omission: [],
+    player_patch: {},
+    player_recommendation: null,
+    player_recommendations: [],
+    world_state_patch: null,
+    choices: buildChoicesFromNarrativeOrFallback(narrativeText),
+    turn_summary: buildDegradedTurnSummary(narrativeText),
+    growth_event: 'none',
+    image_id: null,
+    is_sexual: false,
+    extract_degraded: true,
+    extract_degraded_reason: reason
+  });
 }
 
 async function handleExtract(req, env) {
@@ -586,11 +717,60 @@ async function handleExtract(req, env) {
     image_shortlist_by_character: shortlistByCharacter
   }));
 
+  // H2: caps this turn to at most one auxiliary LLM recovery call, and lets
+  // a turn that can't possibly mutate persistent app state degrade to a
+  // narrative-only save instead of hard-failing when Extract's own final
+  // JSON generation fails outright.
+  const recoveryBudget = createRecoveryBudget();
+  const degradedAllowed = canUseDegradedExtract(compatCtx, narrative_text, player_input);
+
   const firstPass = await performExtractionPass(env, {
-    narrativeText: narrative_text, playerInput: player_input, compatCtx, shortlistedImages, nextTurn, requestId
+    narrativeText: narrative_text, playerInput: player_input, compatCtx, shortlistedImages, nextTurn, requestId,
+    recoveryBudget, maxAttempts: degradedAllowed ? 1 : 2
   });
   Object.assign(timing, firstPass.timing);
-  if (!firstPass.ok) return jsonResponse(firstPass.response, firstPass.status);
+  if (!firstPass.ok) {
+    if (!degradedAllowed) {
+      return jsonResponse(firstPass.response, firstPass.status);
+    }
+
+    const degradedReason = firstPass.response?.error_code || 'EXTRACT_FAILED';
+    const degradedExtract = buildDegradedExtract(narrative_text, degradedReason);
+
+    timing.total_ms = Date.now() - totalStart;
+
+    console.warn(JSON.stringify({
+      event: 'extract_degraded_fail_open',
+      endpoint: '/api/extract',
+      request_id: requestId,
+      game_id,
+      turn_number: nextTurn,
+      reason: degradedReason
+    }));
+
+    return jsonResponse({
+      extract: degradedExtract,
+      extract_degraded: true,
+      extract_degraded_reason: degradedReason,
+      narrative_replacement: null,
+      request_id: requestId,
+      raw: '',
+      mind_monitor_retried: false,
+      mind_monitor_errors: [],
+      choices_repaired: false,
+      choices_fallback_used: extractChoicesFromNarrative(narrative_text).length !== 4,
+      first_encounter_repaired: false,
+      suggestion_strength_exceeded: narrative_text.includes(SUGGESTION_STRENGTH_EXCEEDED_MARKER),
+      csa_strength_exceeded: narrative_text.includes(CSA_STRENGTH_EXCEEDED_MARKER),
+      json_repaired: false,
+      content_addition: null,
+      validation_warnings: [],
+      choice_validation_warnings: [],
+      recovery_used: recoveryBudget.used,
+      recovery_kind: recoveryBudget.kind,
+      timing
+    });
+  }
 
   let { extract, jsonRepaired, mindMonitorRepaired, validation, rawText, effectiveWorldState } = firstPass;
   const characters = compatCtx?.master?.characters || {};
@@ -601,63 +781,27 @@ async function handleExtract(req, env) {
   // back every turn and which is not an unregistered NPC.
   const playerJob = typeof compatCtx?.save?.player?.job === 'string' ? compatCtx.save.player.job.trim() : '';
 
-  // A self-reported CSA omission means the narrative had a clear trigger for
-  // an active, applicable forced rule but never executed it. The fix inserts
-  // a short corrective continuation right before [2. 플레이어 상황판] (never
-  // after [3. 선택지]) and re-runs the extraction pipeline once against the
-  // corrected narrative — every downstream field (choices, npc_emotion,
-  // stats, image) then comes from that corrected pass, not a piecemeal patch.
   let narrativeReplacement = null;
   let finalNarrativeText = narrative_text;
-  if (isSetupComplete(compatCtx.save) && extract.csa_omission.length) {
-    const applicableCsa = getApplicableCsaEntries(compatCtx.save);
-    if (applicableCsa.length) {
-      const tCsa = Date.now();
-      try {
-        const addition = await repairCsaOmission(
-          env, narrative_text, applicableCsa.map(csa => `- (${csa.id}) ${csa.content}`), extract.csa_omission
-        );
-        if (addition) {
-          const corrected = insertNarrativeAdditionBeforeStatus(narrative_text, addition);
-          // skipCsaCheck by simply not acting on the second pass's own
-          // csa_omission field below — prevents infinite repair loops.
-          const secondPass = await performExtractionPass(env, {
-            narrativeText: corrected, playerInput: player_input, compatCtx, shortlistedImages, nextTurn, requestId
-          });
-          if (secondPass.ok) {
-            ({ extract, validation } = secondPass);
-            jsonRepaired = jsonRepaired || secondPass.jsonRepaired;
-            mindMonitorRepaired = mindMonitorRepaired || secondPass.mindMonitorRepaired;
-            effectiveWorldState = secondPass.effectiveWorldState;
-            narrativeReplacement = corrected;
-            finalNarrativeText = corrected;
-          } else {
-            console.error('CSA omission re-extraction failed, keeping original extract:', { request_id: requestId });
-          }
-        }
-      } catch (error) {
-        console.error('CSA omission repair failed:', { request_id: requestId, error: error.message });
-      }
-      timing.csa_omission_repair_ms = Date.now() - tCsa;
-    }
-  }
 
-  // First-encounter safety net: mirrors the exact gate buildSavePatch itself
-  // uses (no recorded/inferred prior encounter for this NPC) so this only
-  // ever fires when a first-turn absolute value would otherwise silently be
-  // skipped — never for an NPC already known to have been met, and never a
-  // uniform fixed default (see repairMissingFirstEncounterStats).
-  // hasMeaningfulNpcEmotion(extract.npc_emotion) stands in for "genuinely
-  // engaged this turn, not just a background mention" — npc_emotion is only
-  // mandatory-filled when this NPC actually appeared as the scene's main
-  // character, not for an incidental background NPC.
+  // H2 item 9: first-encounter repair now runs BEFORE the CSA-omission
+  // repair, and both compete for the same one-per-turn recovery budget —
+  // first encounter has priority (see performExtractionPass's
+  // shouldReserveRecovery, which already held the budget back from mind-
+  // monitor repair for exactly this reason). Mirrors the exact gate
+  // buildSavePatch itself uses (no recorded/inferred prior encounter for
+  // this NPC) so this only ever fires when a first-turn absolute value
+  // would otherwise silently be skipped — never for an NPC already known to
+  // have been met, and never a uniform fixed default (see
+  // repairMissingFirstEncounterStats). hasMeaningfulNpcEmotion(...) stands
+  // in for "genuinely engaged this turn, not just a background mention".
   let firstEncounterRepaired = false;
   if (isSetupComplete(compatCtx.save) && extract.character_id && extract.character_id !== 'narrator'
     && extract._npc_registration_rejected !== true && extract._npc_location_rejected !== true
     && !isPlainObject(extract.first_encounter_stats)) {
     const characterId = extract.character_id;
     const alreadyEncountered = hasStructuredEncounter(compatCtx.save, characterId) || hasLegacyEncounterEvidence(compatCtx.save, characterId);
-    if (!alreadyEncountered && hasMeaningfulNpcEmotion(extract.npc_emotion)) {
+    if (!alreadyEncountered && hasMeaningfulNpcEmotion(extract.npc_emotion) && consumeRecoveryBudget(recoveryBudget, 'first_encounter')) {
       const tFirstEncounter = Date.now();
       try {
         const repaired = await repairMissingFirstEncounterStats(
@@ -671,6 +815,35 @@ async function handleExtract(req, env) {
         console.error('First encounter repair failed:', { request_id: requestId, error: error.message });
       }
       timing.first_encounter_repair_ms = Date.now() - tFirstEncounter;
+    }
+  }
+
+  // A self-reported CSA omission means the narrative had a clear trigger for
+  // an active, applicable forced rule but never executed it. H2 item 9: the
+  // fix still inserts a short corrective continuation right before
+  // [2. 플레이어 상황판] (never after [3. 선택지]), but no longer re-runs the
+  // whole extraction pipeline a second time against the corrected narrative
+  // — every other structured field (choices, npc_emotion, stats, image)
+  // stays exactly what the first pass produced. Only runs if the shared
+  // per-turn recovery budget is still available.
+  if (isSetupComplete(compatCtx.save) && extract.csa_omission.length) {
+    const applicableCsa = getApplicableCsaEntries(compatCtx.save);
+    if (applicableCsa.length && consumeRecoveryBudget(recoveryBudget, 'csa_omission')) {
+      const tCsa = Date.now();
+      try {
+        const addition = await repairCsaOmission(
+          env, narrative_text, applicableCsa.map(csa => `- (${csa.id}) ${csa.content}`), extract.csa_omission
+        );
+        if (addition) {
+          const corrected = insertNarrativeAdditionBeforeStatus(narrative_text, addition);
+          narrativeReplacement = corrected;
+          finalNarrativeText = corrected;
+          extract.csa_omission = [];
+        }
+      } catch (error) {
+        console.error('CSA omission repair failed:', { request_id: requestId, error: error.message });
+      }
+      timing.csa_omission_repair_ms = Date.now() - tCsa;
     }
   }
 
@@ -705,38 +878,35 @@ async function handleExtract(req, env) {
     console.warn('NPC narrative contract warnings (fail-open, turn continues):', { request_id: requestId, warnings: narrativeContract.warnings });
   }
 
-  // Unified final-choice validation: hypnosis capability, near-duplicate,
-  // and overlong are re-checked together after any repair, so fixing one
-  // violation can never silently reintroduce another. Falls back to
-  // deterministically-safe generic choices if even the repair still fails.
-  // (H1 item 4: unregistered/location-ineligible targets are no longer
-  // part of this — see validateFinalChoices.)
+  // H2 item 10: final-choice normalization is now fully deterministic — no
+  // LLM call, no risk of a repair reintroducing a violation it just fixed.
+  // Only the individual choice(s) that actually violate the current
+  // hypnosis capability get swapped out; the rest of the model's original
+  // choices (and any real choices already present in the narrative) survive
+  // untouched.
   let choicesRepaired = false;
   let choicesFallbackUsed = false;
+  let choiceValidationWarnings = [];
   if (isSetupComplete(compatCtx.save)) {
     const tChoices = Date.now();
     const hypnosisCapability = calculateHypnosisCapability(compatCtx.save, compatCtx.master);
-    const validateOptions = { capability: hypnosisCapability, characters, worldState: effectiveWorldState, playerName, playerJob };
-    let check = validateFinalChoices(extract.choices, validateOptions);
-    if (!check.ok) {
-      try {
-        const replacement = await repairFinalChoices(env, finalNarrativeText, check.problems);
-        if (replacement) { extract.choices = replacement; choicesRepaired = true; }
-      } catch (error) {
-        console.error('Final choice repair failed:', { request_id: requestId, error: error.message });
-      }
-      check = validateFinalChoices(extract.choices, validateOptions);
-      if (!check.ok) {
-        console.error('Choices still invalid after repair, using safe fallback:', { request_id: requestId, errors: check.errors });
-        extract.choices = buildSafeFallbackChoices();
-        choicesFallbackUsed = true;
-        check = validateFinalChoices(extract.choices, validateOptions);
-      }
-    }
-    // choice_named_targets is discarded and recomputed from the final
-    // choices text — a value reported against choices that have since been
-    // repaired or replaced would be stale.
-    extract.choice_named_targets = check.named_targets;
+    // Captured before normalization mutates extract.choices in place — extract
+    // and firstPass.extract are the same object (no second pass reassigns it
+    // anymore), so this must be read now or it would always reflect the
+    // already-normalized (always 4-entry) result instead of the original.
+    const firstPassChoicesWereArray = Array.isArray(extract.choices);
+    const choiceResult = normalizeFinalChoicesDeterministically(extract.choices, {
+      narrativeText: finalNarrativeText,
+      capability: hypnosisCapability,
+      characters,
+      playerName,
+      playerJob
+    });
+    extract.choices = choiceResult.choices;
+    extract.choice_named_targets = choiceResult.named_targets;
+    choicesRepaired = choiceResult.replaced_count > 0;
+    choicesFallbackUsed = extractChoicesFromNarrative(finalNarrativeText).length !== 4 && !firstPassChoicesWereArray;
+    choiceValidationWarnings = choiceResult.warnings;
     timing.choice_validation_ms = Date.now() - tChoices;
   }
 
@@ -746,6 +916,8 @@ async function handleExtract(req, env) {
 
   return jsonResponse({
     extract,
+    extract_degraded: false,
+    extract_degraded_reason: null,
     narrative_replacement: narrativeReplacement,
     request_id: requestId,
     raw: (rawText || '').slice(0, 200),
@@ -759,6 +931,9 @@ async function handleExtract(req, env) {
     json_repaired: jsonRepaired,
     content_addition: null, // superseded by narrative_replacement; kept only for legacy clients
     validation_warnings: narrativeContract.warnings,
+    choice_validation_warnings: choiceValidationWarnings,
+    recovery_used: recoveryBudget.used,
+    recovery_kind: recoveryBudget.kind,
     timing
   });
 }
@@ -899,41 +1074,51 @@ async function handleCommitTurn(req, env) {
     }
   }
   const patch = buildSavePatch(safeExtract, engine_patch, summaryPlan, ctx?.save || {}, turn_number, player_input);
-  const imageSceneRole = resolveSpecialSceneRole(
-    ctx?.save || {},
-    safeExtract,
-    patch.npc_stats?.[safeExtract.character_id],
-    patch.npc_stat_changes?.[safeExtract.character_id]
-  );
-  const specialImageId = imageSceneRole
-    ? selectSceneRoleImageId(imageCatalog, safeExtract.character_id, imageSceneRole)
-    : null;
 
-  // Never trust extract.image_id directly: recompute the same NPC's shortlist
-  // with the same candidateIds/slot rules used at Extract time, and only
-  // approve a requested ID that lands inside it with a matching pool.
-  const candidateIds = detectRegisteredCharacterIds(content, player_input, ctx?.master?.characters, ctx?.save?.last_character_id);
-  const commitSceneText = buildImageSceneText(content, player_input);
-  const commitSexualSignal = hasObviousSexualSceneSignals(content, player_input);
-  const targetAllocation = allocateImageCandidateSlots(candidateIds, 12).find(a => a.characterId === safeExtract.character_id);
-  const characterShortlist = targetAllocation
-    ? selectCharacterImageCandidates(imageCatalog, {
-        characterId: safeExtract.character_id,
-        slots: targetAllocation.slots,
-        sexualSignal: commitSexualSignal,
-        sceneText: commitSceneText,
-        characters: ctx?.master?.characters || {},
-        lastImageId: ctx?.save?.last_image_id
-      }).selected
-    : [];
+  // H2 item 11: a degraded turn never has a real image decision to make —
+  // skip scene-role/shortlist resolution entirely and just keep whatever
+  // image was already showing.
+  let imageSceneRole = null;
+  if (safeExtract.extract_degraded === true) {
+    safeExtract.image_id = ctx?.save?.last_image_id ?? null;
+    patch.last_image_id = ctx?.save?.last_image_id ?? null;
+  } else {
+    imageSceneRole = resolveSpecialSceneRole(
+      ctx?.save || {},
+      safeExtract,
+      patch.npc_stats?.[safeExtract.character_id],
+      patch.npc_stat_changes?.[safeExtract.character_id]
+    );
+    const specialImageId = imageSceneRole
+      ? selectSceneRoleImageId(imageCatalog, safeExtract.character_id, imageSceneRole)
+      : null;
 
-  safeExtract.image_id = specialImageId ?? selectValidatedShortlistImageId(characterShortlist, imageCatalog, {
-    characterId: safeExtract.character_id,
-    requestedId: safeExtract.image_id,
-    previousId: ctx?.save?.last_image_id,
-    isSexual: safeExtract.is_sexual
-  });
-  patch.last_image_id = safeExtract.image_id ?? null;
+    // Never trust extract.image_id directly: recompute the same NPC's shortlist
+    // with the same candidateIds/slot rules used at Extract time, and only
+    // approve a requested ID that lands inside it with a matching pool.
+    const candidateIds = detectRegisteredCharacterIds(content, player_input, ctx?.master?.characters, ctx?.save?.last_character_id);
+    const commitSceneText = buildImageSceneText(content, player_input);
+    const commitSexualSignal = hasObviousSexualSceneSignals(content, player_input);
+    const targetAllocation = allocateImageCandidateSlots(candidateIds, 12).find(a => a.characterId === safeExtract.character_id);
+    const characterShortlist = targetAllocation
+      ? selectCharacterImageCandidates(imageCatalog, {
+          characterId: safeExtract.character_id,
+          slots: targetAllocation.slots,
+          sexualSignal: commitSexualSignal,
+          sceneText: commitSceneText,
+          characters: ctx?.master?.characters || {},
+          lastImageId: ctx?.save?.last_image_id
+        }).selected
+      : [];
+
+    safeExtract.image_id = specialImageId ?? selectValidatedShortlistImageId(characterShortlist, imageCatalog, {
+      characterId: safeExtract.character_id,
+      requestedId: safeExtract.image_id,
+      previousId: ctx?.save?.last_image_id,
+      isSexual: safeExtract.is_sexual
+    });
+    patch.last_image_id = safeExtract.image_id ?? null;
+  }
 
   const t2 = Date.now();
   const result = await supabaseRpc(env, 'commit_turn', {
@@ -1853,9 +2038,13 @@ function buildSavePatch(extract, enginePatch = {}, summaryPlan = null, previousS
   const characterId = typeof extract.character_id === 'string'
     ? extract.character_id
     : null;
+  // H2 item 11: a degraded turn (extract_degraded === true) never carries a
+  // real character/image — preserve whatever the save already had instead
+  // of overwriting it with the degraded stand-in's narrator/null values.
+  const degraded = extract?.extract_degraded === true;
   const patch = {
-    last_character_id: characterId,
-    last_image_id: extract.image_id ?? null,
+    last_character_id: degraded ? (previousSave?.last_character_id || 'narrator') : characterId,
+    last_image_id: degraded ? (previousSave?.last_image_id ?? null) : (extract.image_id ?? null),
     // UI choice strings live here now, fully separate from active_suggestions
     // (real hypnosis suggestions) — see applySuggestionAction.
     last_choices: Array.isArray(extract.choices)
@@ -2661,28 +2850,28 @@ const TIER_NAME_FORBIDDEN_PHRASES = [
 function findInfeasibleChoices(choices, capability) {
   if (!Array.isArray(choices) || !capability) return [];
   const problems = [];
-  for (const choice of choices) {
-    if (typeof choice !== 'string' || !choice.trim()) continue;
+  choices.forEach((choice, choice_index) => {
+    if (typeof choice !== 'string' || !choice.trim()) return;
     if (!capability.can_create_suggestion) {
       const hit = SLOT_FULL_FORBIDDEN_PHRASES.find(phrase => choice.includes(phrase));
-      if (hit) { problems.push({ choice, reason: `암시 슬롯이 가득 찼는데 "${hit}" 표현이 포함됨` }); continue; }
+      if (hit) { problems.push({ choice_index, choice, reason: `암시 슬롯이 가득 찼는데 "${hit}" 표현이 포함됨` }); return; }
     }
     let tierViolation = false;
     for (const tier of TIER_NAME_FORBIDDEN_PHRASES) {
       if (tier.allowedWhen(capability)) continue;
       const hit = tier.phrases.find(phrase => choice.includes(phrase));
       if (hit) {
-        problems.push({ choice, reason: `사용 가능 강도가 "${capability.available_strength}"인데 "${hit}" 표현이 포함됨` });
+        problems.push({ choice_index, choice, reason: `사용 가능 강도가 "${capability.available_strength}"인데 "${hit}" 표현이 포함됨` });
         tierViolation = true;
         break;
       }
     }
-    if (tierViolation) continue;
+    if (tierViolation) return;
     if (!capability.can_increase_strength) {
       const hit = GENERIC_INCREASE_FORBIDDEN_PHRASES.find(phrase => choice.includes(phrase));
-      if (hit) problems.push({ choice, reason: `강도를 올릴 활성 암시가 없거나 이미 최고 강도인데 "${hit}" 표현이 포함됨` });
+      if (hit) problems.push({ choice_index, choice, reason: `강도를 올릴 활성 암시가 없거나 이미 최고 강도인데 "${hit}" 표현이 포함됨` });
     }
-  }
+  });
   return problems;
 }
 
@@ -3115,6 +3304,54 @@ function buildSafeFallbackChoices() {
   ];
 }
 
+// H2 item 4: reads the model's own already-generated [3. 선택지] block back
+// out of the narrative text deterministically — no LLM call. Used both to
+// fill in a degraded turn's choices and to top up a malformed/short choices
+// array during normal final-choice normalization.
+function extractChoicesFromNarrative(narrativeText) {
+  const text = stripBoldMarkers(typeof narrativeText === 'string' ? narrativeText : '');
+  const lines = text.split(/\r?\n/);
+
+  const headingIndex = lines.findIndex(line =>
+    /^\s*(?:#{1,6}\s*)?\[?\s*3\.\s*선택지\s*\]?\s*:?\s*$/i.test(line.trim())
+  );
+
+  const source = headingIndex >= 0
+    ? lines.slice(headingIndex + 1)
+    : lines.slice(-12);
+
+  const choices = [];
+
+  for (const line of source) {
+    const match = line.match(
+      /^\s*(?:[①②③④]|[1-4][.)]|[-*•])\s*(.+?)\s*$/
+    );
+    if (!match) continue;
+
+    const choice = match[1].trim();
+    if (!choice || choices.includes(choice)) continue;
+
+    choices.push(choice);
+    if (choices.length === 4) break;
+  }
+
+  return choices;
+}
+
+// Preserves whatever real choices could be read out of the narrative and
+// only pads the shortfall with deterministic generic fallback choices —
+// never discards good choices just because the count came up short.
+function buildChoicesFromNarrativeOrFallback(narrativeText) {
+  const result = extractChoicesFromNarrative(narrativeText).slice(0, 4);
+
+  for (const fallback of buildSafeFallbackChoices()) {
+    if (result.length >= 4) break;
+    if (!result.includes(fallback)) result.push(fallback);
+  }
+
+  return result.slice(0, 4);
+}
+
 // Returns both a flat string `errors` list (logging/tests) and a structured
 // `problems` list of {choice, reason} (repair-prompt use) — every check
 // contributes to both so a single repair call can be told everything wrong
@@ -3149,44 +3386,69 @@ function validateFinalChoices(choices, { capability, characters = {}, worldState
   return { ok: errors.length === 0, errors, problems, named_targets: namedTargets };
 }
 
-function buildFinalChoiceRepairPrompt(narrativeText, problems) {
-  const reasonLines = problems.map(p => `- "${p.choice}" → ${p.reason}`).join('\n');
-  return `너는 인터랙티브 게임의 [3. 선택지] 네 개만 다시 작성하는 역할이다. 서사 본문은 건드리지 않는다. 유효한 JSON 객체 하나만 출력한다. 마크다운 코드펜스와 설명문을 절대 쓰지 마라.
-
-[방금 생성된 서사]
-${(narrativeText || '').slice(-1500)}
-
-[문제 — 아래 항목을 모두 해결해야 한다]
-${reasonLines}
-
-규칙:
-- 정확히 4개의 선택지 문자열을 새로 만든다.
-- 위에서 지적된 모든 문제를 다시 포함하지 않는다.
-- 서로 뚜렷이 구별되는 행동이어야 하며, 사실상 같은 선택지를 두 개 이상 만들지 않는다.
-- 서사의 맥락과 자연스럽게 이어지는 행동이어야 한다.
-
-[요구 JSON 스키마]
-{"choices": ["", "", "", ""]}`;
+// H2 item 10: final-choice repair is now fully deterministic — no LLM call,
+// no risk of the model reintroducing a violation it just fixed elsewhere.
+function clipChoiceText(choice, maxLength = CHOICE_MAX_LENGTH) {
+  const text = stripBoldMarkers(typeof choice === 'string' ? choice : '').trim();
+  if (text.length <= maxLength) return text;
+  return `${text.slice(0, maxLength - 1).trimEnd()}…`;
 }
 
-// Single repair call covering every validateFinalChoices rule at once,
-// replacing the old pattern of running independent repairs (hypnosis,
-// then unregistered-NPC) that could each silently reintroduce the other's
-// violation.
-async function repairFinalChoices(env, narrativeText, problems) {
-  const prompt = buildFinalChoiceRepairPrompt(narrativeText, problems);
-  const result = await requestDeepSeekJsonWithRetry(env, {
-    model: 'deepseek-v4-flash',
-    thinking: { type: 'disabled' },
-    messages: [{ role: 'system', content: prompt }],
-    response_format: { type: 'json_object' },
-    stream: false,
-    max_tokens: 500
-  }, { timeoutMs: 30000, maxAttempts: 1 });
-  const choices = Array.isArray(result.parsed?.choices)
-    ? result.parsed.choices.filter(choice => typeof choice === 'string' && choice.trim())
+function buildCapabilitySafeChoice(capability, index = 0) {
+  const activeChoices = [
+    '현재 활성 암시의 범위 안에서 자연스럽게 부탁한다.',
+    '상대의 반응을 살피며 평범한 대화를 이어간다.',
+    '주변 상황을 확인하며 다음 행동을 결정한다.',
+    '현재 장면에서 할 수 있는 다른 행동을 시도한다.'
+  ];
+
+  const inactiveChoices = [
+    '상대의 반응을 살피며 평범한 대화를 이어간다.',
+    '현재 상황에 관해 가벼운 질문을 건넨다.',
+    '주변 상황을 조용히 관찰한다.',
+    '다른 행동이나 이동을 생각해 본다.'
+  ];
+
+  const source = capability?.active_count > 0 ? activeChoices : inactiveChoices;
+  return source[index % source.length];
+}
+
+// Single deterministic pass covering every validateFinalChoices rule at
+// once: pads/truncates to exactly 4 entries (reusing whatever real choices
+// the narrative already contains), clips overlong text, and swaps out only
+// the individual choice(s) that violate the current hypnosis capability —
+// the rest of the model's original choices are left untouched.
+function normalizeFinalChoicesDeterministically(choices, { narrativeText = '', capability, characters = {}, playerName = '', playerJob = '' } = {}) {
+  let normalized = Array.isArray(choices)
+    ? choices.filter(choice => typeof choice === 'string' && choice.trim()).map(choice => clipChoiceText(choice))
     : [];
-  return choices.length === 4 ? choices : null;
+
+  if (normalized.length !== 4) {
+    normalized = buildChoicesFromNarrativeOrFallback(narrativeText).map(choice => clipChoiceText(choice));
+  }
+
+  normalized = normalized.slice(0, 4);
+
+  while (normalized.length < 4) {
+    normalized.push(buildCapabilitySafeChoice(capability, normalized.length));
+  }
+
+  const infeasible = findInfeasibleChoices(normalized, capability);
+  for (const problem of infeasible) {
+    if (Number.isInteger(problem.choice_index) && problem.choice_index >= 0 && problem.choice_index < normalized.length) {
+      normalized[problem.choice_index] = buildCapabilitySafeChoice(capability, problem.choice_index);
+    }
+  }
+
+  const duplicateWarnings = findNearDuplicateChoices(normalized).map(problem => `near-duplicate: ${problem.reason}`);
+  const namedTargets = deriveChoiceNamedTargets(normalized, characters, playerName, playerJob);
+
+  return {
+    choices: normalized,
+    warnings: duplicateWarnings,
+    named_targets: namedTargets,
+    replaced_count: infeasible.length
+  };
 }
 
 // Extract self-reports a missed forced CSA rule in csa_omission (judged
@@ -3803,7 +4065,18 @@ export {
   CHOICE_MAX_LENGTH,
   buildSafeFallbackChoices,
   validateFinalChoices,
-  repairFinalChoices,
+  extractChoicesFromNarrative,
+  buildChoicesFromNarrativeOrFallback,
+  clipChoiceText,
+  buildCapabilitySafeChoice,
+  normalizeFinalChoicesDeterministically,
+  createRecoveryBudget,
+  consumeRecoveryBudget,
+  buildDegradedTurnSummary,
+  isPotentialAppMutationTurn,
+  hasPotentialUnrecordedFirstEncounter,
+  canUseDegradedExtract,
+  buildDegradedExtract,
   resolveCsaScopeId,
   resolveIsSexual,
   normalizeImagePool,

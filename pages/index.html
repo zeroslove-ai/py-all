@@ -637,17 +637,11 @@
       await retryStory({ input, nextTurn: state.turnCount + 1, narrative: null, extract: null, mode: null, narrativeElement: null });
     }
 
-    // extraFeedback is one-shot, worker-generated feedback (e.g. a Story
-    // NPC-contract violation list) for this single regeneration only — it is
-    // never persisted to the localStorage feedback queue and is delivered to
-    // Story as [USER FEEDBACK — APPLY TO THIS NEXT RESPONSE ONLY], which the
-    // Worker's own prompt contract already forbids narrating as an in-world
-    // player statement.
-    async function retryStory(pending, extraFeedback = []) {
+    async function retryStory(pending) {
       state.isStreaming = true; ui.setLoading(true, '서사 생성 중');
       ui.clearPendingTurnActions();
       try {
-        const result = await stream.story(state.gameId, pending.input, state.turnCount, chunk => ui.appendNarrative(chunk), [...getFeedback(), ...extraFeedback]);
+        const result = await stream.story(state.gameId, pending.input, state.turnCount, chunk => ui.appendNarrative(chunk), getFeedback());
         pending.narrative = result.text; pending.mode = result.mode;
         pending.timing = { ...(pending.timing || {}), story: result.timing };
         // finalizeNarrative() returns the exact DOM node it just finalized —
@@ -693,6 +687,9 @@
         const result = await api.extract(state.gameId, pending.narrative, pending.nextTurn, pending.input);
         console.info('[extract-timing]', result.timing);
         pending.extract = result.extract;
+        pending.extract.extract_degraded = result.extract_degraded === true;
+        pending.extract.extract_degraded_reason = result.extract_degraded_reason || null;
+        pending.extractDegraded = result.extract_degraded === true;
         pending.timing = { ...(pending.timing || {}), extract: result.timing };
         ui.removeTrailingChoiceBlock(pending.extract.choices);
         if (result.narrative_replacement) {
@@ -715,28 +712,18 @@
         const requestId = error.details?.request_id;
         const suffix = requestId ? ` · 요청 ${requestId}` : '';
         ui.markLastNarrativeUncommitted();
-        if (code === 'STORY_NPC_CONTRACT_FAILED') {
-          // Retrying Extract alone can never fix this — the Story text
-          // itself violated the registered-NPC contract, so only
-          // regenerating Story (or discarding) is offered.
-          const validationErrors = Array.isArray(error.details?.validation_errors) ? error.details.validation_errors : [];
-          ui.showPendingTurnActions(
-            `서사가 등록 NPC 규칙을 위반했습니다. [${code}]${suffix} 이 서사는 아직 저장되지 않았습니다.`,
-            [
-              { label: '같은 입력으로 서사 다시 생성', onClick: () => regenerateStoryAfterContractFailure(pending, validationErrors) },
-              { label: '이번 서사 버리고 이전 턴으로 돌아가기', onClick: () => discardFailedTurn() }
-            ],
-            validationErrors
-          );
-        } else {
-          ui.showPendingTurnActions(
-            `서사는 생성되었지만 상태 분석에 실패했습니다. [${code}]${suffix} 이 서사는 아직 저장되지 않았습니다.`,
-            [
-              { label: '상태 분석 다시 시도', onClick: () => retryExtract(pending) },
-              { label: '이번 서사 버리고 이전 턴으로 돌아가기', onClick: () => discardFailedTurn() }
-            ]
-          );
-        }
+        // H2 item 13: Extract hard failures are now all one path — H1
+        // removed the blocking NPC-contract check, and H2's degraded
+        // fallback already absorbs anything that can safely continue, so
+        // whatever still reaches this catch is a genuine hard failure with
+        // no separate "regenerate the narrative" option to offer.
+        ui.showPendingTurnActions(
+          `서사는 생성되었지만 상태 분석에 실패했습니다. [${code}]${suffix} 이 서사는 아직 저장되지 않았습니다.`,
+          [
+            { label: '상태 분석 다시 시도', onClick: () => retryExtract(pending) },
+            { label: '이번 서사 버리고 이전 턴으로 돌아가기', onClick: () => discardFailedTurn() }
+          ]
+        );
       } finally {
         state.isStreaming = false;
         // Set before setLoading(false) — and stays set through it — so that
@@ -747,22 +734,6 @@
         ui.setLoading(false);
         if (failed) ui.setChoicesEnabled(false);
       }
-    }
-
-    // The Story-contract-failure side of the choice: unlike a plain Extract
-    // retry, the narrative itself has to be thrown away and regenerated from
-    // the same input — the worker's validation_errors go back in as one-shot
-    // feedback so the regenerated Story avoids the same violation.
-    async function regenerateStoryAfterContractFailure(pending, validationErrors) {
-      state.inputLocked = false;
-      ui.clearPendingTurnActions();
-      ui.clearUncommittedNarrativeBadges();
-      ui.removeNarrativeElement(pending.narrativeElement);
-      pending.narrativeElement = null;
-      pending.narrative = null;
-      pending.extract = null;
-      const reasons = validationErrors.length ? validationErrors.join('; ') : '등록 NPC 규칙 위반';
-      await retryStory(pending, [`이전 서사가 등록 NPC 규칙을 위반해 다시 생성합니다(${reasons}). 위반 없이 다시 작성하세요.`]);
     }
 
     async function retryCommit(pending) {
@@ -787,9 +758,20 @@
         }
         ui.clearUncommittedNarrativeBadges();
         saveFeedback([]);
-        sidebar.updateCharacter(pending.extract.character_id); sidebar.updateMind(pending.extract.npc_emotion); sidebar.renderStats(pending.extract.npc_stats, pending.extract.character_id, pending.extract.npc_stat_changes);
+        // H2 item 12: a degraded turn saved narrative + choices only — NPC
+        // stats/mind/image are all untouched, so the sidebar and any shown
+        // image must keep showing whatever was already there, and there is
+        // nothing new for TTS to read.
+        if (pending.extractDegraded) {
+          if (!pending.degradedNoticeShown) {
+            ui.showSystemMessage('상태 분석 일부를 복구하지 못해 이번 턴은 서사와 선택지만 저장했습니다. NPC 수치·이미지·암시·상식개변 상태는 변경되지 않았습니다.');
+            pending.degradedNoticeShown = true;
+          }
+        } else {
+          sidebar.updateCharacter(pending.extract.character_id); sidebar.updateMind(pending.extract.npc_emotion); sidebar.renderStats(pending.extract.npc_stats, pending.extract.character_id, pending.extract.npc_stat_changes);
+          prepareMedia(pending.extract);
+        }
         ui.renderGameplayChoices(pending.extract.choices, submitChoice, { setup: pending.mode === 'player_setup' });
-        prepareMedia(pending.extract);
         console.info('[turn-timing]', {
           turn: pending.nextTurn,
           story_first_content_ms: pending.timing?.story?.first_content_ms ?? null,

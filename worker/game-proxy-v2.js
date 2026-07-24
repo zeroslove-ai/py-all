@@ -549,7 +549,14 @@ async function handleExtract(req, env) {
   let images = [];
   const t1 = Date.now();
   if (candidateIds.length) {
-    images = await supabaseRpc(env, 'get_image_catalog_for_characters', { p_game_id: game_id, p_character_ids: candidateIds });
+    // H1 item 5: an image-catalog lookup failure must never fail Extract —
+    // it only means no image gets attached to this turn.
+    try {
+      images = await supabaseRpc(env, 'get_image_catalog_for_characters', { p_game_id: game_id, p_character_ids: candidateIds });
+    } catch (error) {
+      images = [];
+      console.warn(JSON.stringify({ event: 'image_catalog_fail_open', endpoint: '/api/extract', request_id: requestId, error: error.message }));
+    }
   }
   timing.image_catalog_rpc_ms = Date.now() - t1;
 
@@ -593,26 +600,6 @@ async function handleExtract(req, env) {
   // "병원 행정직 / 원무과 주임"), which Story is expected to keep echoing
   // back every turn and which is not an unregistered NPC.
   const playerJob = typeof compatCtx?.save?.player?.job === 'string' ? compatCtx.save.player.job.trim() : '';
-
-  // A registered-but-wrong-location NPC, an unregistered named individual,
-  // or an unregistered independent dialogue speaker all mean the Story turn
-  // itself is wrong — no JSON-level repair fixes that, so this fails fast
-  // (before any repair call) with an error code the frontend can use to
-  // decide "regenerate Story", not "retry Extract". Gated on setup being
-  // complete: the player_setup candidate cards aren't NPC scenes and
-  // shouldn't be checked against the registered-NPC roster at all.
-  const narrativeContract = isSetupComplete(compatCtx.save)
-    ? validateNarrativeNpcContract({ narrativeText: narrative_text, characters, worldState: effectiveWorldState, playerName, playerJob })
-    : { ok: true, errors: [] };
-  if (!narrativeContract.ok) {
-    console.error('Story NPC contract failed:', { request_id: requestId, errors: narrativeContract.errors });
-    return jsonResponse({
-      error: 'Story violated the registered-NPC contract',
-      error_code: 'STORY_NPC_CONTRACT_FAILED',
-      validation_errors: narrativeContract.errors,
-      request_id: requestId
-    }, 422);
-  }
 
   // A self-reported CSA omission means the narrative had a clear trigger for
   // an active, applicable forced rule but never executed it. The fix inserts
@@ -703,11 +690,27 @@ async function handleExtract(req, env) {
   const csaStrengthExceeded = finalNarrativeText.includes(CSA_STRENGTH_EXCEEDED_MARKER);
   if (csaStrengthExceeded) extract.csa_action = null;
 
-  // Unified final-choice validation (item 3): every rule — hypnosis
-  // capability, unregistered target, location-ineligible target, near-
-  // duplicate — is re-checked together after any repair, so fixing one
+  // H1: the NPC narrative contract is fail-open — an unregistered minor
+  // NPC, a registered NPC appearing outside their usual ward, or a
+  // profession/rank mismatch never blocks the turn, triggers a Story/
+  // Extract re-call, or gets repaired. It's purely advisory: logged and
+  // surfaced in the response as validation_warnings, never written into
+  // the save patch. Checked against the truly final narrative text (after
+  // any CSA-omission correction), gated on setup being complete since the
+  // player_setup candidate cards aren't NPC scenes.
+  const narrativeContract = isSetupComplete(compatCtx.save)
+    ? validateNarrativeNpcContract({ narrativeText: finalNarrativeText, characters, worldState: effectiveWorldState, playerName, playerJob })
+    : { ok: true, warnings: [] };
+  if (narrativeContract.warnings.length) {
+    console.warn('NPC narrative contract warnings (fail-open, turn continues):', { request_id: requestId, warnings: narrativeContract.warnings });
+  }
+
+  // Unified final-choice validation: hypnosis capability, near-duplicate,
+  // and overlong are re-checked together after any repair, so fixing one
   // violation can never silently reintroduce another. Falls back to
   // deterministically-safe generic choices if even the repair still fails.
+  // (H1 item 4: unregistered/location-ineligible targets are no longer
+  // part of this — see validateFinalChoices.)
   let choicesRepaired = false;
   let choicesFallbackUsed = false;
   if (isSetupComplete(compatCtx.save)) {
@@ -755,6 +758,7 @@ async function handleExtract(req, env) {
     csa_strength_exceeded: csaStrengthExceeded,
     json_repaired: jsonRepaired,
     content_addition: null, // superseded by narrative_replacement; kept only for legacy clients
+    validation_warnings: narrativeContract.warnings,
     timing
   });
 }
@@ -869,13 +873,31 @@ async function handleCommitTurn(req, env) {
   const t1 = Date.now();
   let images = [];
   if (safeExtract.character_id && safeExtract.character_id !== 'narrator') {
-    images = await supabaseRpc(env, 'get_image_catalog_for_characters', { p_game_id: game_id, p_character_ids: [safeExtract.character_id] });
+    // H1 item 6: an image-catalog lookup failure must never fail commit_turn
+    // — falling back to an empty catalog naturally drives specialImageId/
+    // safeExtract.image_id/patch.last_image_id to null below, and the turn
+    // still saves normally.
+    try {
+      images = await supabaseRpc(env, 'get_image_catalog_for_characters', { p_game_id: game_id, p_character_ids: [safeExtract.character_id] });
+    } catch (error) {
+      images = [];
+      console.warn(JSON.stringify({ event: 'image_catalog_fail_open', endpoint: '/api/commit-turn', request_id: requestId, error: error.message }));
+    }
   }
   timing.image_rpc_ms = Date.now() - t1;
   const imageCatalog = flattenImageCatalog(images);
 
-  const summaryPlan = buildRecent100Plan(ctx?.save || {}, turn_number, safeExtract.turn_summary);
-  if (summaryPlan.isBoundary) summaryPlan.overallSummary = await summarizeRecent100(env, ctx?.save?.story_summary_overall, summaryPlan.completedWindow);
+  let summaryPlan = buildRecent100Plan(ctx?.save || {}, turn_number, safeExtract.turn_summary);
+  if (summaryPlan.isBoundary) {
+    try {
+      summaryPlan.overallSummary = await summarizeRecent100(env, ctx?.save?.story_summary_overall, summaryPlan.completedWindow);
+    } catch (error) {
+      // H1 item 7: a 100-turn summarization failure must never block
+      // commit_turn — fall back to the deterministic non-LLM plan instead.
+      summaryPlan = buildRecent100FailOpenPlan(ctx?.save || {}, turn_number, safeExtract.turn_summary);
+      console.warn(JSON.stringify({ event: 'recent100_summary_fail_open', endpoint: '/api/commit-turn', request_id: requestId, error: error.message }));
+    }
+  }
   const patch = buildSavePatch(safeExtract, engine_patch, summaryPlan, ctx?.save || {}, turn_number, player_input);
   const imageSceneRole = resolveSpecialSceneRole(
     ctx?.save || {},
@@ -1285,7 +1307,7 @@ function buildStoryPrompt(ctx, playerInput, currentTurn, feedback = []) {
 [금지] 이미지(![), 오디오(<audio), URL(http), HTML 태그를 절대 쓰지 마라. 이건 렌더러가 처리한다.
 [순서] 출력 순서: [1. 서사 및 행동] [2. 플레이어 상황판] [3. 선택지]. 마인드 모니터는 본문에 절대 출력하지 않는다. 선택지는 항상 맨 마지막.
 [대사] NPC 대사는 캐릭터명 (연기지시): "대사 내용" 형식으로만. 캐릭터명을 마크다운 굵게(**)로 감싸지 않는다.
-[등록 상호작용 NPC] 이름·개별 대사·성격·마인드 모니터·NPC 수치·이미지·관계 기록을 가질 수 있는 NPC는 master.characters의 등록 히로인만 허용한다. 미등록 의사·간호사·환자·보호자·직원은 이름 없는 배경 묘사만 가능하며 먼저 말을 걸거나 선택지/현재 접근 대상이 될 수 없다. 플레이어가 배경 인물에게 접근하면 장소·소속에 맞는 등록 히로인이 응대한다. 새 고유 NPC 이름을 만들거나 외형만 보고 heroine ID를 추측하지 마라.
+[등록 상호작용 NPC] 마인드 모니터·NPC 수치·이미지·관계 기록처럼 영구 저장되는 상태를 가질 수 있는 NPC는 master.characters의 등록 히로인뿐이다. 미등록 의사·간호사·환자·보호자·직원 같은 단역 NPC도 이름과 대사를 자유롭게 가질 수 있고, 먼저 말을 걸거나 선택지/현재 접근 대상이 될 수 있다 — 다만 그 단역에게는 수치·이미지·관계 기록 같은 영구 상태를 만들지 않는다. 외형만 보고 heroine ID를 추측하지 마라 — 실제로 등장한 등록 히로인에게만 붙인다.
 [모니터] 매턴 [1.표면의식]/[2.잠재의식] 각 100~200자, 대화체로 작성.`;
 
   // ─── 섹션 2: 플레이어 게이트 (조걸) ───
@@ -1412,13 +1434,13 @@ ${recentMemorySlice.map((m, index) => clipHeadTail(m.content || '', index === re
   const csaExampleSection = mode === 'normal' || mode === 'opening'
     ? buildCsaExampleSection(hypnosisCapability, master)
     : '';
-  // Same recency-favoring end position — [등록 상호작용 NPC] in coreRules
-  // already bans naming an unregistered individual as a choice target, but
-  // that rule sits at the very top of a long prompt; restating it right
-  // before [3. 선택지] is generated is what actually kept it from being
-  // ignored for the other choice-generation rules above.
+  // H1 item 4: unregistered-target/location-ineligible-target are no longer
+  // repair-triggering problems in validateFinalChoices, so this reminder no
+  // longer forbids naming unregistered minor NPCs in choices — it just
+  // clarifies what the registered roster is actually for (permanent state
+  // storage), so the model doesn't over-restrict itself unnecessarily.
   const registeredNpcChoiceReminder = mode === 'normal' || mode === 'opening'
-    ? `\n\n[REMINDER — REGISTERED NPC CHOICE TARGETS]\n[3. 선택지]에서 직접 상호작용 대상으로 실명을 제시하는 인물은 반드시 master.characters에 등록된 히로인이어야 한다. 미등록 의사·간호사·환자·보호자·직원·동료는 이름 없는 배경 인물로만 표현하고("같은 과 동료", "지나가던 간호사" 등), 그 실명을 선택지에 넣지 않는다.\n`
+    ? `\n\n[REMINDER — CHOICE TARGETS]\n[3. 선택지]에 미등록 단역(의사·간호사·환자·보호자·직원·동료 등)의 실명이 대상으로 나와도 괜찮다. 등록 히로인 명단은 수치·이미지·관계 기록 같은 영구 상태가 저장되는 대상을 가리킬 뿐, 선택지에 누가 등장할 수 있는지를 제한하지 않는다.\n`
     : '';
   // Same recency-favoring end position — a choice this long forces the
   // frontend button to either truncate with an ellipsis or wrap across many
@@ -1731,7 +1753,11 @@ function buildEligibleNpcRosterSection(worldState = {}, characters = {}) {
     const affiliation = typeof character['소속'] === 'string' ? character['소속'] : '';
     return `- ${id}: ${name}${affiliation ? ` (${affiliation})` : ''}`;
   }).join('\n');
-  return `\n\n[ELIGIBLE NPC ROSTER — CURRENT SCENE]\n현재 장소에서 실제로 등장·상호작용할 수 있는 등록 NPC:\n${lines}\n위 목록에 없는 등록 NPC를 이번 장면에 등장시키지 않는다.`;
+  // H1 item 3: this roster is now an advisory priority list, not an
+  // exclusive whitelist — an off-list registered NPC can still appear for
+  // natural reasons (rounds, covering support, business travel, a personal
+  // visit), and doing so is never itself prohibited.
+  return `\n\n[ELIGIBLE NPC ROSTER — CURRENT SCENE]\n현재 장소에서 우선적으로 등장·상호작용시킬 등록 NPC(추천 순위이며 배타적 명단 아님):\n${lines}\n위 목록에 없는 등록 NPC도 회진·지원·출장·개인적 방문 등 자연스러운 이유가 있다면 얼마든지 등장할 수 있다.`;
 }
 
 function registeredCharacterIds(characters = {}) {
@@ -1743,17 +1769,22 @@ function normalizeRegisteredNpcExtract(extract = {}, characters = {}, lastCharac
   const ids = registeredCharacterIds(characters);
   const requestedId = typeof normalized.character_id === 'string' ? normalized.character_id : '';
   const unregisteredRequestedId = Boolean(requestedId) && requestedId !== 'narrator' && !ids.has(requestedId);
-  const fallback = ids.has(lastCharacterId) ? lastCharacterId : 'narrator';
-  normalized.character_id = ids.has(requestedId) ? requestedId : (requestedId === 'narrator' ? 'narrator' : fallback);
-  normalized._npc_registration_rejected = unregisteredRequestedId || normalized._npc_registration_rejected === true;
-  if (unregisteredRequestedId) console.warn('Unregistered character_id replaced:', { requestedId, replacement: normalized.character_id });
-  // A registered NPC who simply can't be in the current ward is a distinct
-  // failure from an unregistered one: the id itself stays as reported (never
-  // silently swapped to the previous NPC) but is flagged so the caller (and
-  // validateNarrativeNpcContract) know the Story turn itself is wrong.
-  normalized._npc_location_rejected = normalized.character_id !== 'narrator'
-    && ids.has(normalized.character_id)
-    && !isNpcEligibleForScene(normalized.character_id, worldState, characters);
+  // H1 item 2: an unregistered character_id is NEVER silently swapped to
+  // lastCharacterId (or any other real NPC) — that risked misattributing
+  // structured state (stats/emotion/relationship/first encounter/
+  // suggestion/image) to whichever NPC happened to be on screen last turn.
+  // It always collapses to narrator instead; the narrative text and choices
+  // themselves are left completely untouched by this.
+  normalized.character_id = ids.has(requestedId) ? requestedId : 'narrator';
+  normalized._npc_registration_rejected = unregisteredRequestedId;
+  if (unregisteredRequestedId) console.warn('Unregistered character_id cleared to narrator (no structured NPC data saved for it):', { requestedId });
+  // H1 item 3: ward/location eligibility is advisory-only now — a
+  // registered NPC appearing outside their usual ward (support shift,
+  // rounds, a personal visit) is never treated as a data-integrity
+  // failure, so this flag is no longer set at all. isNpcEligibleForScene/
+  // NPC_LOCATION_RULES still exist, but only for
+  // buildEligibleNpcRosterSection's own "who to prioritize" recommendation
+  // text — never to strip a real NPC's saved data.
   normalized.npcs_present = [...new Set(Array.isArray(normalized.npcs_present)
     ? normalized.npcs_present.filter(id => typeof id === 'string' && ids.has(id))
     : [])];
@@ -1763,7 +1794,10 @@ function normalizeRegisteredNpcExtract(extract = {}, characters = {}, lastCharac
   normalized.dialogue_lines = Array.isArray(normalized.dialogue_lines)
     ? normalized.dialogue_lines.filter(line => isPlainObject(line) && typeof line.speaker === 'string' && names.has(line.speaker.trim()))
     : [];
-  if (normalized.character_id === 'narrator' || unregisteredRequestedId || normalized._npc_location_rejected) {
+  // Only a genuinely unregistered/absent character_id (now always
+  // collapsed to narrator above) strips permanent NPC data — a registered
+  // NPC's data survives regardless of where they appeared this turn.
+  if (normalized.character_id === 'narrator') {
     normalized.npc_emotion = {};
     normalized.npc_stat_changes = {};
     normalized.npc_relationship_state = null;
@@ -2974,37 +3008,37 @@ function findProfessionRankErrors(narrativeText, characters = {}) {
   return problems;
 }
 
+// H1: fail-open — this NEVER blocks the turn. Every item found is purely
+// advisory (a minor unregistered NPC, a registered NPC outside their usual
+// ward, a profession/rank mismatch): collected into `warnings` for
+// logging/observability only, never a reason to fail the request, trigger
+// another Story/Extract call, or get written into the save patch. `ok` is
+// always true; kept in the return shape only so callers don't need to
+// change their destructuring pattern.
 function validateNarrativeNpcContract({ narrativeText, characters = {}, worldState = {}, playerName = '', playerJob = '' } = {}) {
-  const errors = [];
+  const warnings = [];
 
   const mentions = detectExplicitRegisteredNpcMentions(narrativeText, characters);
   const seenIneligible = new Set();
   for (const mention of mentions) {
     if (seenIneligible.has(mention.character_id) || isNpcEligibleForScene(mention.character_id, worldState, characters)) continue;
     seenIneligible.add(mention.character_id);
-    errors.push(`registered NPC "${mention.name}"(${mention.character_id}) named but not eligible for the current scene location`);
+    warnings.push(`registered NPC "${mention.name}"(${mention.character_id}) named outside their usual ward roster (advisory only — support shifts/rounds/visits are normal)`);
   }
 
   for (const label of findUnregisteredNamedIndividualsInNarrative(narrativeText, characters, playerName, playerJob)) {
-    errors.push(`unregistered named individual "${label}" mentioned`);
+    warnings.push(`unregistered named individual "${label}" mentioned (advisory only — minor NPCs are allowed)`);
   }
 
   for (const speaker of findUnregisteredDialogueSpeakers(narrativeText, characters, playerName, playerJob)) {
-    errors.push(`unregistered dialogue speaker "${speaker}"`);
+    warnings.push(`unregistered dialogue speaker "${speaker}" (advisory only — minor NPCs are allowed to speak)`);
   }
 
   for (const problem of findProfessionRankErrors(narrativeText, characters)) {
-    errors.push(`registered NPC "${problem.name}"(${problem.character_id}) profession/rank contract violation: ${problem.reason}`);
+    warnings.push(`registered NPC "${problem.name}"(${problem.character_id}) profession/rank contract mismatch: ${problem.reason} (advisory only)`);
   }
 
-  // An unregistered/location-ineligible *choice* target is deliberately not
-  // checked here even though it's the same underlying concern: unlike prose
-  // narrative text, [3. 선택지] is a JSON-level field validateFinalChoices
-  // can already repair in place (see below) — hard-rejecting the whole Story
-  // turn for something the choice-repair pipeline fixes on its own would
-  // make that pipeline dead code.
-
-  return { ok: errors.length === 0, errors };
+  return { ok: true, warnings };
 }
 
 // ─────────────────────────────────────────────
@@ -3103,9 +3137,12 @@ function validateFinalChoices(choices, { capability, characters = {}, worldState
   });
 
   if (capability) record(findInfeasibleChoices(choices, capability), 'hypnosis capability');
+  // H1 item 4: 'unregistered target' and 'location-ineligible target' are no
+  // longer repair triggers — a minor NPC's real name or a registered NPC
+  // from outside the current ward roster in a choice is left as-is, never
+  // repaired away or replaced with generic fallback choices. namedTargets
+  // itself is still computed and returned (analysis/logging use only).
   const namedTargets = deriveChoiceNamedTargets(choices, characters, playerName, playerJob);
-  record(findUnregisteredChoiceTargets(choices, namedTargets, characters), 'unregistered target');
-  record(findLocationIneligibleChoiceTargets(choices, namedTargets, worldState, characters), 'location-ineligible target');
   record(findNearDuplicateChoices(choices), 'near-duplicate');
   record(findOverlongChoices(choices), 'overlong');
 
@@ -3313,6 +3350,20 @@ function buildRecent100Plan(save, turnNumber, turnSummary) {
   return isBoundary
     ? { isBoundary, completedWindow: accumulated, recentSummary: turnSummary || '', recentStartTurn: turnNumber }
     : { isBoundary, recentSummary: accumulated, recentStartTurn: start };
+}
+
+// H1 item 7: deterministic, LLM-free fallback for when summarizeRecent100
+// fails at a 100-turn boundary. Never resets the just-completed window —
+// instead it behaves like a normal non-boundary turn: keeps the existing
+// recent100_start_turn, appends this turn's summary onto the existing
+// recent100 text (same appendSummary truncation as the normal path), and
+// leaves story_summary_overall untouched (buildSavePatch only overwrites it
+// when isBoundary is true) so a later normal boundary or separate task can
+// still re-summarize the preserved window.
+function buildRecent100FailOpenPlan(previousSave, turnNumber, turnSummary) {
+  const start = Number.isInteger(previousSave?.recent100_start_turn) ? previousSave.recent100_start_turn : 0;
+  const accumulated = appendSummary(previousSave?.story_summary_recent100 || '', turnSummary || '');
+  return { isBoundary: false, recentSummary: accumulated, recentStartTurn: start };
 }
 
 async function summarizeRecent100(env, overall, completedWindow) {
@@ -3671,6 +3722,7 @@ export {
   normalizeExtract,
   normalizeImageCatalog,
   buildRecent100Plan,
+  buildRecent100FailOpenPlan,
   selectImageId,
   calculateProgress,
   applyNpcStatChanges,

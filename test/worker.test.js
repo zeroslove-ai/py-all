@@ -6,6 +6,7 @@ import {
   buildExtractPrompt,
   buildStoryPrompt,
   buildRecent100Plan,
+  buildRecent100FailOpenPlan,
   calculateProgress,
   normalizeExtract,
   normalizeImageCatalog,
@@ -530,7 +531,7 @@ test('NPC obedience is capped at three without a hypnosis-depth event', () => {
   assert.match(update.errors.join('\n'), /순응도: delta 4 exceeds allowed ±3/);
 });
 
-test('unregistered NPC IDs, present lists, and dialogue cannot become a save target', () => {
+test('H1 item 2: unregistered NPC IDs, present lists, and dialogue cannot become a save target, and are never misattributed to lastCharacterId', () => {
   const characters = { heroine1: { name: '한소영' }, heroine9: { name: '박소현' } };
   const extract = normalizeRegisteredNpcExtract({
     character_id: 'new_nurse',
@@ -541,9 +542,10 @@ test('unregistered NPC IDs, present lists, and dialogue cannot become a save tar
     npc_relationship_state: { player_ejaculation_count: 99 },
     image_id: 99
   }, characters, 'heroine1');
-  assert.equal(extract.character_id, 'heroine1');
+  // H1: never silently swapped to lastCharacterId ('heroine1') — always narrator.
+  assert.equal(extract.character_id, 'narrator');
   assert.equal(extract._npc_registration_rejected, true);
-  assert.deepEqual(extract.npcs_present, ['heroine1', 'heroine9']);
+  assert.deepEqual(extract.npcs_present, []);
   assert.deepEqual(extract.dialogue_lines, [{ speaker: '한소영', text: '등록 대사' }]);
   assert.deepEqual(extract.npc_stat_changes, {});
   assert.equal(extract.image_id, null);
@@ -575,7 +577,8 @@ test('registered character is added once to npcs_present and no-previous invalid
 test('narrator stores no NPC state while registered location characters remain valid', () => {
   const characters = { heroine5: { name: '윤아름' }, heroine6: { name: '서지아' }, heroine9: { name: '박소현' } };
   const sixWard = normalizeRegisteredNpcExtract({ character_id: 'six_ward_new_nurse' }, characters, 'heroine5');
-  assert.equal(sixWard.character_id, 'heroine5');
+  // H1: never silently swapped to lastCharacterId ('heroine5') — always narrator.
+  assert.equal(sixWard.character_id, 'narrator');
   assert.equal(sixWard._npc_registration_rejected, true);
   const parkSohyun = normalizeRegisteredNpcExtract({ character_id: 'heroine9', npcs_present: ['heroine9'] }, characters, null);
   assert.equal(parkSohyun.character_id, 'heroine9');
@@ -608,7 +611,7 @@ test('isNpcEligibleForScene fails open (allows) when the ward is unknown/unset, 
   assert.equal(isNpcEligibleForScene('heroine7', { ward: 'hospital_6ward' }, characters), true);
 });
 
-test('a registered-but-wrong-location NPC keeps its own character_id (never silently swapped to the previous NPC) but drops sensitive fields', () => {
+test('H1 item 3: a registered-but-wrong-location NPC keeps its own character_id and all its data — location mismatch is advisory-only, never a data-stripping condition', () => {
   const characters = { heroine1: { name: '한소영' }, heroine5: { name: '김지은' } };
   const extract = normalizeRegisteredNpcExtract({
     character_id: 'heroine5', npcs_present: ['heroine5'],
@@ -618,42 +621,46 @@ test('a registered-but-wrong-location NPC keeps its own character_id (never sile
     suggestion_action: { action: 'activate', character_id: 'heroine5', content: 'x', strength: '약함' }
   }, characters, 'heroine1', { ward: 'hospital_3ward' });
   assert.equal(extract.character_id, 'heroine5'); // not silently swapped to heroine1
-  assert.equal(extract._npc_location_rejected, true);
+  assert.equal(extract._npc_location_rejected, undefined); // flag no longer set at all
   assert.equal(extract._npc_registration_rejected, false);
-  assert.deepEqual(extract.npc_emotion, {});
-  assert.deepEqual(extract.npc_stat_changes, {});
-  assert.equal(extract.npc_relationship_state, null);
-  assert.equal(extract.image_id, null);
-  assert.equal(extract.first_encounter_stats, null);
-  assert.equal(extract.suggestion_action, null);
+  assert.deepEqual(extract.npc_emotion, { surface: 'x', physical_reaction: '' });
+  assert.deepEqual(extract.npc_stat_changes, { 호감도: { delta: 3, reason: 'x' } });
+  assert.deepEqual(extract.npc_relationship_state, { player_ejaculation_count: 1 });
+  assert.equal(extract.image_id, 42);
+  assert.deepEqual(extract.first_encounter_stats, { 호감도: 10, 신뢰도: 10 });
+  assert.deepEqual(extract.suggestion_action, { action: 'activate', character_id: 'heroine5', content: 'x', strength: '약함' });
+  // previousSave is {} (no prior encounter), so first_encounter_stats (10/10)
+  // wins over the raw stat-change delta — this is unrelated to H1, just how
+  // buildSavePatch always resolves a genuine first encounter.
   const patch = buildSavePatch(extract, {}, null, {}, 5, '');
-  assert.equal(patch.npc_stats, undefined);
-  assert.equal(patch.npc_emotion, undefined);
-  assert.equal('active_suggestions' in patch, false);
+  assert.equal(patch.npc_stats?.heroine5?.호감도, 10);
+  assert.deepEqual(patch.npc_emotion?.heroine5, { surface: 'x', physical_reaction: '' });
 });
 
-test('normalizeRegisteredNpcExtract with no worldState argument fails open (defaults to {}), matching existing 3-arg call sites', () => {
+test('normalizeRegisteredNpcExtract with no worldState argument still works (defaults to {}), matching existing 3-arg call sites', () => {
   const characters = { heroine5: { name: '김지은' } };
   const extract = normalizeRegisteredNpcExtract({ character_id: 'heroine5' }, characters, null);
-  assert.equal(extract._npc_location_rejected, false);
+  assert.equal(extract.character_id, 'heroine5');
+  assert.equal(extract._npc_location_rejected, undefined);
 });
 
 // ─────────────────────────────────────────────
 // validateNarrativeNpcContract (item 2)
 // ─────────────────────────────────────────────
 
-test('validateNarrativeNpcContract flags an unregistered "이름+직책" mention but allows an anonymous "동료 간호사"', () => {
+test('H1 item 1: validateNarrativeNpcContract never blocks — it warns about an unregistered "이름+직책" mention but allows an anonymous "동료 간호사" with no warning', () => {
   const characters = { heroine1: { name: '한소영' } };
   const named = validateNarrativeNpcContract({
     narrativeText: '박미영 간호사가 서류를 건넨다.', characters, worldState: {}, playerName: '금태양'
   });
-  assert.equal(named.ok, false);
-  assert.match(named.errors.join('\n'), /박미영 간호사/);
+  assert.equal(named.ok, true); // H1: always ok — never blocks the turn
+  assert.match(named.warnings.join('\n'), /박미영 간호사/);
 
   const anonymous = validateNarrativeNpcContract({
     narrativeText: '동료 간호사가 서류를 건넨다.', characters, worldState: {}, playerName: '금태양'
   });
   assert.equal(anonymous.ok, true);
+  assert.deepEqual(anonymous.warnings, []);
 });
 
 test('looksLikeKoreanFullName requires a common-surname first character and rejects a grammatical-particle final character', () => {
@@ -672,6 +679,7 @@ test('validateNarrativeNpcContract does not false-positive on ordinary Korean ph
   const text = '병실 안에서 간호사가 지나간다. 병동 간호사들이 오가는 복도. 환자분 보호자가 대기 중이다.';
   const result = validateNarrativeNpcContract({ narrativeText: text, characters, worldState: {}, playerName: '정우진' });
   assert.equal(result.ok, true);
+  assert.deepEqual(result.warnings, []);
 });
 
 test('validateNarrativeNpcContract never flags the player\'s own name as an unregistered individual', () => {
@@ -680,6 +688,7 @@ test('validateNarrativeNpcContract never flags the player\'s own name as an unre
     narrativeText: '금태양 간호사가 서류를 정리한다.', characters, worldState: {}, playerName: '금태양'
   });
   assert.equal(result.ok, true);
+  assert.deepEqual(result.warnings, []);
 });
 
 test('validateNarrativeNpcContract never flags a fragment of the player\'s own established job title (e.g. "원무과 주임" inside "병원 행정직 / 원무과 주임")', () => {
@@ -691,15 +700,16 @@ test('validateNarrativeNpcContract never flags a fragment of the player\'s own e
     characters, worldState: {}, playerName: '정우진', playerJob: '병원 행정직 / 원무과 주임'
   });
   assert.equal(result.ok, true);
+  assert.deepEqual(result.warnings, []);
 });
 
-test('validateNarrativeNpcContract flags a registered NPC named in the narrative while in the wrong ward', () => {
+test('H1 item 3: validateNarrativeNpcContract warns (but never blocks) about a registered NPC named in the narrative while in the wrong ward', () => {
   const characters = { heroine5: { name: '김지은' } };
   const result = validateNarrativeNpcContract({
     narrativeText: '김지은이 다가온다.', characters, worldState: { ward: 'hospital_3ward' }, playerName: ''
   });
-  assert.equal(result.ok, false);
-  assert.match(result.errors.join('\n'), /김지은.*not eligible/);
+  assert.equal(result.ok, true); // H1: location mismatch is advisory-only now
+  assert.match(result.warnings.join('\n'), /김지은.*named outside their usual ward roster/);
 });
 
 // ─────────────────────────────────────────────
@@ -774,13 +784,13 @@ test('findProfessionRankErrors flags a confirmed non-新 nurse described as a ne
   assert.deepEqual(findProfessionRankErrors('박소현은 이번에 들어온 신입이다.', noExperienceData), []);
 });
 
-test('validateNarrativeNpcContract folds findProfessionRankErrors into its own error list', () => {
+test('validateNarrativeNpcContract folds findProfessionRankErrors into its own warnings list (advisory-only, never blocks)', () => {
   const characters = { heroine1: { name: '한소영', profession: '간호사', rank: '수간호사' } };
   const result = validateNarrativeNpcContract({
     narrativeText: '한소영은 일반 간호사다.', characters, worldState: {}, playerName: ''
   });
-  assert.equal(result.ok, false);
-  assert.match(result.errors.join('\n'), /profession\/rank contract violation/);
+  assert.equal(result.ok, true);
+  assert.match(result.warnings.join('\n'), /profession\/rank contract mismatch/);
 });
 
 test('buildAddressAbbreviationSection states the abbreviated hospital-wide address rules and the priority order over them', () => {
@@ -815,7 +825,7 @@ test('findUnregisteredDialogueSpeakers also recognizes the legacy **이름** bol
   assert.deepEqual(findUnregisteredDialogueSpeakers(text, characters, ''), ['박미영']);
 });
 
-test('/api/extract returns 422 STORY_NPC_CONTRACT_FAILED and never commits when the narrative violates the NPC contract', async () => {
+test('H1 item 1: /api/extract returns 200 with validation_warnings (never blocks) when the narrative names an unregistered minor NPC', async () => {
   const originalFetch = globalThis.fetch;
   globalThis.fetch = async (url) => {
     const requestUrl = String(url);
@@ -843,10 +853,11 @@ test('/api/extract returns 422 STORY_NPC_CONTRACT_FAILED and never commits when 
     const response = await worker.fetch(apiRequest('/api/extract', {
       game_id: 'test-game', narrative_text: '박미영 간호사가 서류를 건넨다.', player_input: ''
     }), { DEEPSEEK_API_KEY: 'test' });
-    assert.equal(response.status, 422);
+    assert.equal(response.status, 200);
     const body = await response.json();
-    assert.equal(body.error_code, 'STORY_NPC_CONTRACT_FAILED');
-    assert.ok(Array.isArray(body.validation_errors) && body.validation_errors.length > 0);
+    assert.equal(body.error_code, undefined);
+    assert.ok(Array.isArray(body.validation_warnings) && body.validation_warnings.length > 0);
+    assert.match(body.validation_warnings.join('\n'), /박미영 간호사/);
     assert.ok(body.request_id);
   } finally {
     globalThis.fetch = originalFetch;
@@ -857,14 +868,12 @@ test('/api/extract returns 422 STORY_NPC_CONTRACT_FAILED and never commits when 
 // validateFinalChoices unified re-check (item 3)
 // ─────────────────────────────────────────────
 
-test('validateFinalChoices catches a hypnosis-capability violation that survives an unregistered-NPC-only repair, and vice versa', () => {
+test('H1 item 4: validateFinalChoices still catches a hypnosis-capability violation, but an unregistered minor NPC named as a choice target is no longer a failure reason', () => {
   const capability = calculateHypnosisCapability({
     player_progress: { level: 1 },
     active_suggestions: { heroine1: [{ content: 'a', strength: '약함', active: true }] }
   });
   const characters = { heroine1: { name: '한소영' } };
-  // A "repair" that only fixed the unregistered-NPC problem but left a
-  // slot-full violation must still fail re-validation.
   const stillHypnosisBroken = validateFinalChoices(
     ['새 암시를 건다', '한소영에게 인사한다', '자리를 정리한다', '병동을 둘러본다'],
     { capability, characters, worldState: {}, playerName: '' }
@@ -872,24 +881,25 @@ test('validateFinalChoices catches a hypnosis-capability violation that survives
   assert.equal(stillHypnosisBroken.ok, false);
   assert.match(stillHypnosisBroken.errors.join('\n'), /hypnosis capability/);
 
-  // And the reverse: a "repair" that only fixed the hypnosis problem but
-  // left an unregistered target must still fail re-validation too.
-  const stillNpcBroken = validateFinalChoices(
+  // H1: naming an unregistered minor NPC ("이주연 대리") in a choice is now
+  // allowed — it's never a repair-triggering problem, so with no other
+  // violation present this passes cleanly.
+  const unregisteredTargetOk = validateFinalChoices(
     ['이주연 대리에게 물어본다', '한소영에게 인사한다', '자리를 정리한다', '병동을 둘러본다'],
     { capability: calculateHypnosisCapability({ player_progress: { level: 1 } }), characters, worldState: {}, playerName: '' }
   );
-  assert.equal(stillNpcBroken.ok, false);
-  assert.match(stillNpcBroken.errors.join('\n'), /unregistered target/);
+  assert.equal(unregisteredTargetOk.ok, true);
+  assert.doesNotMatch(unregisteredTargetOk.errors.join('\n'), /unregistered target/);
 });
 
-test('validateFinalChoices flags a location-ineligible registered NPC target and near-duplicate choices, and recomputes choice_named_targets from the final text', () => {
+test('H1 item 4: validateFinalChoices no longer flags a location-ineligible registered NPC choice target, but still catches near-duplicate choices and computes choice_named_targets', () => {
   const characters = { heroine5: { name: '김지은' } };
   const result = validateFinalChoices(
     ['김지은에게 말을 건다', '김지은 에게 말을 건다', '자리를 정리한다', '병동을 둘러본다'],
     { capability: null, characters, worldState: { ward: 'hospital_3ward' }, playerName: '' }
   );
-  assert.equal(result.ok, false);
-  assert.match(result.errors.join('\n'), /location-ineligible target/);
+  assert.equal(result.ok, false); // still fails, but only for near-duplicate now
+  assert.doesNotMatch(result.errors.join('\n'), /location-ineligible target/);
   assert.match(result.errors.join('\n'), /near-duplicate/);
   assert.deepEqual(result.named_targets, [
     { choice_index: 0, name: '김지은' },
@@ -4537,7 +4547,7 @@ test('findUnregisteredChoiceTargets returns [] when there are no named targets o
   assert.deepEqual(findUnregisteredChoiceTargets(['그냥 대화한다'], undefined, {}), []);
 });
 
-test('/api/extract repairs choices that name an unregistered person as a direct interaction target', async () => {
+test('H1 item 4: /api/extract no longer repairs (or re-calls the LLM for) choices that name an unregistered person as a direct interaction target — they are kept as-is', async () => {
   const originalFetch = globalThis.fetch;
   const deepseekCalls = [];
   globalThis.fetch = async (url, init = {}) => {
@@ -4555,18 +4565,11 @@ test('/api/extract repairs choices that name an unregistered person as a direct 
     if (requestUrl.includes('api.deepseek.com')) {
       const body = JSON.parse(init.body);
       deepseekCalls.push(body);
-      if (deepseekCalls.length === 1) {
-        return new Response(JSON.stringify({
-          choices: [{ message: { content: JSON.stringify({
-            character_id: 'narrator', npcs_present: [],
-            choice_named_targets: [{ choice_index: 0, name: '이주연' }],
-            choices: ['이주연 대리에게 물어본다', '한소영에게 인사한다', '자리를 정리한다', '병동을 둘러본다']
-          }) }, finish_reason: 'stop' }]
-        }), { headers: { 'content-type': 'application/json' } });
-      }
       return new Response(JSON.stringify({
         choices: [{ message: { content: JSON.stringify({
-          choices: ['같은 과 동료에게 물어본다', '한소영에게 인사한다', '자리를 정리한다', '병동을 둘러본다']
+          character_id: 'narrator', npcs_present: [],
+          choice_named_targets: [{ choice_index: 0, name: '이주연' }],
+          choices: ['이주연 대리에게 물어본다', '한소영에게 인사한다', '자리를 정리한다', '병동을 둘러본다']
         }) }, finish_reason: 'stop' }]
       }), { headers: { 'content-type': 'application/json' } });
     }
@@ -4574,17 +4577,13 @@ test('/api/extract repairs choices that name an unregistered person as a direct 
   };
   try {
     const response = await worker.fetch(apiRequest('/api/extract', {
-      // Deliberately vague in the narrative itself (no name+role pattern) —
-      // only the model-hallucinated *choice* text names the unregistered
-      // "이주연 대리", so this exercises the choice-level repair path rather
-      // than the narrative-wide contract check (covered separately).
       game_id: 'test-game', narrative_text: '낯선 방문객이 다가온다.', player_input: ''
     }), { DEEPSEEK_API_KEY: 'test' });
     assert.equal(response.status, 200);
     const body = await response.json();
-    assert.equal(deepseekCalls.length, 2);
-    assert.equal(body.choices_repaired, true);
-    assert.deepEqual(body.extract.choices, ['같은 과 동료에게 물어본다', '한소영에게 인사한다', '자리를 정리한다', '병동을 둘러본다']);
+    assert.equal(deepseekCalls.length, 1); // no repair re-call
+    assert.equal(body.choices_repaired, false);
+    assert.deepEqual(body.extract.choices, ['이주연 대리에게 물어본다', '한소영에게 인사한다', '자리를 정리한다', '병동을 둘러본다']);
   } finally {
     globalThis.fetch = originalFetch;
   }
@@ -4642,18 +4641,18 @@ test('/api/extract repairs a choice over the 120-character ceiling, replacing on
   }
 });
 
-test('the Story prompt reminds, only for normal/opening turns, that direct-interaction choice targets must be registered NPCs', () => {
+test('H1 item 4: the Story prompt reminds, only for normal/opening turns, that unregistered minor NPCs may appear as choice targets and the registered roster is only for permanent-state storage', () => {
   const save = {
     player: { name: '금태양', job: '간호사' },
     player_setup: { status: 'complete' },
     opening_started: true
   };
   const prompt = buildStoryPrompt({ master: { characters: {} }, save, recent_memories: [] }, '계속', 5);
-  assert.match(prompt.messages[0].content, /\[REMINDER — REGISTERED NPC CHOICE TARGETS\]/);
-  assert.match(prompt.messages[0].content, /미등록 의사·간호사·환자·보호자·직원·동료는 이름 없는 배경 인물로만/);
+  assert.match(prompt.messages[0].content, /\[REMINDER — CHOICE TARGETS\]/);
+  assert.match(prompt.messages[0].content, /미등록 단역.*실명이 대상으로 나와도 괜찮다/);
 
   const setupPrompt = buildStoryPrompt({ master: { characters: {} }, save: { player: {} }, recent_memories: [] }, '계속', 0);
-  assert.doesNotMatch(setupPrompt.messages[0].content, /\[REMINDER — REGISTERED NPC CHOICE TARGETS\]/);
+  assert.doesNotMatch(setupPrompt.messages[0].content, /\[REMINDER — CHOICE TARGETS\]/);
 });
 
 // ─────────────────────────────────────────────
@@ -4693,4 +4692,492 @@ test('image_reasoning is fully removed: not in the JSON schema, and stripped fro
   assert.doesNotMatch(prompt, /image_reasoning/);
   const normalized = normalizeExtract({ character_id: 'heroine9', image_reasoning: '모델이 어쨌든 보낸 값' });
   assert.equal('image_reasoning' in normalized, false);
+});
+
+// ═════════════════════════════════════════════
+// H1 긴급 안정화 — item 9's exact required test list (1-25)
+// ═════════════════════════════════════════════
+
+test('[H1 #1] 미등록 이름을 가진 간호사가 등장해도 Extract 200 (validateNarrativeNpcContract never blocks)', () => {
+  const result = validateNarrativeNpcContract({
+    narrativeText: '박서연 간호사가 다가와 인사를 건넨다.', characters: {}, worldState: {}, playerName: ''
+  });
+  assert.equal(result.ok, true);
+});
+
+test('[H1 #2] 미등록 이름을 가진 NPC가 대사해도 Extract 200', () => {
+  const characters = { heroine1: { name: '한소영' } };
+  const text = '박서연 (미소를 지으며): "안녕하세요."';
+  const result = validateNarrativeNpcContract({ narrativeText: text, characters, worldState: {}, playerName: '' });
+  assert.equal(result.ok, true);
+  assert.match(result.warnings.join('\n'), /unregistered dialogue speaker/);
+});
+
+test('[H1 #3] 등록 NPC 직업·직급 오류는 warning이고 Extract 200', () => {
+  const characters = { heroine1: { name: '한소영', profession: '간호사', rank: '수간호사' } };
+  const result = validateNarrativeNpcContract({
+    narrativeText: '한소영은 일반 간호사다.', characters, worldState: {}, playerName: ''
+  });
+  assert.equal(result.ok, true);
+  assert.match(result.warnings.join('\n'), /profession\/rank contract mismatch/);
+});
+
+test('[H1 #4] 등록 NPC가 기본 병동과 다른 장소에 등장해도 Extract 200', () => {
+  const characters = { heroine5: { name: '김지은' } };
+  const result = validateNarrativeNpcContract({
+    narrativeText: '김지은이 다가온다.', characters, worldState: { ward: 'hospital_3ward' }, playerName: ''
+  });
+  assert.equal(result.ok, true);
+  assert.match(result.warnings.join('\n'), /named outside their usual ward roster/);
+});
+
+test('[H1 #5] 다른 병동 등록 NPC의 npc_emotion과 stat change가 위치 이유만으로 삭제되지 않음', () => {
+  const characters = { heroine5: { name: '김지은' } };
+  const extract = normalizeRegisteredNpcExtract({
+    character_id: 'heroine5',
+    npc_emotion: { surface: 'x' },
+    npc_stat_changes: { 호감도: { delta: 2, reason: 'x' } }
+  }, characters, null, { ward: 'hospital_3ward' });
+  assert.deepEqual(extract.npc_emotion, { surface: 'x', physical_reaction: '' });
+  assert.deepEqual(extract.npc_stat_changes, { 호감도: { delta: 2, reason: 'x' } });
+});
+
+test('[H1 #6] 다른 병동 등록 NPC의 first encounter와 suggestion action이 위치 이유만으로 삭제되지 않음', () => {
+  const characters = { heroine5: { name: '김지은' } };
+  const extract = normalizeRegisteredNpcExtract({
+    character_id: 'heroine5',
+    first_encounter_stats: { 호감도: 10, 신뢰도: 10 },
+    suggestion_action: { action: 'activate', character_id: 'heroine5', content: 'x', strength: '약함' }
+  }, characters, null, { ward: 'hospital_3ward' });
+  assert.deepEqual(extract.first_encounter_stats, { 호감도: 10, 신뢰도: 10 });
+  assert.deepEqual(extract.suggestion_action, { action: 'activate', character_id: 'heroine5', content: 'x', strength: '약함' });
+});
+
+test('[H1 #7] 미등록 character_id는 narrator로 정리됨', () => {
+  const characters = { heroine1: { name: '한소영' } };
+  const extract = normalizeRegisteredNpcExtract({ character_id: 'unknown_person' }, characters, null);
+  assert.equal(extract.character_id, 'narrator');
+});
+
+test('[H1 #8] 미등록 character_id가 last_character_id로 잘못 교체되지 않음', () => {
+  const characters = { heroine1: { name: '한소영' } };
+  const extract = normalizeRegisteredNpcExtract({ character_id: 'unknown_person' }, characters, 'heroine1');
+  assert.notEqual(extract.character_id, 'heroine1');
+  assert.equal(extract.character_id, 'narrator');
+});
+
+test('[H1 #9] 미등록 NPC의 영구 데이터만 제거되고 서사·선택지는 유지', async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (url) => {
+    const requestUrl = String(url);
+    if (requestUrl.includes('/rpc/get_extract_context')) {
+      return new Response(JSON.stringify({
+        turn_count: 5,
+        master: { characters: { heroine1: { name: '한소영' } } },
+        save: { player: { name: '금태양', job: '간호사' }, player_setup: { status: 'complete' }, opening_started: true }
+      }), { headers: { 'content-type': 'application/json' } });
+    }
+    if (requestUrl.includes('/rpc/get_image_catalog_for_characters')) {
+      return new Response(JSON.stringify([]), { headers: { 'content-type': 'application/json' } });
+    }
+    if (requestUrl.includes('api.deepseek.com')) {
+      return new Response(JSON.stringify({
+        choices: [{ message: { content: JSON.stringify({
+          character_id: 'unknown_nurse', npcs_present: ['unknown_nurse'],
+          npc_emotion: { surface: 'x' }, npc_stat_changes: { 호감도: { delta: 3, reason: 'x' } }, image_id: 5,
+          choices: ['새 간호사에게 인사한다', '한소영에게 인사한다', '자리를 정리한다', '병동을 둘러본다']
+        }) }, finish_reason: 'stop' }]
+      }), { headers: { 'content-type': 'application/json' } });
+    }
+    throw new Error(`unexpected fetch: ${requestUrl}`);
+  };
+  try {
+    const response = await worker.fetch(apiRequest('/api/extract', {
+      game_id: 'test-game', narrative_text: '새로운 간호사가 인사를 건넨다.', player_input: ''
+    }), { DEEPSEEK_API_KEY: 'test' });
+    assert.equal(response.status, 200);
+    const body = await response.json();
+    assert.equal(body.extract.character_id, 'narrator');
+    assert.deepEqual(body.extract.npc_stat_changes, {});
+    assert.equal(body.extract.image_id, null);
+    assert.deepEqual(body.extract.choices, ['새 간호사에게 인사한다', '한소영에게 인사한다', '자리를 정리한다', '병동을 둘러본다']);
+    assert.equal(body.narrative_replacement, null);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('[H1 #10] 미등록 NPC 선택지 때문에 repairFinalChoices를 호출하지 않음', async () => {
+  const originalFetch = globalThis.fetch;
+  const deepseekCalls = [];
+  globalThis.fetch = async (url, init = {}) => {
+    const requestUrl = String(url);
+    if (requestUrl.includes('/rpc/get_extract_context')) {
+      return new Response(JSON.stringify({
+        turn_count: 5,
+        master: { characters: { heroine1: { name: '한소영' } } },
+        save: { player: { name: '금태양', job: '간호사' }, player_setup: { status: 'complete' }, opening_started: true }
+      }), { headers: { 'content-type': 'application/json' } });
+    }
+    if (requestUrl.includes('/rpc/get_image_catalog_for_characters')) {
+      return new Response(JSON.stringify([]), { headers: { 'content-type': 'application/json' } });
+    }
+    if (requestUrl.includes('api.deepseek.com')) {
+      deepseekCalls.push(JSON.parse(init.body));
+      return new Response(JSON.stringify({
+        choices: [{ message: { content: JSON.stringify({
+          character_id: 'narrator', npcs_present: [],
+          choices: ['이주연 대리에게 물어본다', '한소영에게 인사한다', '자리를 정리한다', '병동을 둘러본다']
+        }) }, finish_reason: 'stop' }]
+      }), { headers: { 'content-type': 'application/json' } });
+    }
+    throw new Error(`unexpected fetch: ${requestUrl}`);
+  };
+  try {
+    const response = await worker.fetch(apiRequest('/api/extract', {
+      game_id: 'test-game', narrative_text: '낯선 방문객이 다가온다.', player_input: ''
+    }), { DEEPSEEK_API_KEY: 'test' });
+    assert.equal(response.status, 200);
+    const body = await response.json();
+    assert.equal(deepseekCalls.length, 1); // no repair re-call
+    assert.equal(body.choices_repaired, false);
+    assert.deepEqual(body.extract.choices, ['이주연 대리에게 물어본다', '한소영에게 인사한다', '자리를 정리한다', '병동을 둘러본다']);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('[H1 #11] 위치 불일치 선택지 때문에 repairFinalChoices를 호출하지 않음', async () => {
+  const originalFetch = globalThis.fetch;
+  const deepseekCalls = [];
+  globalThis.fetch = async (url, init = {}) => {
+    const requestUrl = String(url);
+    if (requestUrl.includes('/rpc/get_extract_context')) {
+      return new Response(JSON.stringify({
+        turn_count: 5,
+        master: { characters: { heroine5: { name: '김지은' } } },
+        save: {
+          player: { name: '금태양', job: '간호사' }, player_setup: { status: 'complete' }, opening_started: true,
+          world_state: { ward: 'hospital_3ward' }
+        }
+      }), { headers: { 'content-type': 'application/json' } });
+    }
+    if (requestUrl.includes('/rpc/get_image_catalog_for_characters')) {
+      return new Response(JSON.stringify([]), { headers: { 'content-type': 'application/json' } });
+    }
+    if (requestUrl.includes('api.deepseek.com')) {
+      deepseekCalls.push(JSON.parse(init.body));
+      return new Response(JSON.stringify({
+        choices: [{ message: { content: JSON.stringify({
+          character_id: 'narrator', npcs_present: [],
+          choices: ['김지은에게 말을 건다', '자리를 정리한다', '병동을 둘러본다', '그냥 지나간다']
+        }) }, finish_reason: 'stop' }]
+      }), { headers: { 'content-type': 'application/json' } });
+    }
+    throw new Error(`unexpected fetch: ${requestUrl}`);
+  };
+  try {
+    const response = await worker.fetch(apiRequest('/api/extract', {
+      game_id: 'test-game', narrative_text: '조용한 3병동 복도.', player_input: ''
+    }), { DEEPSEEK_API_KEY: 'test' });
+    assert.equal(response.status, 200);
+    const body = await response.json();
+    assert.equal(deepseekCalls.length, 1); // no repair re-call
+    assert.equal(body.choices_repaired, false);
+    assert.deepEqual(body.extract.choices, ['김지은에게 말을 건다', '자리를 정리한다', '병동을 둘러본다', '그냥 지나간다']);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('[H1 #12] 정상 등록 NPC의 기존 저장 동작 유지', async () => {
+  const originalFetch = globalThis.fetch;
+  let committedPatch;
+  globalThis.fetch = async (url, init = {}) => {
+    const requestUrl = String(url);
+    if (requestUrl.includes('/rpc/get_commit_context')) {
+      return new Response(JSON.stringify({
+        turn_count: 5,
+        master: { characters: { heroine1: { name: '한소영' } } },
+        save: { world_state: { ward: 'hospital_3ward' }, npc_stats: { heroine1: { 호감도: 50 } } }
+      }), { headers: { 'content-type': 'application/json' } });
+    }
+    if (requestUrl.includes('/rpc/get_image_catalog_for_characters')) {
+      return new Response(JSON.stringify([]), { headers: { 'content-type': 'application/json' } });
+    }
+    if (requestUrl.includes('/rpc/commit_turn')) {
+      committedPatch = JSON.parse(init.body).p_patch;
+      return new Response(JSON.stringify({ status: 'committed', turn_count: 6 }), { headers: { 'content-type': 'application/json' } });
+    }
+    throw new Error(`unexpected fetch: ${requestUrl}`);
+  };
+  try {
+    const response = await worker.fetch(apiRequest('/api/commit-turn', {
+      game_id: 'test-game', turn_number: 6,
+      content: '한소영이 다가와 인사한다.',
+      extract: { character_id: 'heroine1', npc_emotion: { surface: 'x' }, npc_stat_changes: { 호감도: { delta: 3, reason: '친절' } } }
+    }), { SUPABASE_SECRET_KEY: 'test' });
+    assert.equal(response.status, 200);
+    assert.equal(committedPatch.npc_stats.heroine1.호감도, 53);
+    assert.deepEqual(committedPatch.npc_emotion.heroine1, { surface: 'x', physical_reaction: '' });
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('[H1 #13,14,17] Extract 이미지 RPC 실패 후에도 Extract 정상 완료하고, shortlist가 빈 배열이며, 별도 LLM 재호출이 없음', async () => {
+  const originalFetch = globalThis.fetch;
+  const originalLog = console.log;
+  const originalWarn = console.warn;
+  const logs = [];
+  const warnings = [];
+  let deepseekCallCount = 0;
+  console.log = (...args) => { logs.push(args.join(' ')); };
+  console.warn = (...args) => { warnings.push(args.join(' ')); };
+  globalThis.fetch = async (url) => {
+    const requestUrl = String(url);
+    if (requestUrl.includes('/rpc/get_extract_context')) {
+      return new Response(JSON.stringify({
+        turn_count: 5,
+        master: { characters: { heroine1: { name: '한소영' } } },
+        save: { player: { name: '금태양', job: '간호사' }, player_setup: { status: 'complete' }, opening_started: true }
+      }), { headers: { 'content-type': 'application/json' } });
+    }
+    if (requestUrl.includes('/rpc/get_image_catalog_for_characters')) {
+      return new Response('image catalog rpc down', { status: 500 });
+    }
+    if (requestUrl.includes('api.deepseek.com')) {
+      deepseekCallCount++;
+      return new Response(JSON.stringify({
+        choices: [{ message: { content: JSON.stringify({
+          character_id: 'narrator', npcs_present: [],
+          choices: ['한소영에게 인사한다', '자리를 정리한다', '병동을 둘러본다', '그냥 지나간다']
+        }) }, finish_reason: 'stop' }]
+      }), { headers: { 'content-type': 'application/json' } });
+    }
+    throw new Error(`unexpected fetch: ${requestUrl}`);
+  };
+  try {
+    const response = await worker.fetch(apiRequest('/api/extract', {
+      game_id: 'test-game', narrative_text: '한소영이 다가온다.', player_input: ''
+    }), { DEEPSEEK_API_KEY: 'test' });
+    assert.equal(response.status, 200); // #13
+    const body = await response.json();
+    assert.equal(body.error_code, undefined); // #13
+
+    const shortlistLog = logs
+      .map(line => { try { return JSON.parse(line); } catch { return null; } })
+      .find(entry => entry && entry.event === 'gamebuilder_image_shortlist');
+    assert.ok(shortlistLog);
+    assert.equal(shortlistLog.image_catalog_count, 0); // #14
+    assert.equal(shortlistLog.image_shortlist_count, 0); // #14
+
+    const failOpenWarning = warnings
+      .map(line => { try { return JSON.parse(line); } catch { return null; } })
+      .find(entry => entry && entry.event === 'image_catalog_fail_open');
+    assert.ok(failOpenWarning);
+    assert.equal(failOpenWarning.endpoint, '/api/extract');
+
+    assert.equal(deepseekCallCount, 1); // #17 — no extra LLM re-call
+  } finally {
+    globalThis.fetch = originalFetch;
+    console.log = originalLog;
+    console.warn = originalWarn;
+  }
+});
+
+test('[H1 #15,16] Commit 이미지 RPC 실패 후에도 commit_turn이 호출되고 image_id/last_image_id가 null', async () => {
+  const originalFetch = globalThis.fetch;
+  const originalWarn = console.warn;
+  const warnings = [];
+  console.warn = (...args) => { warnings.push(args.join(' ')); };
+  let commitCalled = false;
+  let committedPatch;
+  globalThis.fetch = async (url, init = {}) => {
+    const requestUrl = String(url);
+    if (requestUrl.includes('/rpc/get_commit_context')) {
+      return new Response(JSON.stringify({
+        turn_count: 5, master: { characters: { heroine1: { name: '한소영' } } }, save: {}
+      }), { headers: { 'content-type': 'application/json' } });
+    }
+    if (requestUrl.includes('/rpc/get_image_catalog_for_characters')) {
+      return new Response('image rpc down', { status: 500 });
+    }
+    if (requestUrl.includes('/rpc/commit_turn')) {
+      commitCalled = true;
+      committedPatch = JSON.parse(init.body).p_patch;
+      return new Response(JSON.stringify({ status: 'committed', turn_count: 6 }), { headers: { 'content-type': 'application/json' } });
+    }
+    throw new Error(`unexpected fetch: ${requestUrl}`);
+  };
+  try {
+    const response = await worker.fetch(apiRequest('/api/commit-turn', {
+      game_id: 'test-game', turn_number: 6,
+      content: '한소영이 인사한다.',
+      extract: { character_id: 'heroine1', npc_emotion: { surface: 'x' }, image_id: 7 }
+    }), { SUPABASE_SECRET_KEY: 'test' });
+    const body = await response.json();
+    assert.equal(response.status, 200);
+    assert.equal(commitCalled, true); // #15
+    assert.equal(body.image_id, null); // #16
+    assert.equal(committedPatch.last_image_id, null); // #16
+    const failOpenWarning = warnings
+      .map(line => { try { return JSON.parse(line); } catch { return null; } })
+      .find(entry => entry && entry.event === 'image_catalog_fail_open');
+    assert.ok(failOpenWarning);
+    assert.equal(failOpenWarning.endpoint, '/api/commit-turn');
+  } finally {
+    globalThis.fetch = originalFetch;
+    console.warn = originalWarn;
+  }
+});
+
+test('[H1 #18-22] summarizeRecent100 실패해도 commit_turn이 호출되고, 기존 overall summary/구간이 보존되며, 이번 턴 요약이 recent100에 남고, 추가 LLM 호출이 없음', async () => {
+  const originalFetch = globalThis.fetch;
+  const originalWarn = console.warn;
+  const warnings = [];
+  console.warn = (...args) => { warnings.push(args.join(' ')); };
+  let commitCalled = false;
+  let committedPatch;
+  let deepseekCallCount = 0;
+  globalThis.fetch = async (url, init = {}) => {
+    const requestUrl = String(url);
+    if (requestUrl.includes('/rpc/get_commit_context')) {
+      return new Response(JSON.stringify({
+        turn_count: 104,
+        master: { characters: {} },
+        save: { story_summary_overall: '기존 전체 요약', story_summary_recent100: '기존 최근 100턴 요약' }
+      }), { headers: { 'content-type': 'application/json' } });
+    }
+    if (requestUrl.includes('/rpc/get_image_catalog_for_characters')) {
+      return new Response(JSON.stringify([]), { headers: { 'content-type': 'application/json' } });
+    }
+    if (requestUrl.includes('api.deepseek.com')) {
+      // summarizeRecent100 already handles a clean HTTP error response
+      // (!res.ok) by falling back internally with no throw — to exercise
+      // H1's own try/catch we need it to actually throw, as a network-level
+      // failure would.
+      deepseekCallCount++;
+      throw new Error('network down');
+    }
+    if (requestUrl.includes('/rpc/commit_turn')) {
+      commitCalled = true;
+      committedPatch = JSON.parse(init.body).p_patch;
+      return new Response(JSON.stringify({ status: 'committed', turn_count: 105 }), { headers: { 'content-type': 'application/json' } });
+    }
+    throw new Error(`unexpected fetch: ${requestUrl}`);
+  };
+  try {
+    const response = await worker.fetch(apiRequest('/api/commit-turn', {
+      game_id: 'test-game', turn_number: 105,
+      content: '평범한 하루가 지나갔다.',
+      extract: { character_id: 'narrator', turn_summary: '이번 턴 요약' }
+    }), { SUPABASE_SECRET_KEY: 'test', DEEPSEEK_API_KEY: 'test' });
+    assert.equal(response.status, 200);
+    assert.equal(commitCalled, true); // #18
+    assert.equal('story_summary_overall' in committedPatch, false); // #19 — existing overall left untouched
+    assert.equal(committedPatch.recent100_start_turn, 0); // #20 — not reset to turn_number (105)
+    assert.match(committedPatch.story_summary_recent100, /기존 최근 100턴 요약/); // #21
+    assert.match(committedPatch.story_summary_recent100, /이번 턴 요약/); // #21
+    assert.equal(deepseekCallCount, 1); // #22 — only the one failed summarization attempt, no retry
+
+    const failOpenWarning = warnings
+      .map(line => { try { return JSON.parse(line); } catch { return null; } })
+      .find(entry => entry && entry.event === 'recent100_summary_fail_open');
+    assert.ok(failOpenWarning);
+  } finally {
+    globalThis.fetch = originalFetch;
+    console.warn = originalWarn;
+  }
+});
+
+test('buildRecent100FailOpenPlan is a pure deterministic helper that never calls an LLM', () => {
+  const plan = buildRecent100FailOpenPlan({ story_summary_overall: '전체', story_summary_recent100: '기존', recent100_start_turn: 3 }, 150, '새 턴 요약');
+  assert.equal(plan.isBoundary, false);
+  assert.equal(plan.recentStartTurn, 3);
+  assert.match(plan.recentSummary, /기존/);
+  assert.match(plan.recentSummary, /새 턴 요약/);
+  assert.equal('overallSummary' in plan, false);
+});
+
+test('[H1 #23] get_extract_context 실패는 기존 오류(502 SUPABASE_ERROR) 유지', async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (url) => {
+    const requestUrl = String(url);
+    if (requestUrl.includes('/rpc/get_extract_context')) {
+      return new Response('context rpc down', { status: 500 });
+    }
+    throw new Error(`unexpected fetch: ${requestUrl}`);
+  };
+  try {
+    const response = await worker.fetch(apiRequest('/api/extract', {
+      game_id: 'test-game', narrative_text: '평범한 하루.', player_input: ''
+    }), { DEEPSEEK_API_KEY: 'test' });
+    assert.equal(response.status, 502);
+    const body = await response.json();
+    assert.equal(body.error_code, 'SUPABASE_ERROR');
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('[H1 #24] commit_turn RPC 실패는 기존 오류 유지 (H1 이전과 동일하게 여전히 실패로 전파됨, 성공으로 둔갑하지 않음)', async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (url) => {
+    const requestUrl = String(url);
+    if (requestUrl.includes('/rpc/get_commit_context')) {
+      return new Response(JSON.stringify({ turn_count: 5, master: { characters: {} }, save: {} }), { headers: { 'content-type': 'application/json' } });
+    }
+    if (requestUrl.includes('/rpc/get_image_catalog_for_characters')) {
+      return new Response(JSON.stringify([]), { headers: { 'content-type': 'application/json' } });
+    }
+    if (requestUrl.includes('/rpc/commit_turn')) {
+      return new Response('commit rpc down', { status: 500 });
+    }
+    throw new Error(`unexpected fetch: ${requestUrl}`);
+  };
+  try {
+    // Pre-existing (not H1) top-level dispatcher detail: `return handleCommitTurn(...)`
+    // is not awaited inside the router's try/catch, so a commit_turn RPC
+    // failure surfaces as a rejected promise rather than a caught 500
+    // Response — unchanged by H1, just asserting it still fails outright
+    // instead of silently completing like the fail-open cases above do.
+    await assert.rejects(
+      () => worker.fetch(apiRequest('/api/commit-turn', {
+        game_id: 'test-game', turn_number: 6,
+        content: '평범한 하루.',
+        extract: { character_id: 'narrator' }
+      }), { SUPABASE_SECRET_KEY: 'test' }),
+      /Supabase RPC commit_turn failed/
+    );
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('[H1 #25] turn conflict는 409 유지', async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (url) => {
+    const requestUrl = String(url);
+    if (requestUrl.includes('/rpc/get_commit_context')) {
+      return new Response(JSON.stringify({ turn_count: 5, master: { characters: {} }, save: {} }), { headers: { 'content-type': 'application/json' } });
+    }
+    if (requestUrl.includes('/rpc/get_image_catalog_for_characters')) {
+      return new Response(JSON.stringify([]), { headers: { 'content-type': 'application/json' } });
+    }
+    if (requestUrl.includes('/rpc/commit_turn')) {
+      return new Response(JSON.stringify({ status: 'conflict', expected_turn: 7, reason: 'stale' }), { headers: { 'content-type': 'application/json' } });
+    }
+    throw new Error(`unexpected fetch: ${requestUrl}`);
+  };
+  try {
+    const response = await worker.fetch(apiRequest('/api/commit-turn', {
+      game_id: 'test-game', turn_number: 6,
+      content: '평범한 하루.',
+      extract: { character_id: 'narrator' }
+    }), { SUPABASE_SECRET_KEY: 'test' });
+    assert.equal(response.status, 409);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
 });

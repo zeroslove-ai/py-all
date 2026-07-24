@@ -61,6 +61,7 @@ import {
   buildSafeFallbackChoices,
   validateFinalChoices,
   insertNarrativeAdditionBeforeStatus,
+  looksLikeKoreanFullName,
   normalizeStrengthForStorage,
   hasLegacyEncounterEvidence,
   resolveIsSexual,
@@ -635,6 +636,24 @@ test('validateNarrativeNpcContract flags an unregistered "이름+직책" mention
     narrativeText: '동료 간호사가 서류를 건넨다.', characters, worldState: {}, playerName: '금태양'
   });
   assert.equal(anonymous.ok, true);
+});
+
+test('looksLikeKoreanFullName requires a common-surname first character and rejects a grammatical-particle final character', () => {
+  assert.equal(looksLikeKoreanFullName('박미영'), true);
+  assert.equal(looksLikeKoreanFullName('이민호'), true);
+  assert.equal(looksLikeKoreanFullName('이주연'), true);
+  assert.equal(looksLikeKoreanFullName('병동'), false); // 병 is not a common surname
+  assert.equal(looksLikeKoreanFullName('환자분'), false); // 환 is not a common surname
+  assert.equal(looksLikeKoreanFullName('있는'), false); // 있 is not a common surname
+  assert.equal(looksLikeKoreanFullName('안에서'), false); // 안 is a surname, but ends in the particle 서
+  assert.equal(looksLikeKoreanFullName('오가는'), false); // 오 is a surname, but ends in the verb-ending 는
+});
+
+test('validateNarrativeNpcContract does not false-positive on ordinary Korean phrases naming hospital staff generically (caught live: "안에서 간호사", "병동 간호사", "환자분 보호자", "오가는 간호사")', () => {
+  const characters = { heroine1: { name: '한소영' } };
+  const text = '병실 안에서 간호사가 지나간다. 병동 간호사들이 오가는 복도. 환자분 보호자가 대기 중이다.';
+  const result = validateNarrativeNpcContract({ narrativeText: text, characters, worldState: {}, playerName: '정우진' });
+  assert.equal(result.ok, true);
 });
 
 test('validateNarrativeNpcContract never flags the player\'s own name as an unregistered individual', () => {

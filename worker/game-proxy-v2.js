@@ -2491,6 +2491,31 @@ const GENERIC_NPC_DESCRIPTORS = new Set([
 ]);
 const NAMED_INDIVIDUAL_ROLE_SUFFIXES = ['수간호사', '간호사', '의사', '과장', '환자', '보호자', '직원', '실장', '주임', '대리', '부장'];
 
+// Korean freely forms "descriptive-word + role" compounds ("병동 간호사",
+// "환자분 보호자", "안에서 간호사가...") that are structurally identical to
+// "이름+직책" ("박미영 간호사") to a plain role-suffix regex — a bare word-
+// before-role match alone false-positives on ordinary prose constantly.
+// Requiring the candidate to start with a common Korean surname character
+// and not end in a common grammatical particle/verb-ending is a coarse but
+// far more precise stand-in for real name recognition; precision matters
+// much more than recall here since a false positive hard-rejects the turn.
+const COMMON_KOREAN_SURNAMES = new Set([
+  '김', '이', '박', '최', '정', '강', '조', '윤', '장', '임', '한', '오', '서', '신', '권', '황',
+  '안', '송', '류', '전', '홍', '고', '문', '양', '손', '배', '백', '허', '유', '남', '심', '노',
+  '하', '곽', '성', '차', '주', '우', '구', '민', '진', '지', '엄', '채', '원', '천', '방', '공',
+  '현', '함', '변', '염', '여', '추', '도', '소', '석', '선', '설', '마', '길', '위', '표', '명',
+  '기', '반', '왕', '금', '옥', '육', '인', '맹', '제', '모', '피', '편', '국', '예', '경'
+]);
+const NON_NAME_FINAL_CHARS = new Set([
+  '는', '은', '이', '가', '을', '를', '에', '의', '로', '와', '과', '도', '만', '서', '며', '고', '지', '다', '면', '던', '자', '움', '씀'
+]);
+
+function looksLikeKoreanFullName(candidate) {
+  if (typeof candidate !== 'string' || candidate.length < 2 || candidate.length > 4) return false;
+  if (!COMMON_KOREAN_SURNAMES.has(candidate[0])) return false;
+  return !NON_NAME_FINAL_CHARS.has(candidate[candidate.length - 1]);
+}
+
 // playerJob guards against the player's own established job/rank text
 // ("병원 행정직 / 원무과 주임") tripping the same name+role pattern this
 // exists to catch — "원무과" isn't a person's name, it's a fragment of the
@@ -2517,6 +2542,7 @@ function findUnregisteredNamedIndividualsInNarrative(text, characters = {}, play
   let match;
   while ((match = pattern.exec(text))) {
     const candidate = match[1];
+    if (!looksLikeKoreanFullName(candidate)) continue;
     if (isGenericOrKnownName(candidate, characters, playerName, playerJob) || seen.has(match[0])) continue;
     seen.add(match[0]);
     found.push(match[0]);
@@ -2560,7 +2586,7 @@ function deriveChoiceNamedTargets(choices, characters = {}, playerName = '', pla
     }
     const pattern = new RegExp(`([가-힣]{2,4})\\s?(?:${NAMED_INDIVIDUAL_ROLE_SUFFIXES.join('|')})`);
     const match = pattern.exec(choice);
-    if (match && !isGenericOrKnownName(match[1], characters, playerName, playerJob)) {
+    if (match && looksLikeKoreanFullName(match[1]) && !isGenericOrKnownName(match[1], characters, playerName, playerJob)) {
       targets.push({ choice_index: index, name: match[1] });
     }
   });
@@ -3273,6 +3299,7 @@ export {
   findUnregisteredChoiceTargets,
   repairUnregisteredNpcChoices,
   insertNarrativeAdditionBeforeStatus,
+  looksLikeKoreanFullName,
   validateNarrativeNpcContract,
   findUnregisteredNamedIndividualsInNarrative,
   findUnregisteredDialogueSpeakers,

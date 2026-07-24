@@ -74,7 +74,7 @@ test('startPlayerSetup guards against duplicate concurrent Story requests with a
 });
 
 test('a failed auto-start (systemStart) shows a distinct "새 게임 다시 시작" retry button instead of demanding input', () => {
-  const retryStoryFn = pageSource.match(/async function retryStory\(pending\)[\s\S]*?\n    }/)?.[0] || '';
+  const retryStoryFn = pageSource.match(/async function retryStory\(pending, extraFeedback = \[\]\)[\s\S]*?\n    }/)?.[0] || '';
   assert.match(retryStoryFn, /pending\.systemStart/);
   assert.match(retryStoryFn, /새 게임 다시 시작/);
 });
@@ -103,7 +103,7 @@ test('extract failure surfaces error_code and request_id to the user without lea
   const retryExtract = pageSource.match(/async function retryExtract\(pending\)[\s\S]*?\n    }/)?.[0] || '';
   assert.match(retryExtract, /error\.details\?\.error_code/);
   assert.match(retryExtract, /error\.details\?\.request_id/);
-  assert.match(retryExtract, /showActionNotice/);
+  assert.match(retryExtract, /showPendingTurnActions/);
   assert.doesNotMatch(retryExtract, /DEEPSEEK_API_KEY|SUPABASE_SECRET_KEY/);
   assert.doesNotMatch(retryExtract, /\braw\b/);
 
@@ -111,7 +111,7 @@ test('extract failure surfaces error_code and request_id to the user without lea
   assert.match(retryCommit, /error\.details\?\.error_code/);
   assert.match(retryCommit, /error\.details\?\.request_id/);
 
-  const retryStory = pageSource.match(/async function retryStory\(pending\)[\s\S]*?\n    }/)?.[0] || '';
+  const retryStory = pageSource.match(/async function retryStory\(pending, extraFeedback = \[\]\)[\s\S]*?\n    }/)?.[0] || '';
   assert.match(retryStory, /error\.status/);
   assert.match(retryStory, /error\.requestId/);
 });
@@ -131,7 +131,7 @@ test('an Extract failure locks the choice buttons and chat input, offers retry a
   assert.match(discardFn, /state\.inputLocked = false/);
   assert.match(discardFn, /ui\.setChatInputEnabled/);
 
-  assert.match(uiSource, /showActionNotice\(text, actions\)/);
+  assert.match(uiSource, /showPendingTurnActions\(text, actions\)/);
   assert.match(uiSource, /markLastNarrativeUncommitted\(\)/);
   assert.match(uiSource, /setChatInputEnabled\(enabled\)/);
   // setLoading(false) must not silently override the failure lock —
@@ -194,4 +194,188 @@ test('the frontend logs per-stage turn timing without exposing a permanent on-sc
   assert.match(retryCommit, /extract_total_ms/);
   assert.match(retryCommit, /commit_total_ms/);
   assert.doesNotMatch(pageSource, /id="turn-timing-display"/);
+});
+
+// ─────────────────────────────────────────────
+// Pending-turn-action notice lifecycle, Story/Extract error split,
+// narrative_replacement, ** stripping, post-commit state sync (4th stage)
+// ─────────────────────────────────────────────
+
+test('showPendingTurnActions/clearPendingTurnActions use a dedicated class, never .narrative, and disable both buttons the instant either is clicked', () => {
+  const showFn = uiSource.match(/showPendingTurnActions\(text, actions\)[\s\S]*?\n  },/)?.[0] || '';
+  assert.match(showFn, /className = 'pending-turn-action-notice'/);
+  assert.match(showFn, /this\.clearPendingTurnActions\(\)/);
+  // Every button in the notice must be disabled when ANY one of them is
+  // clicked, not just the one the user pressed — a slow async action must
+  // not leave a second button clickable in the meantime.
+  assert.match(showFn, /buttons\.forEach\(b => \{ b\.disabled = true; \}\)/);
+
+  const clearFn = uiSource.match(/clearPendingTurnActions\(\) \{[\s\S]*?\n  \},/)?.[0] || '';
+  assert.match(clearFn, /querySelectorAll\('\.pending-turn-action-notice'\)/);
+
+  assert.match(pageSource, /\.pending-turn-action-notice/);
+});
+
+test('retryStory/retryExtract/retryCommit/regenerateStoryAfterContractFailure all clear the pending-turn notice as their first act, so a stale notice never survives a retry, regenerate, or successful commit', () => {
+  const retryStoryFn = pageSource.match(/async function retryStory\(pending, extraFeedback = \[\]\)[\s\S]*?\n    }/)?.[0] || '';
+  assert.match(retryStoryFn, /ui\.clearPendingTurnActions\(\)/);
+
+  const retryExtractFn = pageSource.match(/async function retryExtract\(pending\)[\s\S]*?\n    }/)?.[0] || '';
+  assert.match(retryExtractFn, /ui\.clearPendingTurnActions\(\)/);
+  assert.match(retryExtractFn, /ui\.clearUncommittedNarrativeBadges\(\)/);
+
+  const retryCommitFn = pageSource.match(/async function retryCommit\(pending\)[\s\S]*?\n    }/)?.[0] || '';
+  assert.match(retryCommitFn, /ui\.clearPendingTurnActions\(\)/);
+  // Only on the success path — the uncommitted badge should disappear once
+  // the turn is actually saved, not merely attempted.
+  assert.match(retryCommitFn, /ui\.clearUncommittedNarrativeBadges\(\)[\s\S]*?saveFeedback\(\[\]\)/);
+
+  const regenerateFn = pageSource.match(/async function regenerateStoryAfterContractFailure\(pending, validationErrors\)[\s\S]*?\n    }/)?.[0] || '';
+  assert.match(regenerateFn, /ui\.clearPendingTurnActions\(\)/);
+  assert.match(regenerateFn, /ui\.clearUncommittedNarrativeBadges\(\)/);
+});
+
+test('discarding a failed turn reloads server truth and restoreNarrative clears any leftover pending-turn notice/badge', () => {
+  const discardFn = pageSource.match(/async function discardFailedTurn\(\)[\s\S]*?\n    }/)?.[0] || '';
+  assert.match(discardFn, /restoreToLastCommittedTurn/);
+
+  const restoreFn = pageSource.match(/async function restoreToLastCommittedTurn\(message\)[\s\S]*?\n    }/)?.[0] || '';
+  assert.match(restoreFn, /restoreLastTurn\(\)/);
+
+  const restoreLastTurnFn = pageSource.match(/function restoreLastTurn\(\)[\s\S]*?\n    }/)?.[0] || '';
+  assert.match(restoreLastTurnFn, /ui\.restoreNarrative\(narrative\)/);
+
+  // restoreNarrative is the single place that actually removes stale
+  // .narrative/.divider nodes AND the pending-turn notice together, so
+  // discard can't leave one without the other.
+  const restoreNarrativeFn = uiSource.match(/restoreNarrative\(text\)[\s\S]*?\n  },/)?.[0] || '';
+  assert.match(restoreNarrativeFn, /querySelectorAll\('\.narrative, \.divider'\)/);
+  assert.match(restoreNarrativeFn, /this\.clearPendingTurnActions\(\)/);
+});
+
+test('STORY_NPC_CONTRACT_FAILED offers "같은 입력으로 서사 다시 생성", never the Extract-retry button, since retrying Extract alone cannot fix a Story-side contract violation', () => {
+  const retryExtractFn = pageSource.match(/async function retryExtract\(pending\)[\s\S]*?\n    }/)?.[0] || '';
+  const contractBranch = retryExtractFn.match(/if \(code === 'STORY_NPC_CONTRACT_FAILED'\) \{[\s\S]*?\n        \} else \{/)?.[0] || '';
+  assert.notEqual(contractBranch, '');
+  assert.match(contractBranch, /같은 입력으로 서사 다시 생성/);
+  assert.match(contractBranch, /regenerateStoryAfterContractFailure\(pending, validationErrors\)/);
+  assert.doesNotMatch(contractBranch, /상태 분석 다시 시도/);
+  assert.doesNotMatch(contractBranch, /retryExtract\(pending\)/);
+
+  const extractFailBranch = retryExtractFn.slice(retryExtractFn.indexOf('} else {')) ;
+  assert.match(extractFailBranch, /상태 분석 다시 시도/);
+  assert.match(extractFailBranch, /onClick: \(\) => retryExtract\(pending\)/);
+});
+
+test('regenerateStoryAfterContractFailure discards the old narrative element by direct reference and forwards the Worker\'s validation_errors as one-shot Story feedback, never as in-world narration', () => {
+  const regenerateFn = pageSource.match(/async function regenerateStoryAfterContractFailure\(pending, validationErrors\)[\s\S]*?\n    }/)?.[0] || '';
+  assert.match(regenerateFn, /ui\.removeNarrativeElement\(pending\.narrativeElement\)/);
+  assert.match(regenerateFn, /pending\.narrativeElement = null/);
+  assert.match(regenerateFn, /pending\.narrative = null/);
+  // The reasons text is passed into retryStory's extraFeedback array param,
+  // which stream.story forwards as the Worker's own
+  // "[USER FEEDBACK — APPLY TO THIS NEXT RESPONSE ONLY]" contract — never
+  // rendered as a system/notice message and never narrated as the player's
+  // own words.
+  assert.match(regenerateFn, /await retryStory\(pending, \[`.*`\]\)/);
+  assert.doesNotMatch(regenerateFn, /ui\.showSystemMessage/);
+  assert.doesNotMatch(regenerateFn, /ui\.showPendingTurnActions/);
+
+  // A defensive reset: if the regenerated Story attempt itself fails before
+  // ever reaching retryExtract, this stops state.inputLocked from being
+  // stuck at true (set by the FIRST failed attempt) while retryStory's own
+  // catch block simultaneously re-enables choices.
+  assert.match(regenerateFn, /state\.inputLocked = false/);
+});
+
+test('a CSA narrative_replacement overwrites this turn\'s exact Story element via its stored DOM reference, never appended to a notice or guessed from the last .narrative', () => {
+  const retryExtractFn = pageSource.match(/async function retryExtract\(pending\)[\s\S]*?\n    }/)?.[0] || '';
+  const replacementBranch = retryExtractFn.match(/if \(result\.narrative_replacement\) \{[\s\S]*?\n        \} else if/)?.[0] || '';
+  assert.notEqual(replacementBranch, '');
+  assert.match(replacementBranch, /pending\.narrative = result\.narrative_replacement/);
+  assert.match(replacementBranch, /pending\.narrativeElement\.textContent = ui\.stripBoldMarkers\(result\.narrative_replacement\)/);
+  // Must be a direct assignment (overwrite), not string concatenation onto
+  // whatever the element already held.
+  assert.doesNotMatch(replacementBranch, /pending\.narrativeElement\.textContent \+=/);
+  assert.doesNotMatch(replacementBranch, /appendToLastNarrative/);
+  assert.doesNotMatch(pageSource, /function appendToLastNarrative/);
+
+  // pending.narrativeElement itself is only ever populated from
+  // finalizeNarrative()'s own return value — the exact node finalized for
+  // THIS turn — never re-queried by scanning for "the last .narrative".
+  const retryStoryFn = pageSource.match(/async function retryStory\(pending, extraFeedback = \[\]\)[\s\S]*?\n    }/)?.[0] || '';
+  assert.match(retryStoryFn, /pending\.narrativeElement = ui\.finalizeNarrative\(\)/);
+});
+
+test('finalizeNarrative returns the exact DOM node it just finalized so later CSA/regeneration steps never have to re-query for it', () => {
+  const finalizeFn = uiSource.match(/finalizeNarrative\(\)[\s\S]*?\n  },/)?.[0] || '';
+  assert.match(finalizeFn, /return current \|\| null;/);
+});
+
+test('the Worker\'s STORY_NPC_CONTRACT_FAILED validation_errors are embedded only in the retryStory feedback array, never appended to a system notice or the on-screen narrative text', () => {
+  const retryExtractFn = pageSource.match(/async function retryExtract\(pending\)[\s\S]*?\n    }/)?.[0] || '';
+  const contractBranch = retryExtractFn.match(/if \(code === 'STORY_NPC_CONTRACT_FAILED'\) \{[\s\S]*?\n        \} else \{/)?.[0] || '';
+  // The notice text shown to the user is a fixed, generic sentence — the
+  // raw validation_errors array is only threaded through to
+  // regenerateStoryAfterContractFailure(pending, validationErrors), never
+  // interpolated into showPendingTurnActions' own displayed text.
+  assert.match(contractBranch, /서사가 등록 NPC 규칙을 위반했습니다\. \[\$\{code\}\]\$\{suffix\} 이 서사는 아직 저장되지 않았습니다\./);
+  assert.doesNotMatch(contractBranch, /validationErrors\.join/);
+
+  const regenerateFn = pageSource.match(/async function regenerateStoryAfterContractFailure\(pending, validationErrors\)[\s\S]*?\n    }/)?.[0] || '';
+  assert.match(regenerateFn, /validationErrors\.join/);
+  assert.doesNotMatch(regenerateFn, /ui\.showSystemMessage|ui\.showPendingTurnActions|ui\.showRetryNotice/);
+});
+
+test('** is stripped from on-screen narrative in finalizeNarrative, restoreNarrative, and choice text, without a full Markdown renderer', () => {
+  assert.match(uiSource, /stripBoldMarkers\(text\)[\s\S]*?replace\(\/\\\*\\\*\/g, ''\)/);
+
+  const finalizeFn = uiSource.match(/finalizeNarrative\(\)[\s\S]*?\n  },/)?.[0] || '';
+  assert.match(finalizeFn, /current\.textContent = this\.stripBoldMarkers\(current\.textContent\)/);
+
+  const restoreNarrativeFn = uiSource.match(/restoreNarrative\(text\)[\s\S]*?\n  },/)?.[0] || '';
+  assert.match(restoreNarrativeFn, /div\.textContent = this\.stripBoldMarkers\(text\)/);
+
+  const normalizeChoiceFn = uiSource.match(/normalizeChoice\(value\)[\s\S]*?\n  \},/)?.[0] || '';
+  assert.match(normalizeChoiceFn, /this\.stripBoldMarkers\(String\(value \|\| ''\)\)/);
+
+  // Defensive, display-only cleanup — not a Markdown renderer for headers,
+  // italics, links, etc.
+  assert.doesNotMatch(uiSource, /marked\.parse|markdown-it|DOMPurify/);
+});
+
+test('retryCommit deep-merges the Worker\'s state_patch into state.context.save right after commit, so 어플 정보 never shows a stale pre-commit snapshot', () => {
+  const retryCommitFn = pageSource.match(/async function retryCommit\(pending\)[\s\S]*?\n    }/)?.[0] || '';
+  assert.match(retryCommitFn, /if \(saved\.state_patch\) \{/);
+  assert.match(retryCommitFn, /state\.context\.save = deepMergeStatePatch\(state\.context\.save, saved\.state_patch\)/);
+
+  const deepMergeFn = pageSource.match(/function deepMergeStatePatch\(target, patch\)[\s\S]*?\n    }/)?.[0] || '';
+  // Object-valued keys merge one level deep (so an untouched NPC's own
+  // active_suggestions entry survives a patch that only carries another
+  // NPC's array); everything else — arrays, primitives — overwrites
+  // wholesale, matching the Worker's own JSONB patch semantics.
+  assert.match(deepMergeFn, /isPlainObject\(value\) && isPlainObject\(merged\[key\]\) \? \{ \.\.\.merged\[key\], \.\.\.value \} : value/);
+
+  assert.match(pageSource, /function showAppInfo\(\)[\s\S]*?state\.context\?\.save \|\| \{\}/);
+});
+
+test('input lock is re-synchronized at the top of retryExtract/retryCommit/regenerateStoryAfterContractFailure, so an outer caller\'s own setLoading(false) in a later finally can never silently re-enable input while a failure notice is still unresolved', () => {
+  const retryExtractFn = pageSource.match(/async function retryExtract\(pending\)[\s\S]*?\n    }/)?.[0] || '';
+  // Set false at entry, then forced back to true in the finally IF this
+  // specific attempt failed — never left dangling from a PREVIOUS attempt.
+  assert.match(retryExtractFn, /state\.inputLocked = false;\s*\n\s*ui\.setLoading\(true, '상태 분석 중'\)/);
+  assert.match(retryExtractFn, /if \(failed\) state\.inputLocked = true;/);
+
+  const retryCommitFn = pageSource.match(/async function retryCommit\(pending\)[\s\S]*?\n    }/)?.[0] || '';
+  assert.match(retryCommitFn, /state\.inputLocked = false;\s*\n\s*ui\.setLoading\(true, '턴 저장 중'\)/);
+
+  const regenerateFn = pageSource.match(/async function regenerateStoryAfterContractFailure\(pending, validationErrors\)[\s\S]*?\n    }/)?.[0] || '';
+  assert.match(regenerateFn, /validationErrors\) \{\s*\n\s*state\.inputLocked = false;/);
+
+  // The actual guard: setLoading(false) must consult state.inputLocked
+  // before touching the input, so a nested finally's own setLoading(false)
+  // (running AFTER an inner function's finally already decided the lock)
+  // can't clear it out from under a still-unresolved notice.
+  const setLoadingFn = uiSource.match(/setLoading\(active, label = '처리 중'\)[\s\S]*?\n  \},/)?.[0] || '';
+  assert.match(setLoadingFn, /state\.inputLocked/);
 });

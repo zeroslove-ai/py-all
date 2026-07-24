@@ -77,6 +77,7 @@
     }
 
     .story-stream .narrative { margin-bottom: 16px; }
+    .story-stream .pending-turn-action-notice { margin-bottom: 16px; white-space: pre-wrap; word-break: keep-all; }
     .story-stream .divider {
       border: none;
       border-top: 1px solid var(--border);
@@ -488,6 +489,25 @@
       ui.restoreNarrative(narrative);
     }
 
+    function isPlainObject(value) {
+      return value !== null && typeof value === 'object' && !Array.isArray(value);
+    }
+
+    // Mirrors the Worker's own JSONB patch semantics: object keys deep-merge
+    // one level (so e.g. active_suggestions for an NPC this turn never
+    // touched survives a patch that only carries another NPC's list),
+    // arrays and primitives overwrite wholesale — matches how commit_turn's
+    // own Supabase merge behaves, so the frontend never has to guess.
+    function deepMergeStatePatch(target, patch) {
+      const base = isPlainObject(target) ? target : {};
+      if (!isPlainObject(patch)) return base;
+      const merged = { ...base };
+      for (const [key, value] of Object.entries(patch)) {
+        merged[key] = isPlainObject(value) && isPlainObject(merged[key]) ? { ...merged[key], ...value } : value;
+      }
+      return merged;
+    }
+
     function feedbackKey() { return `gameFeedback:${state.gameId}`; }
     function getFeedback() { try { return JSON.parse(localStorage.getItem(feedbackKey()) || '[]'); } catch { return []; } }
     function saveFeedback(items) { localStorage.setItem(feedbackKey(), JSON.stringify(items)); }
@@ -531,17 +551,31 @@
       document.getElementById('chat-input').value = '';
       if (input.startsWith('/')) { await handleCommand(input); return; }
       ui.addUserMessage(input);
-      await retryStory({ input, nextTurn: state.turnCount + 1, narrative: null, extract: null, mode: null });
+      await retryStory({ input, nextTurn: state.turnCount + 1, narrative: null, extract: null, mode: null, narrativeElement: null });
     }
 
-    async function retryStory(pending) {
+    // extraFeedback is one-shot, worker-generated feedback (e.g. a Story
+    // NPC-contract violation list) for this single regeneration only — it is
+    // never persisted to the localStorage feedback queue and is delivered to
+    // Story as [USER FEEDBACK — APPLY TO THIS NEXT RESPONSE ONLY], which the
+    // Worker's own prompt contract already forbids narrating as an in-world
+    // player statement.
+    async function retryStory(pending, extraFeedback = []) {
       state.isStreaming = true; ui.setLoading(true, '서사 생성 중');
+      ui.clearPendingTurnActions();
       try {
-        const result = await stream.story(state.gameId, pending.input, state.turnCount, chunk => ui.appendNarrative(chunk), getFeedback());
+        const result = await stream.story(state.gameId, pending.input, state.turnCount, chunk => ui.appendNarrative(chunk), [...getFeedback(), ...extraFeedback]);
         pending.narrative = result.text; pending.mode = result.mode;
         pending.timing = { ...(pending.timing || {}), story: result.timing };
-        ui.finalizeNarrative();
-        if (result.mode === 'reentry') { ui.renderChoices(ui.parseChoices(result.text), submitChoice); return; }
+        // finalizeNarrative() returns the exact DOM node it just finalized —
+        // every later step that needs to touch "this turn's narrative" uses
+        // this direct reference instead of re-scanning for "the last .narrative".
+        pending.narrativeElement = ui.finalizeNarrative();
+        if (result.mode === 'reentry') {
+          state.inputLocked = false;
+          ui.renderChoices(ui.parseChoices(result.text), submitChoice);
+          return;
+        }
         await retryExtract(pending);
       } catch (error) {
         ui.failCurrentNarrative();
@@ -560,6 +594,7 @@
       state.isStreaming = true;
       state.inputLocked = false;
       ui.setLoading(true, '상태 분석 중');
+      ui.clearPendingTurnActions();
       ui.clearUncommittedNarrativeBadges();
       let failed = false;
       try {
@@ -568,9 +603,18 @@
         pending.extract = result.extract;
         pending.timing = { ...(pending.timing || {}), extract: result.timing };
         ui.removeTrailingChoiceBlock(pending.extract.choices);
-        if (result.content_addition) {
+        if (result.narrative_replacement) {
+          // A CSA-omission fix: the Worker already inserted the correction
+          // before [2. 플레이어 상황판] server-side — replace pending.narrative
+          // and this turn's exact Story element with that corrected string,
+          // never append blindly to whatever ".narrative" happens to be last.
+          pending.narrative = result.narrative_replacement;
+          if (pending.narrativeElement) pending.narrativeElement.textContent = ui.stripBoldMarkers(result.narrative_replacement);
+        } else if (result.content_addition) {
+          // Legacy-compat only — current Worker responses always carry
+          // narrative_replacement instead and leave this null.
           pending.narrative = `${pending.narrative}\n\n${result.content_addition}`;
-          ui.appendToLastNarrative(result.content_addition);
+          if (pending.narrativeElement) pending.narrativeElement.textContent += `\n\n${ui.stripBoldMarkers(result.content_addition)}`;
         }
         await retryCommit(pending);
       } catch (error) {
@@ -579,13 +623,27 @@
         const requestId = error.details?.request_id;
         const suffix = requestId ? ` · 요청 ${requestId}` : '';
         ui.markLastNarrativeUncommitted();
-        ui.showActionNotice(
-          `서사는 생성되었지만 상태 분석에 실패했습니다. [${code}]${suffix} 이 서사는 아직 저장되지 않았습니다.`,
-          [
-            { label: '상태 분석 다시 시도', onClick: () => retryExtract(pending) },
-            { label: '이번 서사 버리고 이전 턴으로 돌아가기', onClick: () => discardFailedTurn() }
-          ]
-        );
+        if (code === 'STORY_NPC_CONTRACT_FAILED') {
+          // Retrying Extract alone can never fix this — the Story text
+          // itself violated the registered-NPC contract, so only
+          // regenerating Story (or discarding) is offered.
+          const validationErrors = Array.isArray(error.details?.validation_errors) ? error.details.validation_errors : [];
+          ui.showPendingTurnActions(
+            `서사가 등록 NPC 규칙을 위반했습니다. [${code}]${suffix} 이 서사는 아직 저장되지 않았습니다.`,
+            [
+              { label: '같은 입력으로 서사 다시 생성', onClick: () => regenerateStoryAfterContractFailure(pending, validationErrors) },
+              { label: '이번 서사 버리고 이전 턴으로 돌아가기', onClick: () => discardFailedTurn() }
+            ]
+          );
+        } else {
+          ui.showPendingTurnActions(
+            `서사는 생성되었지만 상태 분석에 실패했습니다. [${code}]${suffix} 이 서사는 아직 저장되지 않았습니다.`,
+            [
+              { label: '상태 분석 다시 시도', onClick: () => retryExtract(pending) },
+              { label: '이번 서사 버리고 이전 턴으로 돌아가기', onClick: () => discardFailedTurn() }
+            ]
+          );
+        }
       } finally {
         state.isStreaming = false;
         // Set before setLoading(false) — and stays set through it — so that
@@ -598,8 +656,27 @@
       }
     }
 
+    // The Story-contract-failure side of the choice: unlike a plain Extract
+    // retry, the narrative itself has to be thrown away and regenerated from
+    // the same input — the worker's validation_errors go back in as one-shot
+    // feedback so the regenerated Story avoids the same violation.
+    async function regenerateStoryAfterContractFailure(pending, validationErrors) {
+      state.inputLocked = false;
+      ui.clearPendingTurnActions();
+      ui.clearUncommittedNarrativeBadges();
+      ui.removeNarrativeElement(pending.narrativeElement);
+      pending.narrativeElement = null;
+      pending.narrative = null;
+      pending.extract = null;
+      const reasons = validationErrors.length ? validationErrors.join('; ') : '등록 NPC 규칙 위반';
+      await retryStory(pending, [`이전 서사가 등록 NPC 규칙을 위반해 다시 생성합니다(${reasons}). 위반 없이 다시 작성하세요.`]);
+    }
+
     async function retryCommit(pending) {
-      state.isStreaming = true; ui.setLoading(true, '턴 저장 중');
+      state.isStreaming = true;
+      state.inputLocked = false;
+      ui.setLoading(true, '턴 저장 중');
+      ui.clearPendingTurnActions();
       try {
         const saved = await api.commitTurn(state.gameId, pending.nextTurn, pending.narrative, pending.extract, pending.mode === 'opening' ? { opening_started: true } : {}, pending.input);
         state.turnCount = saved.turn_count; ui.updateMeta(null, state.turnCount);
@@ -608,6 +685,14 @@
         if (saved.npc_stat_changes) pending.extract.npc_stat_changes = saved.npc_stat_changes;
         if (Number.isInteger(saved.image_id)) pending.extract.image_id = saved.image_id;
         if (typeof saved.image_scene_role === 'string') pending.extract.image_scene_role = saved.image_scene_role;
+        // Keeps 어플 정보 (and anything else reading state.context.save)
+        // current immediately after commit, instead of showing the
+        // pre-commit snapshot until the next full /api/context reload.
+        if (saved.state_patch) {
+          state.context = state.context || {};
+          state.context.save = deepMergeStatePatch(state.context.save, saved.state_patch);
+        }
+        ui.clearUncommittedNarrativeBadges();
         saveFeedback([]);
         sidebar.updateCharacter(pending.extract.character_id); sidebar.updateMind(pending.extract.npc_emotion); sidebar.renderStats(pending.extract.npc_stats, pending.extract.character_id, pending.extract.npc_stat_changes);
         ui.renderGameplayChoices(pending.extract.choices, submitChoice, { setup: pending.mode === 'player_setup' });

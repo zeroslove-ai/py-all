@@ -1778,6 +1778,91 @@ test('commit-turn persists first_encounter_stats, suggestion_action, and world_s
   }
 });
 
+test('/api/commit-turn response includes a state_patch subset so the frontend can refresh 어플 정보 without a full /api/context reload', async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (url) => {
+    const requestUrl = String(url);
+    if (requestUrl.includes('/rpc/get_commit_context')) {
+      return new Response(JSON.stringify({
+        turn_count: 10,
+        master: { characters: { heroine1: { name: '한소영' } } },
+        save: {}
+      }), { headers: { 'content-type': 'application/json' } });
+    }
+    if (requestUrl.includes('/rpc/get_image_catalog_for_characters')) {
+      return new Response(JSON.stringify([]), { headers: { 'content-type': 'application/json' } });
+    }
+    if (requestUrl.includes('/rpc/commit_turn')) {
+      return new Response(JSON.stringify({ status: 'committed', turn_count: 11 }), { headers: { 'content-type': 'application/json' } });
+    }
+    throw new Error(`unexpected fetch: ${requestUrl}`);
+  };
+  try {
+    const response = await worker.fetch(apiRequest('/api/commit-turn', {
+      game_id: 'test-game', turn_number: 11, content: 'test',
+      extract: {
+        character_id: 'heroine1', npcs_present: ['heroine1'],
+        suggestion_action: { action: 'activate', character_id: 'heroine1', content: '테스트 암시', strength: '약함' },
+        world_state_patch: { building: '서울중앙병원', floor: '3층', ward: '3병동', location_label: '서울중앙병원 3병동 면회실' },
+        choices: ['테스트 선택지 1', '테스트 선택지 2'],
+        npc_emotion: { surface: '표면', inner: '내면', physical_reaction: '반응' }
+      }
+    }), { SUPABASE_SECRET_KEY: 'test' });
+    assert.equal(response.status, 200);
+    const body = await response.json();
+    assert.ok(body.state_patch);
+    // The fields the frontend's 어플 정보 panel and player-status display
+    // actually read must be present in this lightweight subset.
+    assert.equal(body.state_patch.last_character_id, 'heroine1');
+    assert.deepEqual(body.state_patch.last_choices, ['테스트 선택지 1', '테스트 선택지 2']);
+    assert.ok(body.state_patch.player_progress);
+    assert.equal(body.state_patch.active_suggestions.heroine1[0].content, '테스트 암시');
+    assert.deepEqual(body.state_patch.world_state, { building: 'seoul_central_hospital', floor: 'hospital_floor_3', ward: 'hospital_3ward', location_label: '서울중앙병원 3병동 면회실' });
+    // Large per-turn-only fields already returned separately (npc_stats) or
+    // never needed by the frontend (story summaries) must not leak in here.
+    assert.equal('npc_stats' in body.state_patch, false);
+    assert.equal('npc_emotion' in body.state_patch, false);
+    assert.equal('story_summary_recent100' in body.state_patch, false);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('/api/commit-turn omits a state_patch key entirely when buildSavePatch never set it, instead of sending a misleading null/empty value', async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (url) => {
+    const requestUrl = String(url);
+    if (requestUrl.includes('/rpc/get_commit_context')) {
+      return new Response(JSON.stringify({ turn_count: 5, master: { characters: {} }, save: {} }), { headers: { 'content-type': 'application/json' } });
+    }
+    if (requestUrl.includes('/rpc/get_image_catalog_for_characters')) {
+      return new Response(JSON.stringify([]), { headers: { 'content-type': 'application/json' } });
+    }
+    if (requestUrl.includes('/rpc/commit_turn')) {
+      return new Response(JSON.stringify({ status: 'committed', turn_count: 6 }), { headers: { 'content-type': 'application/json' } });
+    }
+    throw new Error(`unexpected fetch: ${requestUrl}`);
+  };
+  try {
+    const response = await worker.fetch(apiRequest('/api/commit-turn', {
+      game_id: 'test-game', turn_number: 6, content: 'test',
+      extract: { character_id: 'narrator', npcs_present: [], choices: ['선택지 1', '선택지 2'] }
+    }), { SUPABASE_SECRET_KEY: 'test' });
+    assert.equal(response.status, 200);
+    const body = await response.json();
+    assert.ok(body.state_patch);
+    assert.ok(body.state_patch.player_progress);
+    // narrator turn with no suggestion_action/csa_action/world_state_patch —
+    // buildSavePatch never sets these keys on `patch`, so the selective
+    // exposure loop must not fabricate them.
+    assert.equal('active_suggestions' in body.state_patch, false);
+    assert.equal('csa_active' in body.state_patch, false);
+    assert.equal('csa_daily_used' in body.state_patch, false);
+    assert.equal('world_state' in body.state_patch, false);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
 
 // ─────────────────────────────────────────────
 // Special image scene roles

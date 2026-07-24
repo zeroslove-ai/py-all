@@ -848,6 +848,17 @@ async function handleCommitTurn(req, env) {
       request_id: requestId
     }, 409);
   }
+  // The fields the frontend's "어플 정보" panel and player-status display
+  // actually read — a subset of `patch`, not the whole thing (which also
+  // carries large story-summary text and this-turn-only npc_stats already
+  // returned separately below). Lets the frontend deep-merge fresh state
+  // into state.context.save right after commit instead of showing stale
+  // pre-commit values until the next full /api/context reload.
+  const statePatch = {};
+  for (const key of ['player_progress', 'active_suggestions', 'csa_active', 'csa_daily_used', 'world_state', 'last_character_id', 'last_choices']) {
+    if (key in patch) statePatch[key] = patch[key];
+  }
+
   return jsonResponse({
     ok: true,
     turn_count: result?.turn_count ?? turn_number,
@@ -856,6 +867,7 @@ async function handleCommitTurn(req, env) {
     image_scene_role: imageSceneRole,
     npc_stats: patch.npc_stats?.[safeExtract.character_id] || null,
     npc_stat_changes: patch.npc_stat_changes?.[safeExtract.character_id] || null,
+    state_patch: statePatch,
     request_id: requestId,
     timing
   });

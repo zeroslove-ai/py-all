@@ -94,7 +94,12 @@ const ui = {
     if (cursor) cursor.remove();
 
     const current = document.getElementById('current-narrative');
-    if (current) current.removeAttribute('id');
+    if (current) {
+      current.removeAttribute('id');
+      // Display-time-only cleanup of any stray ** from a cached/legacy Story
+      // response — names/dialogue/newlines are untouched.
+      current.textContent = this.stripBoldMarkers(current.textContent);
+    }
 
     // 구분선 추가
     const hr = document.createElement('hr');
@@ -102,6 +107,7 @@ const ui = {
     this.els.storyStream.appendChild(hr);
 
     this.scrollToBottom();
+    return current || null;
   },
 
   // ─── 시스템 메시지 ───
@@ -117,10 +123,11 @@ const ui = {
 
   restoreNarrative(text) {
     this.els.storyStream.querySelectorAll('.narrative, .divider').forEach(node => node.remove());
+    this.clearPendingTurnActions();
     if (!text) return;
     const div = document.createElement('div');
     div.className = 'narrative';
-    div.textContent = text;
+    div.textContent = this.stripBoldMarkers(text);
     this.els.storyStream.appendChild(div);
     const hr = document.createElement('hr'); hr.className = 'divider';
     this.els.storyStream.appendChild(hr);
@@ -134,8 +141,16 @@ const ui = {
     if (!mobile && this.els.bottomBar.parentElement === main) document.body.appendChild(this.els.bottomBar);
   },
 
+  // Display-side normalization only — names/dialogue/newlines are preserved,
+  // just the literal ** characters go. The Worker's Story prompt no longer
+  // asks for ** at all, but a cached/legacy response could still include it,
+  // so this is a defensive display-time cleanup, not a markdown renderer.
+  stripBoldMarkers(text) {
+    return typeof text === 'string' ? text.replace(/\*\*/g, '') : text;
+  },
+
   normalizeChoice(value) {
-    return String(value || '').replace(/^\s*(?:[①②③④⑤⑥⑦⑧⑨⑩]|\d+[.)]|[-*•])\s*/, '').trim();
+    return this.stripBoldMarkers(String(value || '')).replace(/^\s*(?:[①②③④⑤⑥⑦⑧⑨⑩]|\d+[.)]|[-*•])\s*/, '').trim();
   },
 
   removeTrailingChoiceBlock(choices) {
@@ -184,24 +199,40 @@ const ui = {
     this.scrollToBottom();
   },
 
-  // Same shape as showRetryNotice but supports more than one action button —
-  // used when the user must make a real choice (retry vs. discard) rather
-  // than just acknowledging a single retry.
-  showActionNotice(text, actions) {
+  // A dedicated class (never .narrative) so this notice is never mistaken
+  // for the actual story text by code that scans .narrative elements
+  // (removeTrailingChoiceBlock, markLastNarrativeUncommitted, etc.) — and so
+  // it has one obvious lifecycle: clearPendingTurnActions() removes exactly
+  // this, nothing else. Used when the user must make a real choice (retry
+  // vs. discard, or regenerate vs. discard) rather than acknowledge a single
+  // retry (see showRetryNotice for that simpler case).
+  showPendingTurnActions(text, actions) {
+    this.clearPendingTurnActions();
     const div = document.createElement('div');
-    div.className = 'narrative';
+    div.className = 'pending-turn-action-notice';
     div.style.color = 'var(--warning)';
     div.textContent = text + ' ';
+    const buttons = [];
     actions.forEach(({ label, onClick }) => {
       const button = document.createElement('button');
       button.className = 'choice-btn';
       button.style.marginRight = '8px';
       button.textContent = label;
-      button.addEventListener('click', onClick, { once: true });
+      buttons.push(button);
+      button.addEventListener('click', () => {
+        // Disable both buttons the instant either is clicked — a slow async
+        // action must not leave the other button clickable in the meantime.
+        buttons.forEach(b => { b.disabled = true; });
+        onClick();
+      }, { once: true });
       div.appendChild(button);
     });
     this.els.storyStream.appendChild(div);
     this.scrollToBottom();
+  },
+
+  clearPendingTurnActions() {
+    this.els.storyStream.querySelectorAll('.pending-turn-action-notice').forEach(node => node.remove());
   },
 
   // Flags the most recently finalized narrative as not yet committed —
@@ -224,16 +255,14 @@ const ui = {
     this.els.storyStream.querySelectorAll('.uncommitted-badge').forEach(node => node.remove());
   },
 
-  // Appends a short repair addition (e.g. a missed forced CSA action) to the
-  // already-finalized narrative div, rather than starting a new block —
-  // this text becomes part of the same committed turn.
-  appendToLastNarrative(text) {
-    if (!text) return;
-    const narratives = [...this.els.storyStream.querySelectorAll('.narrative')];
-    const target = narratives[narratives.length - 1];
-    if (!target) return;
-    target.textContent = `${target.textContent}\n\n${text}`;
-    this.scrollToBottom();
+  // Removes one specific finalized narrative element (and its trailing
+  // divider) by direct reference — used when a turn is thrown away for
+  // regeneration, as the counterpart to finalizeNarrative()'s returned node.
+  removeNarrativeElement(element) {
+    if (!element || !element.parentNode) return;
+    const divider = element.nextElementSibling;
+    element.remove();
+    if (divider && divider.classList.contains('divider')) divider.remove();
   },
 
   failCurrentNarrative() {
@@ -251,6 +280,7 @@ const ui = {
 
   clearGameView() {
     this.els.storyStream.querySelectorAll('.narrative, .divider').forEach(node => node.remove());
+    this.clearPendingTurnActions();
     this.els.choiceButtons.replaceChildren();
     this.els.characterImg.removeAttribute('src');
     this.els.characterImg.classList.add('hidden');

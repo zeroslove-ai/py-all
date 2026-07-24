@@ -406,8 +406,9 @@ async function handleExtract(req, env) {
   });
 
   const nextTurn = (ctx?.turn_count ?? 0) + 1;
+  const compatCtx = withSetupCompatibility(ctx);
   const t2 = Date.now();
-  const prompt = buildExtractPrompt(narrative_text, player_input, withSetupCompatibility(ctx), shortlistedImages, nextTurn);
+  const prompt = buildExtractPrompt(narrative_text, player_input, compatCtx, shortlistedImages, nextTurn);
   timing.prompt_build_ms = Date.now() - t2;
 
   const shortlistByCharacter = {};
@@ -503,6 +504,32 @@ async function handleExtract(req, env) {
     console.error('Mind monitor validation failed after repair:', { request_id: requestId, characterId, errors: validation.errors });
   }
   extract.dialogue_lines = filterMainNpcDialogue(extract, ctx?.master?.characters || {});
+
+  // Story's [3. 선택지] is only ever transcribed here, never invented — so a
+  // choice that's structurally impossible under the current hypnosis
+  // capability (full slot pool / strength ceiling) means Story ignored its
+  // HARD CONSTRAINT block. One repair call fixes just the choices instead of
+  // re-running the whole (expensive) narrative generation.
+  let choicesRepaired = false;
+  if (isSetupComplete(compatCtx.save)) {
+    const t7 = Date.now();
+    const hypnosisCapability = calculateHypnosisCapability(compatCtx.save, compatCtx.master);
+    const infeasible = findInfeasibleChoices(extract.choices, hypnosisCapability);
+    if (infeasible.length) {
+      try {
+        const replacement = await repairInfeasibleChoices(env, narrative_text, hypnosisCapability, infeasible);
+        if (replacement) {
+          extract.choices = replacement;
+          choicesRepaired = true;
+        } else {
+          console.error('Choice repair returned no usable replacement:', { request_id: requestId, infeasible });
+        }
+      } catch (error) {
+        console.error('Choice repair failed:', { request_id: requestId, error: error.message });
+      }
+      timing.choice_repair_ms = Date.now() - t7;
+    }
+  }
   timing.total_ms = Date.now() - totalStart;
 
   console.log(JSON.stringify({ event: 'gamebuilder_timing', endpoint: '/api/extract', request_id: requestId, game_id, turn_number: nextTurn, timing }));
@@ -513,6 +540,7 @@ async function handleExtract(req, env) {
     raw: result.rawText.slice(0, 200),
     mind_monitor_retried: mindMonitorRepaired,
     mind_monitor_errors: validation.ok ? [] : validation.errors,
+    choices_repaired: choicesRepaired,
     timing
   });
 }
@@ -995,6 +1023,8 @@ ${JSON.stringify(rulebook, null, 2).slice(0, 8000)}`;
 
   const suggestionPanelData = buildActiveSuggestionPanelText(save, master.characters || {});
   const csaPanelData = buildCsaPanelText(save);
+  const hypnosisCapability = calculateHypnosisCapability(save, master);
+  const hypnosisSummaryText = buildHypnosisStatusPanelData(hypnosisCapability);
   const playerStatusPanel = `
 
 [PLAYER STATUS PANEL CONTRACT — HIGHEST PRIORITY FOR SECTION 2]
@@ -1002,13 +1032,16 @@ ${JSON.stringify(rulebook, null, 2).slice(0, 8000)}`;
 저장값과 현재 장면에서 확인 가능한 정보를 우선 사용하며, 알 수 없는 값은 지어내지 않는다. 다음 항목을 모두 포함한다:
 - 🧑 플레이어: 이름, 나이, 성별, 직업 또는 역할
 - 📍 현재 장소
-- 📱 최면 어플: 이전 저장값 기준 현재 레벨, 현재 EXP/다음 레벨 필요 EXP, 현재 사용할 수 있는 최면 강도
-- 🌀 활성 최면/암시: 아래 [STATUS PANEL DATA — 활성 최면]에 나열된 항목을 NPC 이름별로 묶어 하나도 빠짐없이 표시한다. "외 n개"처럼 일부만 보여주고 나머지를 생략하지 않는다. 목록이 비어 있으면 "활성 최면 없음"이라고만 짧게 쓴다.
-- 🌐 상식 개변: 아래 [STATUS PANEL DATA — 상식 개변]에 나열된 활성 개수/최대 개수와 오늘 사용 횟수/한도를 적고, 각 항목의 적용 범위와 실제 내용을 하나도 빠짐없이 표시한다. 목록이 비어 있으면 "상식 개변 없음"이라고만 짧게 쓴다.
+- 아래 [STATUS PANEL DATA — 최면 어플 요약]의 네 줄을 숫자를 바꾸지 않고 정확히 그대로 옮겨 적는다. 레벨·경험치·슬롯·강도·상식 개변 숫자를 직접 세거나 추측해서 다시 계산하지 않는다.
+- 활성 암시가 하나 이상이면 그 아래에 "🌀 활성 암시 상세" 섹션을 만들어 아래 [STATUS PANEL DATA — 활성 최면]에 나열된 항목을 NPC 이름별로 묶어 하나도 빠짐없이 표시한다. "외 n개"처럼 일부만 보여주고 나머지를 생략하지 않는다. 활성 암시가 없으면 이 섹션 자체를 만들지 않는다.
+- 활성 상식 개변이 하나 이상이면 그 아래에 "🌐 상식 개변 상세" 섹션을 만들어 아래 [STATUS PANEL DATA — 상식 개변]에 나열된 각 항목의 적용 범위와 실제 내용을 하나도 빠짐없이 표시한다. 활성 상식 개변이 없으면 이 섹션 자체를 만들지 않는다.
 - 💭 플레이어 상황 독백: 플레이어 자신의 말투·성격·현재 욕망과 판단을 반영한 1인칭 직접 독백. 게임의 핵심 재미 요소이므로 반드시 포함한다. 반드시 한국어 큰따옴표 “…”로 감싸고, 공백과 따옴표를 제외한 실질 길이 40자 이상으로 쓴다(장면에 맞으면 더 길어도 된다). 해설문·시스템 분석문·제3자 분석문·NPC의 표면의식/잠재의식과 혼동하는 내용은 금지하며, 매턴 기계적으로 같은 독백을 반복하지 않는다. 이 독백은 [2]에만 출력한다.
 - 🔄 이번 턴: 실제로 일어난 사건을 정성적으로 서술한다. 예: "🔄 이번 턴: 한소영과 함께 면회실에서 3병동 복도로 이동했다." 순응 +2, 저항 -1, 호감도 +1처럼 숫자·기호로 된 수치 변화는 절대 쓰지 않는다.
-다음은 [2]에 절대 포함하지 않는다: 현재 접근 대상, NPC 순응도·저항력 등 NPC 수치 요약(우측 사이드바에 이미 표시되므로 중복이다), 이번 턴 예상 stat delta 숫자, (+1)·(-2) 같은 미확정 수치, 최면저항력 증감 추측, 아직 저장되지 않은 EXP와 레벨업 결과, 저장되지 않은 시각의 임의 생성, 장식용 구분선의 반복, 같은 상태를 문장만 바꾼 중복 설명.
+다음은 [2]에 절대 포함하지 않는다: 현재 접근 대상, NPC 순응도·저항력 등 NPC 수치 요약(우측 사이드바에 이미 표시되므로 중복이다), 이번 턴 예상 stat delta 숫자, (+1)·(-2) 같은 미확정 수치, 최면저항력 증감 추측, 아직 저장되지 않은 EXP와 레벨업 결과, 이번 턴 예상 증가량, 아직 Commit되지 않은 EXP, 예상 최면깊이 변화, 예상 암시 슬롯 변화, 저장되지 않은 시각의 임의 생성, 장식용 구분선의 반복, 같은 상태를 문장만 바꾼 중복 설명.
 턴 번호, 일반 최면의 하루 횟수 제한, 동시 최면 인원 제한, 1인당 중첩 암시 제한, NPC 5개 스탯 전체 표, 사정·오르가즘 누적값은 절대 출력하지 않는다.
+
+[STATUS PANEL DATA — 최면 어플 요약]
+${hypnosisSummaryText}
 
 [STATUS PANEL DATA — 활성 최면]
 ${suggestionPanelData.count ? suggestionPanelData.lines : '없음'}
@@ -1055,7 +1088,15 @@ ${recentMemorySlice.map((m, index) => clipHeadTail(m.content || '', index === re
   const playerSetupReminder = mode === 'player_setup'
     ? `\n\n[REMINDER — PLAYER SETUP PHASE]\n지금 이 응답 안에서 질문 없이 4개 캐릭터 후보를 전부 만들어서 카드 형식으로 즉시 보여준다. 네 후보 모두 성인 남성이며 각자 키·몸무게·성기 크기·외형·성격·말투를 반드시 정한다. "대기 중"처럼 결정을 미루는 표현이나 사용자에게 방향을 먼저 묻는 질문형 선택지를 만들지 않는다. [3. 선택지]는 반드시 방금 만든 4개 플레이어 후보를 "이름 · 직업" 형태로 짧게 적은 것이어야 하며, 등록 NPC를 고르는 선택지나 긴 설명문이 되어서는 안 된다.\n`
     : '';
-  const systemPrompt = coreRules + playerGate + modeSection + rulebookSection + buildNpcLocationRules() + buildAppSystemRulesSection() + currentSceneSection + npcProfileSection + explicitMentionSection + csaSection + suggestionSection + narrativeLengthSection + npcDialogueSection + antiRepetitionSection + playerStatusPanel + contextSection + feedbackSection + continuitySection + finalFormatRules + openingFlow + playerSetupReminder;
+  // Repeated at the very end (same recency-favoring position as
+  // playerSetupReminder) since [3. 선택지] is the last thing generated —
+  // a rule stated only once near the top of a long prompt is exactly what
+  // let the model invent "add another suggestion"/"go deeper" choices when
+  // the slot pool was already full or the level capped the strength tier.
+  const hypnosisCapabilitySection = mode === 'normal' || mode === 'opening'
+    ? buildCurrentHypnosisCapabilitySection(hypnosisCapability)
+    : '';
+  const systemPrompt = coreRules + playerGate + modeSection + rulebookSection + buildNpcLocationRules() + buildAppSystemRulesSection() + currentSceneSection + npcProfileSection + explicitMentionSection + csaSection + suggestionSection + narrativeLengthSection + npcDialogueSection + antiRepetitionSection + playerStatusPanel + contextSection + feedbackSection + continuitySection + finalFormatRules + openingFlow + playerSetupReminder + hypnosisCapabilitySection;
 
   return {
     mode,
@@ -1785,6 +1826,10 @@ function applySuggestionAction(previousSave, action, currentCharacterId, turnNum
   if (!content) return null;
 
   if (action.action === 'activate') {
+    // Structural guard: even if the model (or a manually-typed player action)
+    // proposes a new suggestion while every slot is already full, the Worker
+    // must refuse it rather than trust prompt compliance alone.
+    if (!calculateHypnosisCapability(previousSave).can_create_suggestion) return null;
     const strength = typeof action.strength === 'string' && action.strength.trim() ? action.strength.trim() : 'surface';
     const duplicate = list.some(item => item?.active && normalizeSuggestionContent(item.content) === content);
     if (duplicate) return null;
@@ -1855,6 +1900,173 @@ function buildCsaPanelText(save = {}) {
     dailyLimit: limits.daily_limit,
     lines
   };
+}
+
+// ─────────────────────────────────────────────
+// 최면 어플 능력치(capability) — 선택지 생성 가드레일, 상태 저장 가드,
+// 플레이어 상황판이 모두 같은 계산 결과를 공유하는 단일 소스.
+// 서로 다른 곳에서 다른 슬롯/강도 숫자를 보는 불일치를 막는다.
+// ─────────────────────────────────────────────
+
+const HYPNOSIS_STRENGTH_TIERS = ['약함', '중간', '강함', '깊은 최면'];
+
+function hypnosisStrengthRank(strength) {
+  const index = HYPNOSIS_STRENGTH_TIERS.indexOf(strength);
+  return index === -1 ? 0 : index;
+}
+
+function getHypnosisSuggestionLimits(level) {
+  const clamped = Math.max(1, Number(level) || 1);
+  if (clamped >= 8) return { max_active: 4, available_strength: '깊은 최면' };
+  if (clamped >= 5) return { max_active: 3, available_strength: '강함' };
+  if (clamped >= 3) return { max_active: 2, available_strength: '중간' };
+  return { max_active: 1, available_strength: '약함' };
+}
+
+// active_count sums every registered NPC's active personal suggestions, not
+// just the current on-screen NPC — the slot pool is global, so a full pool
+// caused by NPC A must still block a new suggestion for NPC B.
+function calculateHypnosisCapability(save = {}, master = {}) {
+  const level = Math.max(1, Number(save?.player_progress?.level) || 1);
+  const exp = Math.max(0, Number(save?.player_progress?.exp) || 0);
+  const nextLevelExp = level >= 10 ? 0 : expForNextLevel(level);
+
+  const suggestionMap = normalizeLegacyActiveSuggestions(save?.active_suggestions);
+  const activeCount = Object.values(suggestionMap).reduce(
+    (total, list) => total + (Array.isArray(list) ? list.filter(item => item?.active).length : 0),
+    0
+  );
+  const { max_active: maxActive, available_strength: availableStrength } = getHypnosisSuggestionLimits(level);
+  const remainingSlots = Math.max(0, maxActive - activeCount);
+  const strengthRank = hypnosisStrengthRank(availableStrength);
+
+  const csaLimits = getCsaLimits(level);
+  const csaActiveCount = (Array.isArray(save?.csa_active) ? save.csa_active : []).filter(item => item?.active).length;
+  const csaDailyUsed = Math.max(0, Number(save?.csa_daily_used) || 0);
+
+  return {
+    current_level: level,
+    exp,
+    next_level_exp: nextLevelExp,
+    available_strength: availableStrength,
+    active_count: activeCount,
+    max_active: maxActive,
+    remaining_slots: remainingSlots,
+    can_create_suggestion: remainingSlots > 0,
+    can_edit_same_strength: activeCount > 0,
+    can_disable_or_delete: activeCount > 0,
+    can_increase_strength: activeCount > 0 && strengthRank > 0,
+    can_attempt_deeper_hypnosis: strengthRank > 0,
+    csa_active_count: csaActiveCount,
+    csa_max_active: csaLimits.max_active,
+    csa_daily_used: csaDailyUsed,
+    csa_daily_limit: csaLimits.daily_limit
+  };
+}
+
+// HARD CONSTRAINT block for the Story prompt: tells the model exactly which
+// hypnosis-app actions are currently possible so it stops inventing "add
+// another suggestion" or "go deeper" choices when the slot/strength state
+// forbids them. Placed late in the prompt (near the other choice-generation
+// contracts) since recency beats a rule stated only once near the top.
+function buildCurrentHypnosisCapabilitySection(capability) {
+  const {
+    current_level: currentLevel,
+    available_strength: availableStrength,
+    active_count: activeCount,
+    max_active: maxActive,
+    remaining_slots: remainingSlots,
+    can_create_suggestion: canCreateSuggestion,
+    can_edit_same_strength: canEditSameStrength,
+    can_disable_or_delete: canDisableOrDelete,
+    can_increase_strength: canIncreaseStrength,
+    can_attempt_deeper_hypnosis: canAttemptDeeperHypnosis
+  } = capability;
+
+  const slotBan = !canCreateSuggestion
+    ? `\n- 남은 암시 슬롯이 0이므로 [3. 선택지]에 다음 표현이 들어간 선택지를 만들지 마라: 새 암시, 추가 암시, 중첩 암시, 또 다른 암시.`
+    : '';
+  const strengthBan = !canAttemptDeeperHypnosis
+    ? `\n- 현재 사용 가능한 최면 강도는 "${availableStrength}"이 최고치이므로 [3. 선택지]에 다음 표현이 들어간 선택지를 만들지 마라: 강화, 더 깊게, 깊은 최면, 중간 최면, 강한 최면, 한 단계 올린다.`
+    : '';
+
+  return `\n\n[CURRENT HYPNOSIS APP CAPABILITY — HARD CONSTRAINT]\n\n현재 레벨: Lv.${currentLevel}\n사용 가능한 최면 강도: ${availableStrength}\n암시 슬롯: 활성 ${activeCount} / 최대 ${maxActive} (남은 슬롯 ${remainingSlots})\n\n이번 턴 실제로 가능한 어플 행동:\n- 새 암시 생성: ${canCreateSuggestion ? '가능' : '불가능'}\n- 기존 암시를 현재 허용 강도 안에서 수정: ${canEditSameStrength ? '가능' : '불가능(활성 암시 없음)'}\n- 기존 암시 OFF 또는 삭제: ${canDisableOrDelete ? '가능' : '불가능(활성 암시 없음)'}\n- 기존 암시 강도 올리기: ${canIncreaseStrength ? '가능' : '불가능'}\n- 더 깊거나 강한 최면 시도: ${canAttemptDeeperHypnosis ? '가능' : '불가능'}\n${slotBan}${strengthBan}\n- 슬롯이 가득 차 있어도 기존 암시를 같은 허용 강도 안에서 수정하거나 OFF/삭제하는 선택지는 항상 만들 수 있다.\n- 이미 활성 상태인 암시의 효과를 이용해 평범한 대화나 부탁을 하는 선택지는 항상 만들 수 있다. 단, 그 대화 자체를 암시 강화나 최면 심화로 표현하지 마라.\n- [3. 선택지] 네 개는 위 조건을 모두 만족해야 한다. 하나라도 위반하면 안 된다.`;
+}
+
+// Pre-computed display text for [2. 플레이어 상황판]'s 최면 어플 요약 4줄 — the
+// model transcribes this verbatim instead of counting slots or guessing the
+// current strength tier itself.
+function buildHypnosisStatusPanelData(capability) {
+  return [
+    `📱 최면 어플: Lv.${capability.current_level} · 경험치 ${capability.exp} / 다음 레벨까지 ${capability.next_level_exp}`,
+    `🌀 암시 슬롯: 활성 ${capability.active_count} / 최대 ${capability.max_active} · 남은 슬롯 ${capability.remaining_slots}`,
+    `⚡ 사용 가능 강도: ${capability.available_strength}`,
+    `🌐 상식 개변: 활성 ${capability.csa_active_count} / 최대 ${capability.csa_max_active} · 오늘 사용 ${capability.csa_daily_used} / 한도 ${capability.csa_daily_limit}`
+  ].join('\n');
+}
+
+// Deterministic keyword check (not model judgment) for [3. 선택지] entries
+// that are structurally impossible given the current hypnosis capability.
+const SLOT_FULL_FORBIDDEN_PHRASES = ['새 암시', '추가 암시', '중첩 암시', '또 다른 암시'];
+const STRENGTH_CAP_FORBIDDEN_PHRASES = ['강화', '더 깊게', '깊은 최면', '중간 최면', '강한 최면', '한 단계 올린다', '한 단계 올려'];
+
+function findInfeasibleChoices(choices, capability) {
+  if (!Array.isArray(choices) || !capability) return [];
+  const problems = [];
+  for (const choice of choices) {
+    if (typeof choice !== 'string' || !choice.trim()) continue;
+    if (!capability.can_create_suggestion) {
+      const hit = SLOT_FULL_FORBIDDEN_PHRASES.find(phrase => choice.includes(phrase));
+      if (hit) { problems.push({ choice, reason: `암시 슬롯이 가득 찼는데 "${hit}" 표현이 포함됨` }); continue; }
+    }
+    if (!capability.can_attempt_deeper_hypnosis) {
+      const hit = STRENGTH_CAP_FORBIDDEN_PHRASES.find(phrase => choice.includes(phrase));
+      if (hit) problems.push({ choice, reason: `사용 가능 강도가 "${capability.available_strength}"인데 "${hit}" 표현이 포함됨` });
+    }
+  }
+  return problems;
+}
+
+function buildChoiceRepairPrompt(narrativeText, capability, infeasible) {
+  const reasonLines = infeasible.map(p => `- "${p.choice}" → ${p.reason}`).join('\n');
+  return `너는 인터랙티브 게임의 [3. 선택지] 네 개만 다시 작성하는 역할이다. 서사 본문은 건드리지 않는다. 유효한 JSON 객체 하나만 출력한다. 마크다운 코드펜스와 설명문을 절대 쓰지 마라.
+
+[방금 생성된 서사]
+${(narrativeText || '').slice(-1500)}
+
+[현재 최면 어플 상태 — HARD CONSTRAINT]
+레벨: Lv.${capability.current_level}
+사용 가능한 최면 강도: ${capability.available_strength}
+암시 슬롯: 활성 ${capability.active_count} / 최대 ${capability.max_active} (남은 슬롯 ${capability.remaining_slots})
+새 암시 생성 가능: ${capability.can_create_suggestion ? '가능' : '불가능'}
+더 깊거나 강한 최면 시도 가능: ${capability.can_attempt_deeper_hypnosis ? '가능' : '불가능'}
+
+[방금 실패한 선택지와 이유]
+${reasonLines}
+
+규칙:
+- 정확히 4개의 선택지 문자열을 새로 만든다.
+- 위에서 불가능하다고 지적된 표현과 그 의미를 다시 포함하지 않는다.
+- 서사의 맥락과 자연스럽게 이어지는 행동이어야 한다.
+
+[요구 JSON 스키마]
+{"choices": ["", "", "", ""]}`;
+}
+
+async function repairInfeasibleChoices(env, narrativeText, capability, infeasible) {
+  const prompt = buildChoiceRepairPrompt(narrativeText, capability, infeasible);
+  const result = await requestDeepSeekJsonWithRetry(env, {
+    model: 'deepseek-v4-flash',
+    thinking: { type: 'disabled' },
+    messages: [{ role: 'system', content: prompt }],
+    response_format: { type: 'json_object' },
+    stream: false,
+    max_tokens: 500
+  }, { timeoutMs: 30000, maxAttempts: 1 });
+  const choices = Array.isArray(result.parsed?.choices)
+    ? result.parsed.choices.filter(choice => typeof choice === 'string' && choice.trim())
+    : [];
+  return choices.length === 4 ? choices : null;
 }
 
 function buildCurrentSceneSection(save, characters = {}) {
@@ -2313,6 +2525,13 @@ export {
   buildActiveSuggestionPanelText,
   buildCsaPanelText,
   buildApplicableCsaSection,
+  calculateHypnosisCapability,
+  getHypnosisSuggestionLimits,
+  hypnosisStrengthRank,
+  buildCurrentHypnosisCapabilitySection,
+  buildHypnosisStatusPanelData,
+  findInfeasibleChoices,
+  repairInfeasibleChoices,
   resolveCsaScopeId,
   resolveIsSexual,
   normalizeImagePool,

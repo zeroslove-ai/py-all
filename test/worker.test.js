@@ -36,6 +36,12 @@ import {
   buildActiveSuggestionSection,
   buildActiveSuggestionPanelText,
   buildCsaPanelText,
+  calculateHypnosisCapability,
+  getHypnosisSuggestionLimits,
+  hypnosisStrengthRank,
+  buildCurrentHypnosisCapabilitySection,
+  buildHypnosisStatusPanelData,
+  findInfeasibleChoices,
   hasLegacyEncounterEvidence,
   resolveIsSexual,
   normalizeImagePool,
@@ -1273,7 +1279,13 @@ test('duplicate active suggestions for the same NPC (ignoring whitespace) are no
 });
 
 test("activating a suggestion for one NPC never touches another NPC's suggestion list", () => {
-  const previousSave = { active_suggestions: { heroine1: [{ id: 'suggestion_1_1', content: 'other npc suggestion', strength: 'surface', created_turn: 1, active: true }] } };
+  // player_progress.level: 3 gives a 2-slot global pool (getHypnosisSuggestionLimits),
+  // so the existing heroine1 suggestion doesn't itself block this heroine9 activation —
+  // the point under test is cross-NPC isolation, not slot capacity.
+  const previousSave = {
+    player_progress: { level: 3 },
+    active_suggestions: { heroine1: [{ id: 'suggestion_1_1', content: 'other npc suggestion', strength: 'surface', created_turn: 1, active: true }] }
+  };
   const extract = { character_id: 'heroine9', suggestion_action: { action: 'activate', content: 'new suggestion', strength: 'surface' } };
   const patch = buildSavePatch(extract, {}, null, previousSave, 2, '');
   assert.deepEqual(Object.keys(patch.active_suggestions), ['heroine9']);
@@ -2624,6 +2636,302 @@ test('an empty active-suggestion or CSA list renders as "없음" placeholders, n
   const csaData = content.slice(content.lastIndexOf('[STATUS PANEL DATA — 상식 개변]'), content.indexOf('[게임 설정]'));
   assert.match(csaData, /활성 0개 \/ 최대 1개, 오늘 사용 0회 \/ 한도 1회/);
   assert.match(csaData, /없음/);
+});
+
+// ─────────────────────────────────────────────
+// Hypnosis app capability — shared single source for choice guardrails,
+// state-mutation guards, and the player status panel
+// ─────────────────────────────────────────────
+
+test('calculateHypnosisCapability: Lv.1 with an empty slot allows creating a suggestion but forbids increasing strength or going deeper', () => {
+  const capability = calculateHypnosisCapability({ player_progress: { level: 1, exp: 0 } });
+  assert.equal(capability.current_level, 1);
+  assert.equal(capability.available_strength, '약함');
+  assert.equal(capability.active_count, 0);
+  assert.equal(capability.max_active, 1);
+  assert.equal(capability.remaining_slots, 1);
+  assert.equal(capability.can_create_suggestion, true);
+  assert.equal(capability.can_edit_same_strength, false);
+  assert.equal(capability.can_disable_or_delete, false);
+  assert.equal(capability.can_increase_strength, false);
+  assert.equal(capability.can_attempt_deeper_hypnosis, false);
+});
+
+test('calculateHypnosisCapability: Lv.1 with a full slot (1/1) forbids new suggestions, but still allows editing/disabling/deleting the existing one', () => {
+  const save = {
+    player_progress: { level: 1 },
+    active_suggestions: { heroine1: [{ id: 's1', content: '고개를 끄덕인다', strength: '약함', created_turn: 1, active: true }] }
+  };
+  const capability = calculateHypnosisCapability(save);
+  assert.equal(capability.active_count, 1);
+  assert.equal(capability.max_active, 1);
+  assert.equal(capability.remaining_slots, 0);
+  assert.equal(capability.can_create_suggestion, false);
+  assert.equal(capability.can_edit_same_strength, true);
+  assert.equal(capability.can_disable_or_delete, true);
+  assert.equal(capability.can_increase_strength, false);
+  assert.equal(capability.can_attempt_deeper_hypnosis, false);
+});
+
+test('calculateHypnosisCapability sums active_count across every NPC, not just the current on-screen one, and excludes inactive entries', () => {
+  const save = {
+    player_progress: { level: 5 },
+    active_suggestions: {
+      heroine1: [{ content: 'a', strength: '약함', active: true }, { content: 'b', strength: '약함', active: false }],
+      heroine2: [{ content: 'c', strength: '약함', active: true }]
+    }
+  };
+  const capability = calculateHypnosisCapability(save);
+  assert.equal(capability.active_count, 2);
+  assert.equal(capability.max_active, 3); // getHypnosisSuggestionLimits(5)
+  assert.equal(capability.remaining_slots, 1);
+});
+
+test('calculateHypnosisCapability unlocks a higher strength tier and slot count at higher levels, matching getHypnosisSuggestionLimits', () => {
+  assert.deepEqual(getHypnosisSuggestionLimits(1), { max_active: 1, available_strength: '약함' });
+  assert.deepEqual(getHypnosisSuggestionLimits(3), { max_active: 2, available_strength: '중간' });
+  assert.deepEqual(getHypnosisSuggestionLimits(5), { max_active: 3, available_strength: '강함' });
+  assert.deepEqual(getHypnosisSuggestionLimits(8), { max_active: 4, available_strength: '깊은 최면' });
+
+  const capability = calculateHypnosisCapability({ player_progress: { level: 5 }, active_suggestions: { heroine1: [{ content: 'a', strength: '약함', active: true }] } });
+  assert.equal(capability.available_strength, '강함');
+  assert.equal(capability.can_increase_strength, true);
+  assert.equal(capability.can_attempt_deeper_hypnosis, true);
+});
+
+test('calculateHypnosisCapability computes CSA active/max/daily numbers from save + level rules, same as getCsaLimits', () => {
+  const save = { player_progress: { level: 4 }, csa_daily_used: 1, csa_active: [{ content: 'x', active: true }, { content: 'y', active: false }] };
+  const capability = calculateHypnosisCapability(save);
+  const limits = getCsaLimits(4);
+  assert.equal(capability.csa_active_count, 1);
+  assert.equal(capability.csa_max_active, limits.max_active);
+  assert.equal(capability.csa_daily_used, 1);
+  assert.equal(capability.csa_daily_limit, limits.daily_limit);
+});
+
+test('buildHypnosisStatusPanelData renders the exact four-line summary format with no invented numbers', () => {
+  const capability = calculateHypnosisCapability({
+    player_progress: { level: 1, exp: 0 },
+    active_suggestions: { heroine1: [{ content: 'a', strength: '약함', active: true }] }
+  });
+  const text = buildHypnosisStatusPanelData(capability);
+  assert.equal(text, [
+    '📱 최면 어플: Lv.1 · 경험치 0 / 다음 레벨까지 10',
+    '🌀 암시 슬롯: 활성 1 / 최대 1 · 남은 슬롯 0',
+    '⚡ 사용 가능 강도: 약함',
+    '🌐 상식 개변: 활성 0 / 최대 1 · 오늘 사용 0 / 한도 1'
+  ].join('\n'));
+});
+
+test('buildCurrentHypnosisCapabilitySection bans new/overlapping-suggestion phrases when slots are full', () => {
+  const capability = calculateHypnosisCapability({
+    player_progress: { level: 1 },
+    active_suggestions: { heroine1: [{ content: 'a', strength: '약함', active: true }] }
+  });
+  const section = buildCurrentHypnosisCapabilitySection(capability);
+  assert.match(section, /새 암시, 추가 암시, 중첩 암시, 또 다른 암시/);
+  assert.match(section, /강화, 더 깊게, 깊은 최면, 중간 최면, 강한 최면, 한 단계 올린다/);
+  assert.match(section, /슬롯이 가득 차 있어도 기존 암시를 같은 허용 강도 안에서 수정하거나 OFF\/삭제하는 선택지는 항상 만들 수 있다/);
+  assert.match(section, /암시 강화나 최면 심화로 표현하지 마라/);
+});
+
+test('buildCurrentHypnosisCapabilitySection allows a new weak suggestion when a slot is free, but still bans strength-increase phrasing at Lv.1', () => {
+  const capability = calculateHypnosisCapability({ player_progress: { level: 1 } });
+  const section = buildCurrentHypnosisCapabilitySection(capability);
+  assert.doesNotMatch(section, /새 암시, 추가 암시, 중첩 암시, 또 다른 암시/);
+  assert.match(section, /강화, 더 깊게, 깊은 최면, 중간 최면, 강한 최면, 한 단계 올린다/);
+  assert.match(section, /새 암시 생성: 가능/);
+});
+
+test('buildCurrentHypnosisCapabilitySection drops the strength ban once the level unlocks a higher tier', () => {
+  const capability = calculateHypnosisCapability({ player_progress: { level: 5 } });
+  const section = buildCurrentHypnosisCapabilitySection(capability);
+  assert.doesNotMatch(section, /강화, 더 깊게, 깊은 최면, 중간 최면, 강한 최면, 한 단계 올린다/);
+});
+
+test('findInfeasibleChoices flags a full-slot new-suggestion choice and a strength-ceiling choice, leaves ordinary choices alone', () => {
+  const capability = calculateHypnosisCapability({
+    player_progress: { level: 1 },
+    active_suggestions: { heroine1: [{ content: 'a', strength: '약함', active: true }] }
+  });
+  const choices = ['한소영에게 추가 암시를 건다', '암시를 강화한다', '깊은 최면을 시도한다', '한소영과 평범하게 대화한다'];
+  const infeasible = findInfeasibleChoices(choices, capability);
+  const flagged = infeasible.map(p => p.choice);
+  assert.ok(flagged.includes('한소영에게 추가 암시를 건다'));
+  assert.ok(flagged.includes('암시를 강화한다'));
+  assert.ok(flagged.includes('깊은 최면을 시도한다'));
+  assert.equal(flagged.includes('한소영과 평범하게 대화한다'), false);
+});
+
+test('findInfeasibleChoices allows using an existing active suggestion in ordinary conversation', () => {
+  const capability = calculateHypnosisCapability({
+    player_progress: { level: 1 },
+    active_suggestions: { heroine1: [{ content: 'a', strength: '약함', active: true }] }
+  });
+  const choices = ['이미 걸린 암시 효과를 이용해 부탁해본다', '기존 암시를 OFF로 끈다', '기존 암시를 삭제한다'];
+  assert.deepEqual(findInfeasibleChoices(choices, capability), []);
+});
+
+test('applying a manually-typed impossible suggestion action never exceeds the level-gated slot cap in saved state', () => {
+  const previousSave = {
+    player_progress: { level: 1 },
+    active_suggestions: { heroine1: [{ id: 's1', content: '기존 암시', strength: '약함', created_turn: 1, active: true }] }
+  };
+  // Same NPC, a second distinct suggestion while the global pool is already full.
+  const sameNpc = applySuggestionAction(previousSave, { action: 'activate', content: '새 암시', strength: '약함' }, 'heroine1', 2);
+  assert.equal(sameNpc, null);
+  // A different NPC does not get a free pass either — the pool is global.
+  const otherNpc = applySuggestionAction(previousSave, { action: 'activate', content: '새 암시', strength: '약함' }, 'heroine2', 2);
+  assert.equal(otherNpc, null);
+  // Deactivating the existing one is still allowed even while full.
+  const deactivate = applySuggestionAction(previousSave, { action: 'deactivate', content: '기존 암시' }, 'heroine1', 2);
+  assert.deepEqual(deactivate.active_suggestions.heroine1[0].active, false);
+});
+
+test('the Story prompt HARD CONSTRAINT section reflects the live capability and only appears for normal/opening turns, not player_setup', () => {
+  const save = {
+    player: { name: '금태양', job: '간호사' },
+    player_setup: { status: 'complete' },
+    opening_started: true,
+    player_progress: { level: 1 },
+    active_suggestions: { heroine1: [{ content: 'a', strength: '약함', active: true }] }
+  };
+  const prompt = buildStoryPrompt({ master: { characters: {} }, save, recent_memories: [] }, '계속', 5);
+  const content = prompt.messages[0].content;
+  assert.match(content, /\[CURRENT HYPNOSIS APP CAPABILITY — HARD CONSTRAINT\]/);
+  assert.match(content, /현재 레벨: Lv\.1/);
+  assert.match(content, /암시 슬롯: 활성 1 \/ 최대 1 \(남은 슬롯 0\)/);
+  assert.match(content, /새 암시, 추가 암시, 중첩 암시, 또 다른 암시/);
+
+  const setupPrompt = buildStoryPrompt({ master: { characters: {} }, save: { player: {} }, recent_memories: [] }, '계속', 0);
+  assert.doesNotMatch(setupPrompt.messages[0].content, /\[CURRENT HYPNOSIS APP CAPABILITY — HARD CONSTRAINT\]/);
+});
+
+test('the player status panel and the choice-feasibility HARD CONSTRAINT read the same capability numbers, so they can never disagree', () => {
+  const save = {
+    player: { name: '금태양', job: '간호사' },
+    player_setup: { status: 'complete' },
+    opening_started: true,
+    player_progress: { level: 1 },
+    active_suggestions: { heroine1: [{ content: 'a', strength: '약함', active: true }] }
+  };
+  const prompt = buildStoryPrompt({ master: { characters: {} }, save, recent_memories: [] }, '계속', 5);
+  const content = prompt.messages[0].content;
+  const panelSection = content.slice(content.lastIndexOf('[STATUS PANEL DATA — 최면 어플 요약]'), content.lastIndexOf('[STATUS PANEL DATA — 활성 최면]'));
+  assert.match(panelSection, /🌀 암시 슬롯: 활성 1 \/ 최대 1 · 남은 슬롯 0/);
+  assert.match(panelSection, /⚡ 사용 가능 강도: 약함/);
+  const constraintSection = content.slice(content.lastIndexOf('[CURRENT HYPNOSIS APP CAPABILITY'));
+  assert.match(constraintSection, /암시 슬롯: 활성 1 \/ 최대 1 \(남은 슬롯 0\)/);
+  assert.match(constraintSection, /사용 가능한 최면 강도: 약함/);
+});
+
+test('/api/extract repairs choices that are structurally impossible given the current hypnosis capability, keeping the narrative untouched', async () => {
+  const originalFetch = globalThis.fetch;
+  const deepseekCalls = [];
+  globalThis.fetch = async (url, init = {}) => {
+    const requestUrl = String(url);
+    if (requestUrl.includes('/rpc/get_extract_context')) {
+      return new Response(JSON.stringify({
+        turn_count: 5,
+        master: { characters: { heroine1: { name: '한소영' } } },
+        save: {
+          player: { name: '금태양', job: '간호사' },
+          player_setup: { status: 'complete' },
+          opening_started: true,
+          player_progress: { level: 1 },
+          active_suggestions: { heroine1: [{ content: '기존 암시', strength: '약함', active: true }] }
+        }
+      }), { headers: { 'content-type': 'application/json' } });
+    }
+    if (requestUrl.includes('/rpc/get_image_catalog_for_characters')) {
+      return new Response(JSON.stringify([]), { headers: { 'content-type': 'application/json' } });
+    }
+    if (requestUrl.includes('api.deepseek.com')) {
+      const body = JSON.parse(init.body);
+      deepseekCalls.push(body);
+      if (deepseekCalls.length === 1) {
+        return new Response(JSON.stringify({
+          choices: [{ message: { content: JSON.stringify({
+            character_id: 'heroine1', npcs_present: ['heroine1'],
+            npc_emotion: {
+              surface: '“낯선 사람이라 조금 긴장되지만 티를 내지 말자. 우선 평소처럼 침착하게 내 할 일부터 하며 신분을 확인하자.”',
+              inner: '“왜 이렇게 자꾸 신경이 쓰이는지 나도 모르겠다. 경계해야 하는데 자꾸 시선이 가고 마음이 흔들린다.”',
+              physical_reaction: '그녀는 옷깃을 매만지며 시선을 살짝 피한다. 짧게 숨을 고른 뒤 낮은 목소리로 대답한다.'
+            },
+            choices: ['한소영에게 추가 암시를 건다', '암시를 강화한다', '깊은 최면을 시도한다', '한소영과 평범하게 대화한다']
+          }) }, finish_reason: 'stop' }]
+        }), { headers: { 'content-type': 'application/json' } });
+      }
+      return new Response(JSON.stringify({
+        choices: [{ message: { content: JSON.stringify({
+          choices: ['한소영에게 기존 암시 효과를 이용해 부탁해본다', '기존 암시를 OFF로 끈다', '기존 암시를 삭제한다', '한소영과 평범하게 대화한다']
+        }) }, finish_reason: 'stop' }]
+      }), { headers: { 'content-type': 'application/json' } });
+    }
+    throw new Error(`unexpected fetch: ${requestUrl}`);
+  };
+  try {
+    const response = await worker.fetch(apiRequest('/api/extract', {
+      game_id: 'test-game', narrative_text: '한소영이 응대했다.', player_input: '한소영에게 말을 건다'
+    }), { DEEPSEEK_API_KEY: 'test' });
+    assert.equal(response.status, 200);
+    const body = await response.json();
+    assert.equal(body.choices_repaired, true);
+    assert.equal(deepseekCalls.length, 2);
+    assert.deepEqual(body.extract.choices, ['한소영에게 기존 암시 효과를 이용해 부탁해본다', '기존 암시를 OFF로 끈다', '기존 암시를 삭제한다', '한소영과 평범하게 대화한다']);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('/api/extract does not call the repair path when every choice is already feasible', async () => {
+  const originalFetch = globalThis.fetch;
+  const deepseekCalls = [];
+  globalThis.fetch = async (url, init = {}) => {
+    const requestUrl = String(url);
+    if (requestUrl.includes('/rpc/get_extract_context')) {
+      return new Response(JSON.stringify({
+        turn_count: 5,
+        master: { characters: { heroine1: { name: '한소영' } } },
+        save: {
+          player: { name: '금태양', job: '간호사' },
+          player_setup: { status: 'complete' },
+          opening_started: true,
+          player_progress: { level: 1 }
+        }
+      }), { headers: { 'content-type': 'application/json' } });
+    }
+    if (requestUrl.includes('/rpc/get_image_catalog_for_characters')) {
+      return new Response(JSON.stringify([]), { headers: { 'content-type': 'application/json' } });
+    }
+    if (requestUrl.includes('api.deepseek.com')) {
+      const body = JSON.parse(init.body);
+      deepseekCalls.push(body);
+      return new Response(JSON.stringify({
+        choices: [{ message: { content: JSON.stringify({
+          character_id: 'heroine1', npcs_present: ['heroine1'],
+          npc_emotion: {
+            surface: '“낯선 사람이라 조금 긴장되지만 티를 내지 말자. 우선 평소처럼 침착하게 내 할 일부터 하며 신분을 확인하자.”',
+            inner: '“왜 이렇게 자꾸 신경이 쓰이는지 나도 모르겠다. 경계해야 하는데 자꾸 시선이 가고 마음이 흔들린다.”',
+            physical_reaction: '그녀는 옷깃을 매만지며 시선을 살짝 피한다. 짧게 숨을 고른 뒤 낮은 목소리로 대답한다.'
+          },
+          choices: ['한소영과 평범하게 대화한다', '커피를 마시며 쉰다', '병실을 둘러본다', '수간호사에게 인사한다']
+        }) }, finish_reason: 'stop' }]
+      }), { headers: { 'content-type': 'application/json' } });
+    }
+    throw new Error(`unexpected fetch: ${requestUrl}`);
+  };
+  try {
+    const response = await worker.fetch(apiRequest('/api/extract', {
+      game_id: 'test-game', narrative_text: '한소영이 응대했다.', player_input: '한소영에게 말을 건다'
+    }), { DEEPSEEK_API_KEY: 'test' });
+    assert.equal(response.status, 200);
+    const body = await response.json();
+    assert.equal(body.choices_repaired, false);
+    assert.equal(deepseekCalls.length, 1);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
 });
 
 // ─────────────────────────────────────────────

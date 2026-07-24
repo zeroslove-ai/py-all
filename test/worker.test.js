@@ -81,6 +81,16 @@ import {
   buildSafeFallbackChoices,
   validateFinalChoices,
   insertNarrativeAdditionBeforeStatus,
+  buildActiveCsaOperationSection,
+  detectCsaMetaAwareness,
+  extractNarrativeActionSection,
+  replaceNarrativeActionSection,
+  collectCsaMetaAwarenessViolations,
+  applyCsaMetaFallbackToSection1,
+  applyCsaMetaFallbackToTurnSummary,
+  resolveCsaMetaFallbackForEmotionField,
+  resolveCsaNarrativeIntegrity,
+  currentUtcDateString,
   looksLikeKoreanFullName,
   normalizeStrengthForStorage,
   hasLegacyEncounterEvidence,
@@ -4436,7 +4446,7 @@ test('getApplicableCsaEntries / buildCsaApplicationCheckSection restrict to in-s
   assert.match(promptSection, /조건을 충족하는 등록 NPC 전원에게 예외 없이 동일하게 적용/);
 });
 
-test('H2 item 9: /api/extract fixes a CSA omission by inserting the correction before [2. 플레이어 상황판], without re-running Extract a second time — every other structured field stays from the first pass', async () => {
+test('H3-B: /api/extract fixes a CSA omission via the combined csa-narrative-integrity repair, replacing only [1] before [2. 플레이어 상황판], without re-running Extract a second time — every other structured field stays from the first pass', async () => {
   const originalFetch = globalThis.fetch;
   const deepseekCalls = [];
   const narrativeText = '[1. 서사 및 행동]\n김지은이 여러 문장을 말했다.\n\n[2. 플레이어 상황판]\n상태 정보\n\n[3. 선택지]\n1. 계속한다';
@@ -4474,10 +4484,12 @@ test('H2 item 9: /api/extract fixes a CSA omission by inserting the correction b
           }) }, finish_reason: 'stop' }]
         }), { headers: { 'content-type': 'application/json' } });
       }
-      // Second (and last) call: the CSA-omission repair — produces only the
-      // short addition. H2: no further re-extraction call happens after this.
+      // Second (and last) call: the combined csa-narrative-integrity repair —
+      // returns the full corrected [1] section. No further call happens after this.
       return new Response(JSON.stringify({
-        choices: [{ message: { content: JSON.stringify({ addition: '말을 마치자마자 그녀의 볼에 가볍게 입을 맞춘다.' }) }, finish_reason: 'stop' }]
+        choices: [{ message: { content: JSON.stringify({
+          narrative_section_1: '김지은이 여러 문장을 말했다. 말을 마치자마자 그녀의 볼에 가볍게 입을 맞춘다.'
+        }) }, finish_reason: 'stop' }]
       }), { headers: { 'content-type': 'application/json' } });
     }
     throw new Error(`unexpected fetch: ${requestUrl}`);
@@ -4488,17 +4500,19 @@ test('H2 item 9: /api/extract fixes a CSA omission by inserting the correction b
     }), { DEEPSEEK_API_KEY: 'test' });
     assert.equal(response.status, 200);
     const body = await response.json();
-    assert.equal(deepseekCalls.length, 2); // H2: no third (re-extraction) call
+    assert.equal(deepseekCalls.length, 2); // no third (re-extraction) call
     assert.equal(body.content_addition, null);
     assert.ok(body.narrative_replacement);
     const addIndex = body.narrative_replacement.indexOf('말을 마치자마자');
     const statusIndex = body.narrative_replacement.indexOf('[2. 플레이어 상황판]');
     const choicesIndex = body.narrative_replacement.indexOf('[3. 선택지]');
     assert.ok(addIndex > -1 && statusIndex > -1 && choicesIndex > -1);
-    assert.ok(addIndex < statusIndex, 'the addition must land before [2. 플레이어 상황판]');
+    assert.ok(addIndex < statusIndex, 'the correction must land before [2. 플레이어 상황판]');
     assert.ok(statusIndex < choicesIndex, 'and therefore before [3. 선택지] too');
-    // H2: the final extract still reflects the FIRST pass's own choices —
-    // there is no second pass to have replaced them with anything else.
+    // [2]/[3] must stay byte-identical to the original.
+    assert.match(body.narrative_replacement, /\[2\. 플레이어 상황판\]\n상태 정보\n\n\[3\. 선택지\]\n1\. 계속한다$/);
+    // The final extract still reflects the FIRST pass's own choices — there
+    // is no second Extract pass to have replaced them with anything else.
     assert.deepEqual(body.extract.choices, ['김지은과 계속 대화한다', '다른 화제를 꺼낸다', '자리를 옮긴다', '병동을 둘러본다']);
   } finally {
     globalThis.fetch = originalFetch;
@@ -5725,6 +5739,621 @@ test('[H2 #28] a degraded-ineligible (status-critical, app-mutation input) turn 
     const body = await response.json();
     assert.equal(body.extract_degraded, undefined);
     assert.equal(deepseekCallCount, 2);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+// ═════════════════════════════════════════════
+// H3-B: CSA update action (item 14, tests 1-24)
+// ═════════════════════════════════════════════
+
+const CSA_UPDATE_WORLD = { ward: 'hospital_6ward', floor: 'hospital_floor_6', building: 'seoul_central_hospital' };
+function csaUpdateFixture() {
+  return {
+    csa_active: [{ id: 'csa_5', content: '기존 규칙', strength: '약함', scope_type: 'ward', scope_id: 'hospital_6ward', scope_label: '6병동', created_turn: 5, active: true }],
+    csa_daily_used: 0
+  };
+}
+
+test('[H3-B #1] activate keeps its existing behavior unchanged after adding update', () => {
+  const result = applyCsaAction({ csa_active: [], csa_daily_used: 0 }, { action: 'activate', content: '새 규칙', scope_type: 'ward', strength: '약함' }, 7, 10, CSA_UPDATE_WORLD);
+  assert.equal(result.csa_active.length, 1);
+  assert.equal(result.csa_active[0].content, '새 규칙');
+  assert.equal(result.csa_daily_used, 1);
+});
+
+test('[H3-B #2] deactivate never returns/consumes csa_daily_used', () => {
+  const result = applyCsaAction(csaUpdateFixture(), { action: 'deactivate', id: 'csa_5' }, 7, 10, CSA_UPDATE_WORLD);
+  assert.equal('csa_daily_used' in result, false);
+  assert.equal(result.csa_active[0].active, false);
+});
+
+test('[H3-B #3] update content succeeds by id', () => {
+  const result = applyCsaAction(csaUpdateFixture(), { action: 'update', id: 'csa_5', content: '새 내용' }, 7, 10, CSA_UPDATE_WORLD);
+  assert.equal(result.csa_active[0].content, '새 내용');
+  assert.equal(result.csa_active[0].strength, '약함'); // untouched
+});
+
+test('[H3-B #4] update strength succeeds', () => {
+  const result = applyCsaAction(csaUpdateFixture(), { action: 'update', id: 'csa_5', strength: '중간' }, 7, 10, CSA_UPDATE_WORLD);
+  assert.equal(result.csa_active[0].strength, '중간');
+  assert.equal(result.csa_active[0].content, '기존 규칙'); // untouched
+});
+
+test('[H3-B #5] update scope succeeds', () => {
+  const result = applyCsaAction(csaUpdateFixture(), { action: 'update', id: 'csa_5', scope_type: 'floor' }, 7, 10, CSA_UPDATE_WORLD);
+  assert.equal(result.csa_active[0].scope_type, 'floor');
+  assert.equal(result.csa_active[0].scope_id, 'hospital_floor_6');
+});
+
+test('[H3-B #6] content + strength + scope can all be updated in the same call', () => {
+  const result = applyCsaAction(csaUpdateFixture(), { action: 'update', id: 'csa_5', content: '새 내용', strength: '중간', scope_type: 'building' }, 7, 10, CSA_UPDATE_WORLD);
+  const entry = result.csa_active[0];
+  assert.equal(entry.content, '새 내용');
+  assert.equal(entry.strength, '중간');
+  assert.equal(entry.scope_type, 'building');
+  assert.equal(entry.scope_id, 'seoul_central_hospital');
+});
+
+test('[H3-B #7] update never adds a new slot — csa_active length is unchanged', () => {
+  const result = applyCsaAction(csaUpdateFixture(), { action: 'update', id: 'csa_5', content: '새 내용' }, 7, 10, CSA_UPDATE_WORLD);
+  assert.equal(result.csa_active.length, 1);
+});
+
+test('[H3-B #8] update preserves the entry\'s existing id and created_turn', () => {
+  const result = applyCsaAction(csaUpdateFixture(), { action: 'update', id: 'csa_5', content: '새 내용' }, 7, 10, CSA_UPDATE_WORLD);
+  assert.equal(result.csa_active[0].id, 'csa_5');
+  assert.equal(result.csa_active[0].created_turn, 5);
+});
+
+test('[H3-B #9] update records updated_turn as the current turn number', () => {
+  const result = applyCsaAction(csaUpdateFixture(), { action: 'update', id: 'csa_5', content: '새 내용' }, 7, 42, CSA_UPDATE_WORLD);
+  assert.equal(result.csa_active[0].updated_turn, 42);
+});
+
+test('[H3-B #10] a successful update increments csa_daily_used by 1', () => {
+  const result = applyCsaAction(csaUpdateFixture(), { action: 'update', id: 'csa_5', content: '새 내용' }, 7, 10, CSA_UPDATE_WORLD);
+  assert.equal(result.csa_daily_used, 1);
+});
+
+test('[H3-B #11] update is rejected once today\'s daily_limit is already reached', () => {
+  const usedUp = { ...csaUpdateFixture(), csa_daily_used: 3 }; // Lv7 daily_limit=3
+  assert.equal(applyCsaAction(usedUp, { action: 'update', id: 'csa_5', content: 'z' }, 7, 10, CSA_UPDATE_WORLD), null);
+});
+
+test('[H3-B #12,13] update and deactivate both still work when every active slot is full', () => {
+  const fullSave = {
+    csa_active: [
+      { id: 'csa_1', content: 'A', strength: '약함', scope_type: 'ward', scope_id: 'w1', scope_label: 'w1', created_turn: 1, active: true },
+      { id: 'csa_2', content: 'B', strength: '약함', scope_type: 'ward', scope_id: 'w2', scope_label: 'w2', created_turn: 2, active: true },
+      { id: 'csa_3', content: 'C', strength: '약함', scope_type: 'ward', scope_id: 'w3', scope_label: 'w3', created_turn: 3, active: true }
+    ],
+    csa_daily_used: 0
+  };
+  const updateResult = applyCsaAction(fullSave, { action: 'update', id: 'csa_1', content: 'A2' }, 7, 10, {});
+  assert.notEqual(updateResult, null);
+  assert.equal(updateResult.csa_active.length, 3);
+  assert.equal(updateResult.csa_active[0].content, 'A2');
+
+  const deactivateResult = applyCsaAction(fullSave, { action: 'deactivate', id: 'csa_1' }, 7, 10, {});
+  assert.notEqual(deactivateResult, null);
+  assert.equal(deactivateResult.csa_active[0].active, false);
+});
+
+test('[H3-B #14] update with no id and no old_content match returns null', () => {
+  assert.equal(applyCsaAction(csaUpdateFixture(), { action: 'update', content: '새 내용' }, 7, 10, CSA_UPDATE_WORLD), null);
+  assert.equal(applyCsaAction(csaUpdateFixture(), { action: 'update', id: 'nonexistent', content: '새 내용' }, 7, 10, CSA_UPDATE_WORLD), null);
+});
+
+test('[H3-B #15] update can find its target via old_content when no id is given', () => {
+  const result = applyCsaAction(csaUpdateFixture(), { action: 'update', old_content: '기존 규칙', strength: '중간' }, 7, 10, CSA_UPDATE_WORLD);
+  assert.notEqual(result, null);
+  assert.equal(result.csa_active[0].strength, '중간');
+});
+
+test('[H3-B #16] an update with no actual change (same content/strength/scope) returns null', () => {
+  assert.equal(applyCsaAction(csaUpdateFixture(), { action: 'update', id: 'csa_5', content: '기존 규칙' }, 7, 10, CSA_UPDATE_WORLD), null);
+  assert.equal(applyCsaAction(csaUpdateFixture(), { action: 'update', id: 'csa_5' }, 7, 10, CSA_UPDATE_WORLD), null);
+});
+
+test('[H3-B #17] update rejects a strength above the current level\'s ceiling', () => {
+  assert.equal(applyCsaAction(csaUpdateFixture(), { action: 'update', id: 'csa_5', strength: '강함' }, 1, 10, CSA_UPDATE_WORLD), null);
+});
+
+test('[H3-B #18] update rejects a scope above the current level\'s ceiling', () => {
+  assert.equal(applyCsaAction(csaUpdateFixture(), { action: 'update', id: 'csa_5', scope_type: 'building' }, 1, 10, CSA_UPDATE_WORLD), null);
+});
+
+test('[H3-B #19] changing scope_type resolves a fresh scope_id from the current world_state', () => {
+  const result = applyCsaAction(csaUpdateFixture(), { action: 'update', id: 'csa_5', scope_type: 'floor' }, 7, 10, CSA_UPDATE_WORLD);
+  assert.equal(result.csa_active[0].scope_id, 'hospital_floor_6');
+});
+
+test('[H3-B #20] leaving scope_type unspecified keeps the entry\'s existing scope_id — editable even while the player is currently outside it', () => {
+  const result = applyCsaAction(csaUpdateFixture(), { action: 'update', id: 'csa_5', content: '새 내용' }, 7, 10, { ward: 'hospital_3ward' });
+  assert.equal(result.csa_active[0].scope_id, 'hospital_6ward');
+  assert.equal(result.csa_active[0].content, '새 내용');
+});
+
+test('[H3-B #21] an update result that would collide (same content+scope_id) with another active CSA is rejected', () => {
+  const twoActive = {
+    csa_active: [
+      { id: 'csa_5', content: '기존 규칙', strength: '약함', scope_type: 'ward', scope_id: 'hospital_6ward', scope_label: '6병동', created_turn: 5, active: true },
+      { id: 'csa_6', content: '다른 규칙', strength: '약함', scope_type: 'ward', scope_id: 'hospital_3ward', scope_label: '3병동', created_turn: 6, active: true }
+    ],
+    csa_daily_used: 0
+  };
+  const result = applyCsaAction(twoActive, { action: 'update', id: 'csa_5', content: '다른 규칙', scope_type: 'ward' }, 7, 10, { ward: 'hospital_3ward' });
+  assert.equal(result, null);
+});
+
+test('[H3-B #22] the CSA strength-exceeded marker force-nullifies csa_action for an update just like for activate', async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (url) => {
+    const requestUrl = String(url);
+    if (requestUrl.includes('/rpc/get_extract_context')) {
+      return new Response(JSON.stringify({
+        turn_count: 5,
+        master: { characters: {} },
+        save: { player: { name: '금태양', job: '간호사' }, player_setup: { status: 'complete' }, opening_started: true }
+      }), { headers: { 'content-type': 'application/json' } });
+    }
+    if (requestUrl.includes('/rpc/get_image_catalog_for_characters')) {
+      return new Response(JSON.stringify([]), { headers: { 'content-type': 'application/json' } });
+    }
+    if (requestUrl.includes('api.deepseek.com')) {
+      return new Response(JSON.stringify({
+        choices: [{ message: { content: JSON.stringify({
+          character_id: 'narrator', npcs_present: [],
+          csa_action: { action: 'update', id: 'csa_5', strength: '강함' },
+          choices: ['A', 'B', 'C', 'D']
+        }) }, finish_reason: 'stop' }]
+      }), { headers: { 'content-type': 'application/json' } });
+    }
+    throw new Error(`unexpected fetch: ${requestUrl}`);
+  };
+  try {
+    const response = await worker.fetch(apiRequest('/api/extract', {
+      game_id: 'test-game',
+      narrative_text: `서사 내용 ${CSA_STRENGTH_EXCEEDED_MARKER}`,
+      player_input: ''
+    }), { DEEPSEEK_API_KEY: 'test' });
+    assert.equal(response.status, 200);
+    const body = await response.json();
+    assert.equal(body.extract.csa_action, null);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('[H3-B #23] a failed (null) update never advances csa_daily_used through buildSavePatch', () => {
+  // csa_daily_reset_date must already match today, or buildSavePatch's
+  // unrelated one-time-initialization reset would itself add csa_daily_used
+  // to the patch (reset to 0) independent of the update outcome.
+  const previousSave = { ...csaUpdateFixture(), player_progress: { level: 7 }, csa_daily_reset_date: currentUtcDateString() };
+  const extract = { character_id: 'narrator', csa_action: { action: 'update', id: 'nonexistent', content: 'x' } };
+  const patch = buildSavePatch(extract, {}, null, previousSave, 10, '');
+  assert.equal('csa_daily_used' in patch, false);
+  assert.equal('csa_active' in patch, false);
+});
+
+test('[H3-B #24] getCsaLimits keeps daily_limit exactly equal to max_active at every tier (never "current active count")', () => {
+  for (const level of [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]) {
+    const limits = getCsaLimits(level);
+    assert.equal(limits.daily_limit, limits.max_active, `Lv.${level}`);
+  }
+  assert.deepEqual(getCsaLimits(7), { scope_type: 'building', max_active: 3, daily_limit: 3 });
+});
+
+// ═════════════════════════════════════════════
+// H3-B: CSA meta-awareness detection + repair (item 14, tests 25-45)
+// ═════════════════════════════════════════════
+
+test('[H3-B #25] no applicable CSA at all — meta-awareness is never checked', async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (url) => {
+    const requestUrl = String(url);
+    if (requestUrl.includes('/rpc/get_extract_context')) {
+      return new Response(JSON.stringify({
+        turn_count: 5,
+        master: { characters: {} },
+        save: { player: { name: '금태양', job: '간호사' }, player_setup: { status: 'complete' }, opening_started: true } // no csa_active at all
+      }), { headers: { 'content-type': 'application/json' } });
+    }
+    if (requestUrl.includes('/rpc/get_image_catalog_for_characters')) {
+      return new Response(JSON.stringify([]), { headers: { 'content-type': 'application/json' } });
+    }
+    if (requestUrl.includes('api.deepseek.com')) {
+      return new Response(JSON.stringify({
+        choices: [{ message: { content: JSON.stringify({
+          character_id: 'narrator', npcs_present: [],
+          npc_emotion: { surface: '“상식개변 때문에 이렇게 행동해야 해.”', inner: 'x', physical_reaction: 'y' },
+          choices: ['A', 'B', 'C', 'D']
+        }) }, finish_reason: 'stop' }]
+      }), { headers: { 'content-type': 'application/json' } });
+    }
+    throw new Error(`unexpected fetch: ${requestUrl}`);
+  };
+  try {
+    const response = await worker.fetch(apiRequest('/api/extract', {
+      game_id: 'test-game', narrative_text: '평범한 서사.', player_input: ''
+    }), { DEEPSEEK_API_KEY: 'test' });
+    const body = await response.json();
+    assert.equal(body.csa_meta_awareness_detected, false);
+    assert.equal(body.csa_meta_awareness_repaired, false);
+    assert.deepEqual(body.csa_meta_awareness_fields, []);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('[H3-B #26] only an out-of-scope active CSA (not applicable here) — meta-awareness is never checked', () => {
+  const save = {
+    csa_active: [{ id: 'csa_9', content: '규칙', scope_type: 'ward', scope_id: 'hospital_3ward', active: true }],
+    world_state: { ward: 'hospital_6ward' } // different ward — not applicable
+  };
+  assert.deepEqual(getApplicableCsaEntries(save), []);
+});
+
+test('[H3-B #27,28] a bare "병원 규칙에 따라"/"이상하다" phrase is allowed (never a false positive)', () => {
+  assert.deepEqual(detectCsaMetaAwareness('병원 규칙에 따라 진행하겠습니다.'), []);
+  assert.deepEqual(detectCsaMetaAwareness('그녀는 상황 자체가 이상하다고 느꼈다.'), []);
+  assert.deepEqual(detectCsaMetaAwareness('그 행동은 이 병동에서 당연한 예절이다.'), []);
+});
+
+test('[H3-B #29] "상식개변 때문에 행동한다" is detected', () => {
+  assert.ok(detectCsaMetaAwareness('상식개변 때문에 이렇게 행동해야 해.').length > 0);
+});
+
+test('[H3-B #30] "어플이 시키는 대로 행동한다" is detected', () => {
+  assert.ok(detectCsaMetaAwareness('어플이 시키는 대로 행동한다.').length > 0);
+});
+
+test('[H3-B #31] "원래는 싫지만 바뀐 규칙 때문에" is detected', () => {
+  assert.ok(detectCsaMetaAwareness('원래는 이상하지만 바뀐 규칙을 따라야 한다.').length > 0);
+});
+
+test('[H3-B #32] applying a repaired narrative_section_1 only replaces [1] — [2]/[3] stay byte-identical', () => {
+  const narrativeText = '[1. 서사 및 행동]\n상식개변 때문에 행동한다.\n\n[2. 플레이어 상황판]\n상태\n\n[3. 선택지]\n① A';
+  const corrected = replaceNarrativeActionSection(narrativeText, '자연스럽게 행동했다.');
+  assert.match(corrected, /^자연스럽게 행동했다\./);
+  assert.match(corrected, /\[2\. 플레이어 상황판\]\n상태\n\n\[3\. 선택지\]\n① A$/);
+});
+
+test('[H3-B #33,34] collectCsaMetaAwarenessViolations flags only the fields that actually violate — clean sibling fields are not reported', () => {
+  const clean = { surface: '평범한 대사', inner: '평범한 생각', physical_reaction: '평범한 반응' };
+  const surfaceOnly = collectCsaMetaAwarenessViolations('평범한 서사', { npc_emotion: { ...clean, surface: '“상식개변 때문에 행동한다”' }, turn_summary: '요약' });
+  assert.deepEqual(surfaceOnly.map(v => v.field), ['npc_emotion.surface']); // #33
+
+  const innerOnly = collectCsaMetaAwarenessViolations('평범한 서사', { npc_emotion: { ...clean, inner: '“어플이 시키는 대로 한다”' }, turn_summary: '요약' });
+  assert.deepEqual(innerOnly.map(v => v.field), ['npc_emotion.inner']); // #34
+});
+
+test('[H3-B #35] a turn_summary-only violation is the only field flagged', () => {
+  const clean = { surface: '평범한 대사', inner: '평범한 생각', physical_reaction: '평범한 반응' };
+  const violations = collectCsaMetaAwarenessViolations('평범한 서사', { npc_emotion: clean, turn_summary: '상식개변 때문에 그렇게 했다.' });
+  assert.deepEqual(violations.map(v => v.field), ['turn_summary']);
+});
+
+test('[H3-B #36,44,45] omission + meta-awareness together use the shared recovery budget only once, never call Story again, and never re-run performExtractionPass', async () => {
+  const originalFetch = globalThis.fetch;
+  const deepseekCalls = [];
+  globalThis.fetch = async (url, init = {}) => {
+    const requestUrl = String(url);
+    if (requestUrl.includes('/rpc/get_extract_context')) {
+      return new Response(JSON.stringify({
+        turn_count: 5,
+        master: { characters: {} },
+        save: {
+          player: { name: '금태양', job: '간호사' }, player_setup: { status: 'complete' }, opening_started: true,
+          world_state: { ward: 'hospital_6ward' },
+          csa_active: [{ id: 'csa_9', content: '규칙', scope_type: 'ward', scope_id: 'hospital_6ward', active: true }]
+        }
+      }), { headers: { 'content-type': 'application/json' } });
+    }
+    if (requestUrl.includes('/rpc/get_image_catalog_for_characters')) {
+      return new Response(JSON.stringify([]), { headers: { 'content-type': 'application/json' } });
+    }
+    if (requestUrl.includes('api.deepseek.com')) {
+      deepseekCalls.push(JSON.parse(init.body));
+      if (deepseekCalls.length === 1) {
+        return new Response(JSON.stringify({
+          choices: [{ message: { content: JSON.stringify({
+            character_id: 'narrator', npcs_present: [],
+            npc_emotion: { surface: '“상식개변 때문에 그렇게 했다”', inner: 'x', physical_reaction: 'y' },
+            csa_omission: ['규칙이 실행되지 않음'],
+            choices: ['A', 'B', 'C', 'D']
+          }) }, finish_reason: 'stop' }]
+        }), { headers: { 'content-type': 'application/json' } });
+      }
+      return new Response(JSON.stringify({
+        choices: [{ message: { content: JSON.stringify({ narrative_section_1: '자연스럽게 규칙을 따랐다.' }) }, finish_reason: 'stop' }]
+      }), { headers: { 'content-type': 'application/json' } });
+    }
+    throw new Error(`unexpected fetch: ${requestUrl}`);
+  };
+  try {
+    const response = await worker.fetch(apiRequest('/api/extract', {
+      game_id: 'test-game', narrative_text: '[1. 서사 및 행동]\n평범한 서사.\n\n[2. 플레이어 상황판]\n상태\n\n[3. 선택지]\n① A', player_input: ''
+    }), { DEEPSEEK_API_KEY: 'test' });
+    assert.equal(response.status, 200);
+    assert.equal(deepseekCalls.length, 2); // #36: main pass + ONE combined repair call
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('[H3-B #37] if JSON-syntax repair already spent the budget, the meta-awareness repair LLM call never fires', async () => {
+  const originalFetch = globalThis.fetch;
+  const deepseekCalls = [];
+  globalThis.fetch = async (url, init = {}) => {
+    const requestUrl = String(url);
+    if (requestUrl.includes('/rpc/get_extract_context')) {
+      return new Response(JSON.stringify({
+        turn_count: 5,
+        master: { characters: {} },
+        save: {
+          player: { name: '금태양', job: '간호사' }, player_setup: { status: 'complete' }, opening_started: true,
+          world_state: { ward: 'hospital_6ward' },
+          csa_active: [{ id: 'csa_9', content: '규칙', scope_type: 'ward', scope_id: 'hospital_6ward', active: true }]
+        }
+      }), { headers: { 'content-type': 'application/json' } });
+    }
+    if (requestUrl.includes('/rpc/get_image_catalog_for_characters')) {
+      return new Response(JSON.stringify([]), { headers: { 'content-type': 'application/json' } });
+    }
+    if (requestUrl.includes('api.deepseek.com')) {
+      const body = JSON.parse(init.body);
+      deepseekCalls.push(body);
+      const isRepairCall = body.messages[0].content.includes('[원본 출력]');
+      if (isRepairCall) {
+        return new Response(JSON.stringify({
+          choices: [{ message: { content: JSON.stringify({
+            character_id: 'narrator', npcs_present: [],
+            choices: ['A', 'B', 'C', 'D']
+          }) }, finish_reason: 'stop' }]
+        }), { headers: { 'content-type': 'application/json' } });
+      }
+      return new Response(JSON.stringify({
+        choices: [{ message: { content: '이것은 유효한 JSON이 아닌 일반 텍스트 응답입니다.', finish_reason: 'stop' } }]
+      }), { headers: { 'content-type': 'application/json' } });
+    }
+    throw new Error(`unexpected fetch: ${requestUrl}`);
+  };
+  try {
+    // The violation lives in the narrative text itself (robust regardless of
+    // character_id/narrator-stripping or mind-monitor length-contract
+    // fallback, either of which would otherwise wipe an npc_emotion field).
+    const response = await worker.fetch(apiRequest('/api/extract', {
+      game_id: 'test-game', narrative_text: '[1. 서사 및 행동]\n상식개변 때문에 그렇게 했다.\n\n[2. 플레이어 상황판]\n상태\n\n[3. 선택지]\n① A', player_input: ''
+    }), { DEEPSEEK_API_KEY: 'test' });
+    assert.equal(response.status, 200);
+    const body = await response.json();
+    assert.equal(body.json_repaired, true);
+    assert.equal(deepseekCalls.length, 2); // main (failed) + json-repair only — no 3rd meta-repair call
+    assert.equal(body.recovery_kind, 'json_syntax');
+    // the meta-awareness violation is still detected and reported, just
+    // deterministically cleaned up instead of LLM-repaired.
+    assert.equal(body.csa_meta_awareness_detected, true);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('[H3-B #38] if a genuine first-encounter repair already spent the budget, the meta-awareness repair LLM call never fires', async () => {
+  const originalFetch = globalThis.fetch;
+  const deepseekCalls = [];
+  globalThis.fetch = async (url, init = {}) => {
+    const requestUrl = String(url);
+    if (requestUrl.includes('/rpc/get_extract_context')) {
+      return new Response(JSON.stringify({
+        turn_count: 5,
+        master: { characters: { heroine5: { name: '김지은' } } },
+        save: {
+          player: { name: '금태양', job: '간호사' }, player_setup: { status: 'complete' }, opening_started: true,
+          world_state: { ward: 'hospital_6ward' },
+          csa_active: [{ id: 'csa_9', content: '규칙', scope_type: 'ward', scope_id: 'hospital_6ward', active: true }]
+          // no npc_encounters/last_character_id — a genuine first encounter
+        }
+      }), { headers: { 'content-type': 'application/json' } });
+    }
+    if (requestUrl.includes('/rpc/get_image_catalog_for_characters')) {
+      return new Response(JSON.stringify([]), { headers: { 'content-type': 'application/json' } });
+    }
+    if (requestUrl.includes('api.deepseek.com')) {
+      deepseekCalls.push(JSON.parse(init.body));
+      if (deepseekCalls.length === 1) {
+        return new Response(JSON.stringify({
+          choices: [{ message: { content: JSON.stringify({
+            character_id: 'heroine5', npcs_present: ['heroine5'],
+            // Long enough to satisfy the 40-char mind-monitor length
+            // contract too — a too-short violating string would otherwise
+            // get wiped by the (unrelated) length-contract fallback before
+            // the meta-awareness check ever sees it.
+            npc_emotion: { ...VALID_NPC_EMOTION, surface: '“상식개변 때문에 이렇게 행동해야 한다고 자연스럽게 받아들이고 있다. 별다른 의문은 들지 않는다.”' },
+            choices: ['A', 'B', 'C', 'D']
+          }) }, finish_reason: 'stop' }]
+        }), { headers: { 'content-type': 'application/json' } });
+      }
+      // Should only ever be reached once — the first-encounter repair call.
+      return new Response(JSON.stringify({
+        choices: [{ message: { content: JSON.stringify({ is_direct_first_encounter: true, 호감도: 15, 신뢰도: 10, reason: 'x' }) }, finish_reason: 'stop' }]
+      }), { headers: { 'content-type': 'application/json' } });
+    }
+    throw new Error(`unexpected fetch: ${requestUrl}`);
+  };
+  try {
+    const response = await worker.fetch(apiRequest('/api/extract', {
+      game_id: 'test-game', narrative_text: '김지은과 처음 만났다.', player_input: ''
+    }), { DEEPSEEK_API_KEY: 'test' });
+    assert.equal(response.status, 200);
+    const body = await response.json();
+    assert.equal(body.first_encounter_repaired, true);
+    assert.equal(deepseekCalls.length, 2); // main pass + first-encounter repair only
+    assert.equal(body.csa_meta_awareness_detected, true);
+    // deterministically cleaned up instead of LLM-repaired — still resolved
+    // (no more violations) even though no meta-repair call happened.
+    assert.equal(body.csa_meta_awareness_repaired, true);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('[H3-B #39,40] when the repair LLM call fails outright, the deterministic fallback cleans up the flagged field, and the recheck afterward makes no further LLM call', async () => {
+  const originalFetch = globalThis.fetch;
+  const deepseekCalls = [];
+  globalThis.fetch = async (url, init = {}) => {
+    const requestUrl = String(url);
+    if (requestUrl.includes('/rpc/get_extract_context')) {
+      return new Response(JSON.stringify({
+        turn_count: 5,
+        master: { characters: {} },
+        save: {
+          player: { name: '금태양', job: '간호사' }, player_setup: { status: 'complete' }, opening_started: true,
+          world_state: { ward: 'hospital_6ward' },
+          csa_active: [{ id: 'csa_9', content: '규칙', scope_type: 'ward', scope_id: 'hospital_6ward', active: true }]
+        }
+      }), { headers: { 'content-type': 'application/json' } });
+    }
+    if (requestUrl.includes('/rpc/get_image_catalog_for_characters')) {
+      return new Response(JSON.stringify([]), { headers: { 'content-type': 'application/json' } });
+    }
+    if (requestUrl.includes('api.deepseek.com')) {
+      deepseekCalls.push(JSON.parse(init.body));
+      if (deepseekCalls.length === 1) {
+        return new Response(JSON.stringify({
+          choices: [{ message: { content: JSON.stringify({
+            character_id: 'narrator', npcs_present: [],
+            turn_summary: '요약',
+            choices: ['A', 'B', 'C', 'D']
+          }) }, finish_reason: 'stop' }]
+        }), { headers: { 'content-type': 'application/json' } });
+      }
+      // the combined repair call itself fails outright.
+      return new Response('deepseek down', { status: 500 });
+    }
+    throw new Error(`unexpected fetch: ${requestUrl}`);
+  };
+  try {
+    // The violation lives in the narrative text (robust regardless of
+    // character_id/narrator-stripping, which would otherwise wipe an
+    // npc_emotion field before the meta-awareness check ever saw it).
+    const response = await worker.fetch(apiRequest('/api/extract', {
+      game_id: 'test-game', narrative_text: '[1. 서사 및 행동]\n상식개변 때문에 그렇게 했다.\n\n[2. 플레이어 상황판]\n상태\n\n[3. 선택지]\n① A', player_input: ''
+    }), { DEEPSEEK_API_KEY: 'test' });
+    assert.equal(response.status, 200); // never blocks the turn
+    const body = await response.json();
+    assert.equal(deepseekCalls.length, 2); // main + the one failed repair attempt — no retry
+    assert.equal(body.csa_meta_awareness_detected, true);
+    assert.equal(body.csa_meta_awareness_repaired, true); // deterministic fallback resolved it
+    assert.ok(body.narrative_replacement);
+    assert.doesNotMatch(body.narrative_replacement, /상식\s*개변/);
+    assert.match(body.narrative_replacement, /\[2\. 플레이어 상황판\]\n상태\n\n\[3\. 선택지\]\n① A$/);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('[H3-B #41] a meta-awareness repair failure never blocks Extract or Commit', async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (url, init = {}) => {
+    const requestUrl = String(url);
+    if (requestUrl.includes('/rpc/get_extract_context')) {
+      return new Response(JSON.stringify({
+        turn_count: 5,
+        master: { characters: {} },
+        save: {
+          player: { name: '금태양', job: '간호사' }, player_setup: { status: 'complete' }, opening_started: true,
+          world_state: { ward: 'hospital_6ward' },
+          csa_active: [{ id: 'csa_9', content: '규칙', scope_type: 'ward', scope_id: 'hospital_6ward', active: true }]
+        }
+      }), { headers: { 'content-type': 'application/json' } });
+    }
+    if (requestUrl.includes('/rpc/get_image_catalog_for_characters')) {
+      return new Response(JSON.stringify([]), { headers: { 'content-type': 'application/json' } });
+    }
+    if (requestUrl.includes('api.deepseek.com')) {
+      const body = JSON.parse(init.body);
+      const isRepairCall = body.messages[0].content.includes('[적용 중인 상식개변');
+      if (isRepairCall) return new Response('deepseek down', { status: 500 });
+      return new Response(JSON.stringify({
+        choices: [{ message: { content: JSON.stringify({
+          character_id: 'narrator', npcs_present: [],
+          npc_emotion: { surface: '“상식개변 때문에 그렇게 했다”', inner: 'x', physical_reaction: 'y' },
+          choices: ['A', 'B', 'C', 'D']
+        }) }, finish_reason: 'stop' }]
+      }), { headers: { 'content-type': 'application/json' } });
+    }
+    throw new Error(`unexpected fetch: ${requestUrl}`);
+  };
+  try {
+    const response = await worker.fetch(apiRequest('/api/extract', {
+      game_id: 'test-game', narrative_text: '평범한 서사.', player_input: ''
+    }), { DEEPSEEK_API_KEY: 'test' });
+    assert.equal(response.status, 200);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('[H3-B #42] csa_meta_awareness_* fields never end up in the save patch (buildSavePatch never reads them)', () => {
+  const extract = {
+    character_id: 'narrator',
+    csa_meta_awareness_detected: true, // would-be pollution, not a real extract field
+    csa_meta_awareness_fields: ['npc_emotion.surface']
+  };
+  const patch = buildSavePatch(extract, {}, null, {}, 1, '');
+  assert.equal('csa_meta_awareness_detected' in patch, false);
+  assert.equal('csa_meta_awareness_fields' in patch, false);
+});
+
+test('[H3-B #43] the corrected [1] section still lands as narrative_replacement, keeping [2]/[3] in their original position', async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (url, init = {}) => {
+    const requestUrl = String(url);
+    if (requestUrl.includes('/rpc/get_extract_context')) {
+      return new Response(JSON.stringify({
+        turn_count: 5,
+        master: { characters: {} },
+        save: {
+          player: { name: '금태양', job: '간호사' }, player_setup: { status: 'complete' }, opening_started: true,
+          world_state: { ward: 'hospital_6ward' },
+          csa_active: [{ id: 'csa_9', content: '규칙', scope_type: 'ward', scope_id: 'hospital_6ward', active: true }]
+        }
+      }), { headers: { 'content-type': 'application/json' } });
+    }
+    if (requestUrl.includes('/rpc/get_image_catalog_for_characters')) {
+      return new Response(JSON.stringify([]), { headers: { 'content-type': 'application/json' } });
+    }
+    if (requestUrl.includes('api.deepseek.com')) {
+      const body = JSON.parse(init.body);
+      const isRepairCall = body.messages[0].content.includes('[적용 중인 상식개변');
+      if (isRepairCall) {
+        return new Response(JSON.stringify({
+          choices: [{ message: { content: JSON.stringify({ narrative_section_1: '자연스럽게 행동했다.' }) }, finish_reason: 'stop' }]
+        }), { headers: { 'content-type': 'application/json' } });
+      }
+      return new Response(JSON.stringify({
+        choices: [{ message: { content: JSON.stringify({
+          character_id: 'narrator', npcs_present: [],
+          npc_emotion: { surface: '“상식개변 때문에 그렇게 했다”', inner: 'x', physical_reaction: 'y' },
+          choices: ['A', 'B', 'C', 'D']
+        }) }, finish_reason: 'stop' }]
+      }), { headers: { 'content-type': 'application/json' } });
+    }
+    throw new Error(`unexpected fetch: ${requestUrl}`);
+  };
+  try {
+    const response = await worker.fetch(apiRequest('/api/extract', {
+      game_id: 'test-game',
+      narrative_text: '[1. 서사 및 행동]\n상식개변 때문에 그렇게 했다.\n\n[2. 플레이어 상황판]\n상태\n\n[3. 선택지]\n① A',
+      player_input: ''
+    }), { DEEPSEEK_API_KEY: 'test' });
+    const body = await response.json();
+    assert.ok(body.narrative_replacement);
+    assert.match(body.narrative_replacement, /^자연스럽게 행동했다\./);
+    assert.match(body.narrative_replacement, /\[2\. 플레이어 상황판\]\n상태\n\n\[3\. 선택지\]\n① A$/);
   } finally {
     globalThis.fetch = originalFetch;
   }

@@ -766,6 +766,9 @@ async function handleExtract(req, env) {
       content_addition: null,
       validation_warnings: [],
       choice_validation_warnings: [],
+      csa_meta_awareness_detected: false,
+      csa_meta_awareness_repaired: false,
+      csa_meta_awareness_fields: [],
       recovery_used: recoveryBudget.used,
       recovery_kind: recoveryBudget.kind,
       timing
@@ -818,32 +821,35 @@ async function handleExtract(req, env) {
     }
   }
 
-  // A self-reported CSA omission means the narrative had a clear trigger for
-  // an active, applicable forced rule but never executed it. H2 item 9: the
-  // fix still inserts a short corrective continuation right before
-  // [2. 플레이어 상황판] (never after [3. 선택지]), but no longer re-runs the
-  // whole extraction pipeline a second time against the corrected narrative
-  // — every other structured field (choices, npc_emotion, stats, image)
-  // stays exactly what the first pass produced. Only runs if the shared
-  // per-turn recovery budget is still available.
-  if (isSetupComplete(compatCtx.save) && extract.csa_omission.length) {
+  // H3-B: CSA narrative integrity — a self-reported CSA omission (an active,
+  // applicable forced rule that never actually executed) and CSA
+  // meta-awareness (the NPC narrating that a rule/app/system is doing this
+  // to them, instead of just naturally living it) are both fail-open,
+  // non-blocking issues repaired by a single combined call at most — never
+  // a Story/Extract re-run. Only checked when there's an applicable CSA to
+  // begin with; no applicable CSA means nothing to detect or repair.
+  let csaMetaAwarenessDetected = false;
+  let csaMetaAwarenessRepaired = false;
+  let csaMetaAwarenessFields = [];
+  if (isSetupComplete(compatCtx.save)) {
     const applicableCsa = getApplicableCsaEntries(compatCtx.save);
-    if (applicableCsa.length && consumeRecoveryBudget(recoveryBudget, 'csa_omission')) {
-      const tCsa = Date.now();
-      try {
-        const addition = await repairCsaOmission(
-          env, narrative_text, applicableCsa.map(csa => `- (${csa.id}) ${csa.content}`), extract.csa_omission
-        );
-        if (addition) {
-          const corrected = insertNarrativeAdditionBeforeStatus(narrative_text, addition);
-          narrativeReplacement = corrected;
-          finalNarrativeText = corrected;
-          extract.csa_omission = [];
-        }
-      } catch (error) {
-        console.error('CSA omission repair failed:', { request_id: requestId, error: error.message });
+    if (applicableCsa.length) {
+      const violations = collectCsaMetaAwarenessViolations(finalNarrativeText, extract);
+      const omissions = extract.csa_omission;
+      if (omissions.length || violations.length) {
+        csaMetaAwarenessDetected = violations.length > 0;
+        csaMetaAwarenessFields = violations.map(v => v.field);
+        const tCsaIntegrity = Date.now();
+        const integrityResult = await resolveCsaNarrativeIntegrity(env, {
+          narrativeText: finalNarrativeText,
+          applicableCsa, omissions, violations, extract,
+          previousSave: compatCtx.save, characters, requestId, recoveryBudget
+        });
+        finalNarrativeText = integrityResult.finalNarrativeText;
+        if (integrityResult.narrativeReplacement) narrativeReplacement = integrityResult.narrativeReplacement;
+        csaMetaAwarenessRepaired = csaMetaAwarenessDetected && integrityResult.finalViolations.length === 0;
+        timing.csa_narrative_integrity_ms = Date.now() - tCsaIntegrity;
       }
-      timing.csa_omission_repair_ms = Date.now() - tCsa;
     }
   }
 
@@ -932,6 +938,9 @@ async function handleExtract(req, env) {
     content_addition: null, // superseded by narrative_replacement; kept only for legacy clients
     validation_warnings: narrativeContract.warnings,
     choice_validation_warnings: choiceValidationWarnings,
+    csa_meta_awareness_detected: csaMetaAwarenessDetected,
+    csa_meta_awareness_repaired: csaMetaAwarenessRepaired,
+    csa_meta_awareness_fields: csaMetaAwarenessFields,
     recovery_used: recoveryBudget.used,
     recovery_kind: recoveryBudget.kind,
     timing
@@ -1712,6 +1721,12 @@ ${recentMemorySlice.map((m, index) => clipHeadTail(m.content || '', index === re
   const csaExampleSection = mode === 'normal' || mode === 'opening'
     ? buildCsaExampleSection(hypnosisCapability, master)
     : '';
+  // H3-B item 2: gives the model the id it needs to target an update/
+  // deactivate csa_action against the right entry — internal app-operation
+  // data only, never to be echoed into the narrative or status panel.
+  const activeCsaOperationSection = mode === 'normal' || mode === 'opening'
+    ? buildActiveCsaOperationSection(save)
+    : '';
   // H1 item 4: unregistered-target/location-ineligible-target are no longer
   // repair-triggering problems in validateFinalChoices, so this reminder no
   // longer forbids naming unregistered minor NPCs in choices — it just
@@ -1729,7 +1744,7 @@ ${recentMemorySlice.map((m, index) => clipHeadTail(m.content || '', index === re
     ? `\n\n[REMINDER — CHOICE LENGTH]\n[3. 선택지]의 각 문장은 35~80자를 목표로 하고 120자를 넘기지 않는다. 화면 버튼에 그대로 표시되므로 지나치게 길게 쓰지 않는다.\n`
     : '';
   const eligibleNpcRosterSection = buildEligibleNpcRosterSection(save.world_state, master.characters || {});
-  const systemPrompt = coreRules + playerGate + modeSection + rulebookSection + eligibleNpcRosterSection + buildAppSystemRulesSection() + currentSceneSection + npcProfileSection + explicitMentionSection + csaSection + csaNatureSection + suggestionSection + suggestionStrengthBoundarySection + narrativeLengthSection + npcDialogueSection + antiRepetitionSection + playerStatusPanel + contextSection + feedbackSection + continuitySection + finalFormatRules + openingFlow + playerSetupReminder + hypnosisCapabilitySection + strengthPreJudgmentSection + suggestionExampleSection + csaExampleSection + registeredNpcChoiceReminder + choiceLengthReminder + buildAddressAbbreviationSection();
+  const systemPrompt = coreRules + playerGate + modeSection + rulebookSection + eligibleNpcRosterSection + buildAppSystemRulesSection() + currentSceneSection + npcProfileSection + explicitMentionSection + csaSection + csaNatureSection + suggestionSection + suggestionStrengthBoundarySection + narrativeLengthSection + npcDialogueSection + antiRepetitionSection + playerStatusPanel + contextSection + feedbackSection + continuitySection + finalFormatRules + openingFlow + playerSetupReminder + hypnosisCapabilitySection + strengthPreJudgmentSection + suggestionExampleSection + csaExampleSection + activeCsaOperationSection + registeredNpcChoiceReminder + choiceLengthReminder + buildAddressAbbreviationSection();
 
   return {
     mode,
@@ -1835,7 +1850,11 @@ npc_stat_changes만 반환한다. 서사에 숫자가 없어도 대사·행동·
 플레이어가 실제로 출발해서 새 장소에 도착했고 장면이 그 새 장소로 전환된 경우, world_state_patch에 building, floor, ward, location_label을 모두 채워서 반환한다. 바뀌지 않은 필드는 이전 저장값의 기존 명칭을 그대로 다시 적고, 실제로 바뀐 필드만 새 값으로 적는다. building/floor/ward는 장소를 설명하는 한국어 명칭으로 적으면 Worker가 표준 ID로 정규화하며, 표준 ID로 정규화되지 않는 값은 무시된다. 이동을 제안하거나 준비만 했을 뿐 아직 도착하지 않았다면 world_state_patch를 채우지 말고 비워둔다. 빈 문자열로 기존 값을 덮어쓰지 마라. 알 수 없는 장소를 지어내지 마라.
 
 [CSA ACTION CONTRACT]
-현재 장소 범위 안에서 플레이어가 상식개변을 실제로 성공시켰을 때만 csa_action.action="activate"로 content(바뀐 상식 문장), scope_type(ward/floor/building/world 중 현재 상황에 맞는 범위), strength(그 내용이 실제로 요구하는 강도 — "약함", "중간", "강함" 중 하나)를 반환한다. scope_id는 채우지 마라. Worker가 현재 world_state로 결정한다. 시도·계획·상상만으로는 저장하지 마라. 플레이어가 기존 상식개변을 명확히 해제했을 때만 action="deactivate"와 해제 대상 id를 반환한다. 변화가 없으면 csa_action은 null이다.
+csa_action.action은 activate(새 상식개변 생성) / update(기존 활성 상식개변의 내용·강도·범위 수정) / deactivate(해제) 중 하나다.
+- activate: 현재 장소 범위 안에서 플레이어가 상식개변을 실제로 새로 성공시켰을 때만 반환한다. content(바뀐 상식 문장), scope_type(ward/floor/building/world 중 현재 상황에 맞는 범위), strength(그 내용이 실제로 요구하는 강도 — "약함", "중간", "강함" 중 하나)를 모두 채운다. scope_id는 채우지 마라. Worker가 현재 world_state로 결정한다. 새 슬롯 하나를 사용하는 행동이다.
+- update: 이미 활성 상태인 상식개변 하나의 내용·강도·범위를 실제로 바꿨을 때만 반환한다. id를 우선 사용해 대상을 특정한다(활성 상식개변의 id는 아래 [ACTIVE CSA ENTRIES]에서 확인한다). id를 모르면 old_content에 그 상식개변의 기존 내용 문장을 그대로 적어 대상을 특정한다. 새 content(바뀐 내용, 안 바뀌면 생략), strength(바뀐 강도, 안 바뀌면 생략), scope_type(바뀐 범위, 안 바뀌면 생략)만 채운다. scope_id는 채우지 마라. 새 슬롯을 추가로 쓰지 않는다.
+- deactivate: 플레이어가 기존 상식개변을 명확히 해제했을 때만 반환한다. 해제 대상의 id를 반드시 채운다.
+시도·계획·상상·가능성만으로는 어떤 action도 저장하지 마라. 변화가 없으면 csa_action은 null이다.
 ${buildCsaApplicationCheckSection(save)}
 
 [이미지 선택]
@@ -2412,15 +2431,83 @@ function resolveCsaScopeId(scopeType, worldState = {}) {
   return typeof value === 'string' && value.trim() ? value.trim() : null;
 }
 
+// H3-B item 3: daily usage always equals the level-unlocked max slot
+// capacity (getCsaLimits' daily_limit === max_active), never "current active
+// count" — see item 4. activate/update each consume one of today's uses;
+// deactivate never does. update never consumes a new slot — it edits the
+// existing active entry in place, preserving id/created_turn/active:true.
 function applyCsaAction(save, action, level, turnNumber, worldState = {}) {
-  if (!action || !['activate', 'deactivate'].includes(action.action)) return null;
+  if (!isPlainObject(action) || !['activate', 'update', 'deactivate'].includes(action.action)) return null;
   const active = Array.isArray(save?.csa_active) ? save.csa_active : [];
+  const limits = getCsaLimits(level);
+  const used = Math.max(0, Number(save?.csa_daily_used) || 0);
+
   if (action.action === 'deactivate') {
     if (typeof action.id !== 'string') return null;
     if (!active.some(item => item.id === action.id)) return null;
+    // Never gated by daily_limit or slot occupancy — deactivating is always
+    // available regardless of today's usage or how full the active list is.
     return { csa_active: active.map(item => item.id === action.id ? { ...item, active: false } : item) };
   }
-  const limits = getCsaLimits(level);
+
+  if (action.action === 'update') {
+    const targetId = typeof action.id === 'string' && action.id.trim() ? action.id.trim() : null;
+    const oldContent = typeof action.old_content === 'string' ? action.old_content.trim() : '';
+    const target = active.find(item => {
+      if (!item?.active) return false;
+      if (targetId) return item.id === targetId;
+      return oldContent && item.content === oldContent;
+    });
+    if (!target) return null;
+    // update still consumes one of today's uses (like activate) even though
+    // it never touches slot occupancy — so it's still gated by daily_limit,
+    // never by max_active/activeCount.
+    if (used >= limits.daily_limit) return null;
+
+    const newContent = typeof action.content === 'string' && action.content.trim() ? action.content.trim() : target.content;
+
+    let newStrength = target.strength;
+    if (typeof action.strength === 'string' && action.strength.trim()) {
+      const normalizedStrength = normalizeStrengthForStorage(action.strength);
+      if (!normalizedStrength) return null;
+      const { available_strength: availableCsaStrength } = getHypnosisSuggestionLimits(level);
+      if (hypnosisStrengthRank(normalizedStrength) > hypnosisStrengthRank(availableCsaStrength)) return null;
+      newStrength = normalizedStrength;
+    }
+
+    let newScopeType = target.scope_type;
+    let newScopeId = target.scope_id;
+    let newScopeLabel = target.scope_label;
+    if (typeof action.scope_type === 'string' && action.scope_type.trim()) {
+      const requestedScope = action.scope_type.trim();
+      if (!CSA_SCOPE_RANK[requestedScope] || CSA_SCOPE_RANK[requestedScope] > CSA_SCOPE_RANK[limits.scope_type]) return null;
+      const resolvedScopeId = resolveCsaScopeId(requestedScope, worldState);
+      if (!resolvedScopeId) return null;
+      newScopeType = requestedScope;
+      newScopeId = resolvedScopeId;
+      newScopeLabel = CSA_SCOPE_LABELS[resolvedScopeId] || resolvedScopeId;
+    }
+    // scope_type left unchanged keeps target's existing scope_id/scope_label
+    // as-is — a registered CSA's content/strength can still be edited even
+    // while the player is currently standing outside its scope.
+
+    const changed = newContent !== target.content
+      || newStrength !== target.strength
+      || newScopeType !== target.scope_type
+      || newScopeId !== target.scope_id;
+    if (!changed) return null;
+
+    if (active.some(item => item !== target && item?.active && item.content === newContent && item.scope_id === newScopeId)) return null;
+
+    return {
+      csa_active: active.map(item => item === target
+        ? { ...item, content: newContent, strength: newStrength, scope_type: newScopeType, scope_id: newScopeId, scope_label: newScopeLabel, updated_turn: turnNumber }
+        : item),
+      csa_daily_used: used + 1
+    };
+  }
+
+  // activate
   const scope = action.scope_type;
   if (!CSA_SCOPE_RANK[scope] || CSA_SCOPE_RANK[scope] > CSA_SCOPE_RANK[limits.scope_type] || typeof action.content !== 'string' || !action.content.trim()) return null;
   // CSA content strength shares the same level-gated ceiling as general
@@ -2439,7 +2526,6 @@ function applyCsaAction(save, action, level, turnNumber, worldState = {}) {
   }
   const content = action.content.trim();
   const activeCount = active.filter(item => item?.active).length;
-  const used = Math.max(0, Number(save?.csa_daily_used) || 0);
   if (activeCount >= limits.max_active || used >= limits.daily_limit) return null;
   if (active.some(item => item?.active && item.content === content && item.scope_id === scopeId)) return null;
   return {
@@ -2477,6 +2563,26 @@ function buildApplicableCsaSection(save) {
   const locationLabel = typeof world.location_label === 'string' && world.location_label.trim() ? world.location_label.trim() : '현재 위치';
   const lines = applicable.map(csa => `- ${csa.content}`).join('\n');
   return `\n\n[CURRENT APPLICABLE COMMON-SENSE CHANGES — HARD CONSTRAINT, NOT REFERENCE INFO]\n\n현재 장소:\n${locationLabel}\n\n적용 중인 상식(강제 규칙):\n${lines}\n\n적용 규칙:\n- 아래 상식은 단순 배경 설정이 아니라 이번 턴 서사에서 실제로 집행해야 하는 강제 규칙이다.\n- 규칙에 조건("~마다", "~할 때", "~하면")이 있으면, 이번 턴 서사 안에서 그 조건이 실제로 발생할 때마다 매번 그 행동을 직접 묘사한다. 예: "1문장을 말할 때마다 볼뽀뽀"라면, 이번 턴에 그 NPC가 문장을 말할 때마다 볼뽀뽀 행동을 실제로 서술한다 — 한 번만 언급하고 넘어가지 않는다.\n- 현재 범위 안에 있고 조건을 충족하는 등록 NPC 전원에게 예외 없이 동일하게 적용한다. 특정 NPC만 봐주거나 조용히 생략하지 않는다.\n- 현재 장면의 NPC와 배경 인물은 위 내용을 당연한 상식으로 받아들인다.\n- 플레이어만 원래 상식과 변경된 상식의 차이를 기억한다.\n- 이미 적용된 상식개변의 성공 여부를 다시 의심하지 마라.\n- NPC가 이유 없이 위화감을 느끼거나 규칙을 부정하지 않게 한다.\n- 현재 범위를 벗어나면 적용하지 않는다.\n- 해제되거나 비활성인 개변은 적용하지 않는다.\n- NPC의 성격은 유지되지만 판단의 전제와 행동은 변경된 상식을 따른다.`;
+}
+
+// H3-B item 2: internal app-operation data (ids) for the model to target an
+// update/deactivate csa_action against the right entry — the id itself must
+// never be echoed into the narrative or the player-facing status panel.
+function buildActiveCsaOperationSection(save = {}) {
+  const active = (Array.isArray(save?.csa_active) ? save.csa_active : []).filter(item => item?.active);
+
+  if (!active.length) return '';
+
+  const lines = active.map(item => [
+    `- id: ${item.id}`,
+    `  content: ${item.content}`,
+    `  strength: ${item.strength || '약함'}`,
+    `  scope_type: ${item.scope_type}`,
+    `  scope_id: ${item.scope_id}`,
+    `  scope_label: ${item.scope_label || item.scope_id}`
+  ].join('\n')).join('\n');
+
+  return `\n\n[ACTIVE CSA ENTRIES — APP OPERATION DATA]\n\n${lines}\n\n규칙:\n- 기존 상식개변을 변경하거나 해제할 때 위 id를 사용한다.\n- update는 같은 슬롯을 유지한다.\n- activate와 update는 오늘 사용 횟수를 1회 소비한다.\n- deactivate는 오늘 사용 횟수를 소비하지 않는다.\n- 실제 게임 서사나 사용자용 상황판에 내부 id를 출력하지 않는다.`;
 }
 
 // ─────────────────────────────────────────────
@@ -3544,39 +3650,250 @@ function normalizeFinalChoicesDeterministically(choices, { narrativeText = '', c
   };
 }
 
+// ─────────────────────────────────────────────
+// H3-B: CSA narrative integrity — meta-awareness detection + combined
+// omission/meta repair. Replaces the old omission-only repairCsaOmission:
 // Extract self-reports a missed forced CSA rule in csa_omission (judged
-// against the exact list the Worker computed, not a free guess). The repair
-// never rewrites the already-shown narrative — it only produces a short
-// continuation paragraph that actually executes the missed rule, which the
-// frontend appends to the committed content.
-function buildCsaOmissionRepairPrompt(narrativeText, applicableCsaLines, omissions) {
-  return `너는 방금 생성된 게임 서사에서 누락된 "강제 상식개변 규칙"을 짧게 보충하는 역할이다. 기존 서사를 다시 쓰지 말고, 자연스럽게 이어지는 1~3문장짜리 짧은 보충 단락만 새로 작성해 누락된 강제 행동을 실제로 실행시켜라. 서사의 톤과 인물 말투를 유지한다. 설명문이나 메타 발언 없이 순수 서사 본문만 출력한다. 유효한 JSON 객체 하나만 출력한다.
+// against the exact list the Worker computed, not a free guess), and the
+// narrative/structured fields are separately checked for the NPC narrating
+// that a rule/app/system is doing this to them instead of just living it.
+// Both problems, when present, are fixed by a single combined repair call.
+// ─────────────────────────────────────────────
 
-[방금 생성된 서사]
-${(narrativeText || '').slice(-1500)}
+// H3-B item 6: deliberately narrow, multi-word/contextual patterns — a bare
+// "규칙"/"강제"/"이상하다"/"명령"/"따라야 한다"/"병원 규정" must never trip
+// this on its own; only an actual claim that a rule/app/system is imposing
+// the current behavior counts.
+const CSA_META_AWARENESS_PATTERNS = [
+  /상식\s*개변/,
+  /개변된\s*상식/,
+  /플레이어가\s*(?:바꾼|설정한)\s*(?:상식|규칙)/,
+  /(?:최면\s*)?어플(?:이|에서|로)\s*(?:시키|명령|강제|조종)/,
+  /시스템(?:이|에서)\s*(?:시키|명령|강제)/,
+  /(?:이|그)\s*(?:규칙|명령|설정)\s*때문에\s*(?:억지로|강제로|어쩔\s*수\s*없이)/,
+  /원래(?:는|라면)[^.!?]{0,60}(?:안\s*했|하지\s*않|이상|싫|거부)[^.!?]{0,60}(?:하지만|그런데)[^.!?]{0,60}(?:해야|따라야|하게\s*된다)/
+];
 
-[현재 적용 중인 상식 개변 — 강제 규칙]
-${applicableCsaLines.join('\n')}
-
-[누락된 항목]
-${omissions.join('\n')}
-
-[요구 JSON 스키마]
-{"addition": "이어지는 1~3문장짜리 보충 서사"}`;
+function detectCsaMetaAwareness(text = '') {
+  const value = typeof text === 'string' ? text.trim() : '';
+  if (!value) return [];
+  return CSA_META_AWARENESS_PATTERNS.filter(pattern => pattern.test(value)).map(pattern => pattern.source);
 }
 
-async function repairCsaOmission(env, narrativeText, applicableCsaLines, omissions) {
-  const prompt = buildCsaOmissionRepairPrompt(narrativeText, applicableCsaLines, omissions);
+// H3-B item 7: only [1. 서사 및 행동] is ever inspected or repaired here —
+// [2. 플레이어 상황판]/[3. 선택지] are never read or touched.
+function extractNarrativeActionSection(narrativeText) {
+  const text = typeof narrativeText === 'string' ? narrativeText : '';
+  const statusHeadingPattern = /^.*2\.\s*플레이어\s*상황판.*$/m;
+  const match = statusHeadingPattern.exec(text);
+  return match ? text.slice(0, match.index).replace(/\s+$/, '') : text;
+}
+
+// Splices a corrected [1] section back in — [2]/[3] (and everything after
+// the [2] heading) stay byte-identical to the original.
+function replaceNarrativeActionSection(narrativeText, newSection1) {
+  const text = typeof narrativeText === 'string' ? narrativeText : '';
+  if (typeof newSection1 !== 'string' || !newSection1.trim()) return text;
+  const statusHeadingPattern = /^.*2\.\s*플레이어\s*상황판.*$/m;
+  const match = statusHeadingPattern.exec(text);
+  if (!match) return newSection1.trim();
+  const after = text.slice(match.index);
+  return `${newSection1.trim()}\n\n${after}`;
+}
+
+// H3-B item 8: only these fields are ever checked — never player input,
+// [2]/[3], dev logs, the rulebook, or a CSA's own content text.
+function collectCsaMetaAwarenessViolations(narrativeText, extract) {
+  const violations = [];
+
+  const section1 = extractNarrativeActionSection(narrativeText);
+  if (detectCsaMetaAwareness(section1).length) {
+    violations.push({ field: 'narrative_section_1', value: section1 });
+  }
+
+  for (const field of ['surface', 'inner', 'physical_reaction']) {
+    const value = extract?.npc_emotion?.[field];
+    if (detectCsaMetaAwareness(value).length) {
+      violations.push({ field: `npc_emotion.${field}`, value });
+    }
+  }
+
+  if (detectCsaMetaAwareness(extract?.turn_summary).length) {
+    violations.push({ field: 'turn_summary', value: extract.turn_summary });
+  }
+
+  return violations;
+}
+
+function buildCsaNarrativeIntegrityRepairPrompt({ narrativeText, applicableCsa, omissions, violations }) {
+  const section1 = extractNarrativeActionSection(narrativeText);
+  const csaLines = (applicableCsa || []).map(csa => `- ${csa.content}`).join('\n') || '없음';
+  const omissionLines = (omissions || []).length ? omissions.map(o => `- ${o}`).join('\n') : '없음';
+  const violationLines = (violations || []).length
+    ? violations.map(v => `- ${v.field}: "${String(v.value || '').slice(0, 200)}"`).join('\n')
+    : '없음';
+  return `너는 게임 서사의 [1. 서사 및 행동] 섹션과 구조화 필드(npc_emotion, turn_summary) 중 문제가 있는 부분만 최소한으로 보정하는 역할이다. 전체 이야기를 새로 쓰지 않는다. 사건 순서, 등장인물, 대사 내용, 플레이어 행동을 최대한 유지한다. NPC가 상식개변·암시·어플·시스템에 의해 변경됐다는 사실 자체를 인식하지 않게 하고, 현재 상식을 원래부터 당연한 관행으로 받아들이게 한다. 누락된 강제 행동이 있으면 [1] 섹션 안에서 자연스럽게 실행되도록 삽입한다. [2. 플레이어 상황판]과 [3. 선택지]는 절대 반환하거나 언급하지 않는다. 문제없는 필드는 빈 문자열로 반환하거나 키를 생략한다. 마크다운 코드펜스와 설명문 없이 JSON 객체만 출력한다.
+
+[적용 중인 상식개변 — 강제 규칙]
+${csaLines}
+
+[누락된 강제 행동]
+${omissionLines}
+
+[메타 인식 위반 필드]
+${violationLines}
+
+[현재 [1] 섹션]
+${section1}
+
+[요구 JSON 스키마]
+{"narrative_section_1": "보정이 필요한 경우에만 수정된 [1] 전체 내용", "npc_emotion": {"surface": "위반한 경우에만", "inner": "위반한 경우에만", "physical_reaction": "위반한 경우에만"}, "turn_summary": "위반한 경우에만"}`;
+}
+
+async function repairCsaNarrativeIntegrity(env, { narrativeText, applicableCsa, omissions, violations }) {
+  const prompt = buildCsaNarrativeIntegrityRepairPrompt({ narrativeText, applicableCsa, omissions, violations });
   const result = await requestDeepSeekJsonWithRetry(env, {
     model: 'deepseek-v4-flash',
     thinking: { type: 'disabled' },
     messages: [{ role: 'system', content: prompt }],
     response_format: { type: 'json_object' },
     stream: false,
-    max_tokens: 400
+    max_tokens: 1200
   }, { timeoutMs: 30000, maxAttempts: 1 });
-  const addition = typeof result.parsed?.addition === 'string' ? result.parsed.addition.trim() : '';
-  return addition || null;
+  return isPlainObject(result.parsed) ? result.parsed : null;
+}
+
+// H3-B item 11: deterministic, LLM-free fallback text — used whenever a
+// field is still meta-flagged (repair never ran, failed, or didn't actually
+// fix that field) or, for npc_emotion, still fails the mind-monitor length
+// contract after a repair attempt. Never blocks the turn.
+const CSA_META_NEUTRAL_SENTENCE = '그 행동은 이곳에서 오래전부터 이어져 온 자연스러운 관행처럼 망설임 없이 진행됐다.';
+const CSA_META_SURFACE_FALLBACK = '“이건 이곳에서 늘 자연스럽게 해 오던 방식이야. 지금도 평소처럼 행동하면 되고, 굳이 이유를 따로 생각할 필요는 없어.”';
+const CSA_META_INNER_FALLBACK = '“딱히 의심하거나 거부할 이유가 떠오르지 않는다. 몸과 생각 모두 익숙한 일상처럼 자연스럽게 다음 행동을 받아들이고 있다.”';
+const CSA_META_TURN_SUMMARY_FALLBACK = '현재 장소의 자연스러운 관행에 따라 장면이 계속 진행됐다.';
+
+function csaMetaPhysicalFallback(subjectLabel) {
+  const subject = typeof subjectLabel === 'string' && subjectLabel.trim() ? subjectLabel.trim() : '상대';
+  return `${subject}는 특별한 망설임 없이 익숙한 동작을 이어 갔다. 표정과 자세에는 위화감이나 억지스러운 긴장이 드러나지 않았다.`;
+}
+
+// Removes only the sentence(s) that actually match a meta-awareness pattern
+// and inserts one neutral sentence in their place — the rest of the section
+// (event order, other characters, dialogue) is left untouched.
+function applyCsaMetaFallbackToSection1(section1) {
+  const text = typeof section1 === 'string' ? section1 : '';
+  if (!detectCsaMetaAwareness(text).length) return text;
+  const sentences = text.split(/(?<=[.!?。])\s*|\n+/).filter(Boolean);
+  let inserted = false;
+  const kept = [];
+  for (const sentence of sentences) {
+    if (detectCsaMetaAwareness(sentence).length) {
+      if (!inserted) { kept.push(CSA_META_NEUTRAL_SENTENCE); inserted = true; }
+      continue;
+    }
+    kept.push(sentence);
+  }
+  if (!inserted) kept.push(CSA_META_NEUTRAL_SENTENCE);
+  let result = kept.join(' ').replace(/\s+/g, ' ').trim();
+  if (detectCsaMetaAwareness(result).length) result = CSA_META_NEUTRAL_SENTENCE; // backstop
+  return result;
+}
+
+function applyCsaMetaFallbackToTurnSummary(turnSummary) {
+  const text = typeof turnSummary === 'string' ? turnSummary : '';
+  if (!text.trim()) return CSA_META_TURN_SUMMARY_FALLBACK;
+  if (!detectCsaMetaAwareness(text).length) return text.slice(0, 200);
+  const sentences = text.split(/(?<=[.!?。])\s*|\n+/).filter(Boolean);
+  const kept = sentences.filter(sentence => !detectCsaMetaAwareness(sentence).length);
+  const joined = kept.join(' ').replace(/\s+/g, ' ').trim();
+  return (joined || CSA_META_TURN_SUMMARY_FALLBACK).slice(0, 200);
+}
+
+// A clean, meta-free previously-saved value is reused ahead of the generic
+// canned fallback line, per item 11's "기존 저장값이 정상이고 메타 인식이
+// 없으면 기존 값을 유지" rule.
+function resolveCsaMetaFallbackForEmotionField(field, previousSavedValue, subjectLabel) {
+  if (typeof previousSavedValue === 'string' && previousSavedValue.trim() && !detectCsaMetaAwareness(previousSavedValue).length) {
+    return previousSavedValue;
+  }
+  if (field === 'surface') return CSA_META_SURFACE_FALLBACK;
+  if (field === 'inner') return CSA_META_INNER_FALLBACK;
+  return csaMetaPhysicalFallback(subjectLabel);
+}
+
+// H3-B items 9-12: the single entry point handleExtract calls. Consumes at
+// most the turn's one shared recovery-budget slot for one combined LLM
+// repair call (never a second call, and never a Story/Extract re-run);
+// whatever that call doesn't fix (or if it never ran at all) gets the
+// deterministic per-field fallback above. Always fail-open — never blocks
+// Extract or Commit, and only ever touches [1]/npc_emotion/turn_summary.
+async function resolveCsaNarrativeIntegrity(env, {
+  narrativeText, applicableCsa, omissions, violations, extract, previousSave, characters, requestId, recoveryBudget
+}) {
+  let finalNarrativeText = narrativeText;
+  let narrativeReplacement = null;
+  let repairSucceeded = false;
+
+  if (consumeRecoveryBudget(recoveryBudget, 'csa_narrative_integrity')) {
+    try {
+      const repaired = await repairCsaNarrativeIntegrity(env, { narrativeText, applicableCsa, omissions, violations });
+      if (isPlainObject(repaired)) {
+        repairSucceeded = true;
+        if (typeof repaired.narrative_section_1 === 'string' && repaired.narrative_section_1.trim()) {
+          const corrected = replaceNarrativeActionSection(narrativeText, repaired.narrative_section_1);
+          narrativeReplacement = corrected;
+          finalNarrativeText = corrected;
+        }
+        if (isPlainObject(repaired.npc_emotion)) {
+          for (const field of ['surface', 'inner', 'physical_reaction']) {
+            const value = repaired.npc_emotion[field];
+            if (typeof value === 'string' && value.trim()) extract.npc_emotion[field] = value.trim();
+          }
+        }
+        if (typeof repaired.turn_summary === 'string' && repaired.turn_summary.trim() && repaired.turn_summary.length <= 200) {
+          extract.turn_summary = repaired.turn_summary.trim();
+        }
+      }
+    } catch (error) {
+      console.error('CSA narrative integrity repair failed:', { request_id: requestId, error: error.message });
+    }
+  }
+
+  // Deterministic reconciliation — no LLM call below this point. Whatever
+  // is still meta-flagged (repair skipped/failed/incomplete) or still fails
+  // the mind-monitor contract gets the canonical fallback.
+  const section1 = extractNarrativeActionSection(finalNarrativeText);
+  if (detectCsaMetaAwareness(section1).length) {
+    const fixedSection1 = applyCsaMetaFallbackToSection1(section1);
+    const corrected = replaceNarrativeActionSection(finalNarrativeText, fixedSection1);
+    narrativeReplacement = corrected;
+    finalNarrativeText = corrected;
+  }
+
+  const subjectLabel = characters?.[extract.character_id]?.name || characters?.[extract.character_id]?.['이름'] || '상대';
+  const emotionValidation = validateNpcEmotion(extract.npc_emotion, extract.character_id);
+  for (const field of ['surface', 'inner', 'physical_reaction']) {
+    const current = extract.npc_emotion?.[field];
+    const metaFlagged = detectCsaMetaAwareness(current).length > 0;
+    const contractFailed = (emotionValidation.fieldErrors?.[field] || []).length > 0;
+    if (metaFlagged || contractFailed) {
+      const previousSavedValue = previousSave?.npc_emotion?.[extract.character_id]?.[field];
+      extract.npc_emotion[field] = resolveCsaMetaFallbackForEmotionField(field, previousSavedValue, subjectLabel);
+    }
+  }
+
+  if (detectCsaMetaAwareness(extract.turn_summary).length) {
+    extract.turn_summary = applyCsaMetaFallbackToTurnSummary(extract.turn_summary);
+  }
+
+  // A purely deterministic meta-language cleanup never claims to have also
+  // inserted a missing forced action — only an actual successful repair
+  // call clears the self-reported omission list.
+  if (repairSucceeded) extract.csa_omission = [];
+
+  const finalViolations = collectCsaMetaAwarenessViolations(finalNarrativeText, extract); // no LLM re-call
+
+  return { finalNarrativeText, narrativeReplacement, finalViolations, repairSucceeded };
 }
 
 function buildFirstEncounterRepairPrompt(narrativeText, player, npcProfile) {
@@ -4116,6 +4433,7 @@ export {
   buildActiveSuggestionPanelText,
   buildCsaPanelText,
   buildApplicableCsaSection,
+  buildActiveCsaOperationSection,
   calculateHypnosisCapability,
   getHypnosisSuggestionLimits,
   hypnosisStrengthRank,
@@ -4127,7 +4445,16 @@ export {
   repairRawJsonOutput,
   getApplicableCsaEntries,
   buildCsaApplicationCheckSection,
-  repairCsaOmission,
+  detectCsaMetaAwareness,
+  extractNarrativeActionSection,
+  replaceNarrativeActionSection,
+  collectCsaMetaAwarenessViolations,
+  buildCsaNarrativeIntegrityRepairPrompt,
+  repairCsaNarrativeIntegrity,
+  applyCsaMetaFallbackToSection1,
+  applyCsaMetaFallbackToTurnSummary,
+  resolveCsaMetaFallbackForEmotionField,
+  resolveCsaNarrativeIntegrity,
   stripBoldMarkers,
   stripChoiceMarker,
   resolveMarkerChoiceInput,

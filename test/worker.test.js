@@ -46,6 +46,8 @@ import {
   getApplicableCsaEntries,
   buildCsaApplicationCheckSection,
   stripBoldMarkers,
+  stripChoiceMarker,
+  resolveMarkerChoiceInput,
   findUnregisteredChoiceTargets,
   isNpcEligibleForScene,
   getEligibleNpcIds,
@@ -3641,6 +3643,94 @@ test('stripBoldMarkers removes ** markers while preserving names and dialogue te
   assert.equal(stripBoldMarkers('마크다운 없는 평범한 문장'), '마크다운 없는 평범한 문장');
   assert.equal(stripBoldMarkers(undefined), undefined);
   assert.equal(stripBoldMarkers(null), null);
+});
+
+// ─────────────────────────────────────────────
+// Bare choice-marker input ("1"/"A"/"①") is resolved against last_choices
+// before it ever reaches the Story prompt — the frontend's own choice
+// buttons already send the full sentence, this is a server-side safety net
+// for a manually-typed bare marker or a non-standard client.
+// ─────────────────────────────────────────────
+
+test('stripChoiceMarker removes a leading ①②③④/1./bullet decoration but leaves the sentence itself untouched', () => {
+  assert.equal(stripChoiceMarker('① 한소영에게 다가가 인사한다.'), '한소영에게 다가가 인사한다.');
+  assert.equal(stripChoiceMarker('2) 조용히 지켜본다.'), '조용히 지켜본다.');
+  assert.equal(stripChoiceMarker('- 대화를 시도한다.'), '대화를 시도한다.');
+  assert.equal(stripChoiceMarker('마커 없는 문장'), '마커 없는 문장');
+  assert.equal(stripChoiceMarker(undefined), '');
+});
+
+test('resolveMarkerChoiceInput substitutes a bare digit/letter/circled-numeral marker with the matching last_choices entry', () => {
+  const lastChoices = ['첫 번째 선택지 문장.', '두 번째 선택지 문장.', '세 번째 선택지 문장.', '네 번째 선택지 문장.'];
+  assert.equal(resolveMarkerChoiceInput('2', lastChoices), '두 번째 선택지 문장.');
+  assert.equal(resolveMarkerChoiceInput(' 2 ', lastChoices), '두 번째 선택지 문장.');
+  assert.equal(resolveMarkerChoiceInput('B', lastChoices), '두 번째 선택지 문장.');
+  assert.equal(resolveMarkerChoiceInput('b', lastChoices), '두 번째 선택지 문장.');
+  assert.equal(resolveMarkerChoiceInput('②', lastChoices), '두 번째 선택지 문장.');
+  assert.equal(resolveMarkerChoiceInput('1', lastChoices), '첫 번째 선택지 문장.');
+  assert.equal(resolveMarkerChoiceInput('4', lastChoices), '네 번째 선택지 문장.');
+});
+
+test('resolveMarkerChoiceInput strips a leftover marker decoration on the stored last_choices entry before echoing it back', () => {
+  const lastChoices = ['① 한소영에게 다가가 인사한다.', '② 조용히 지켜본다.'];
+  assert.equal(resolveMarkerChoiceInput('1', lastChoices), '한소영에게 다가가 인사한다.');
+});
+
+test('resolveMarkerChoiceInput leaves real sentences, longer text starting with a digit, and non-marker input untouched', () => {
+  const lastChoices = ['첫 번째 선택지 문장.', '두 번째 선택지 문장.'];
+  assert.equal(resolveMarkerChoiceInput('한소영에게 다가가 인사한다.', lastChoices), '한소영에게 다가가 인사한다.');
+  // Starts with a digit but is not a BARE marker — must not be treated as one.
+  assert.equal(resolveMarkerChoiceInput('2번째로 갈래', lastChoices), '2번째로 갈래');
+  assert.equal(resolveMarkerChoiceInput('12', lastChoices), '12');
+  assert.equal(resolveMarkerChoiceInput('', lastChoices), '');
+});
+
+test('resolveMarkerChoiceInput passes the bare marker through unchanged when last_choices is missing, empty, or the index is out of range', () => {
+  assert.equal(resolveMarkerChoiceInput('2', undefined), '2');
+  assert.equal(resolveMarkerChoiceInput('2', []), '2');
+  assert.equal(resolveMarkerChoiceInput('4', ['첫 번째.', '두 번째.']), '4');
+  assert.equal(resolveMarkerChoiceInput('3', ['첫 번째.', '두 번째.', null]), '3');
+});
+
+test('/api/story resolves a bare "2" player_input into the full second last_choices sentence before it reaches the DeepSeek prompt', async () => {
+  const originalFetch = globalThis.fetch;
+  let deepseekBody;
+  globalThis.fetch = async (url, init = {}) => {
+    const requestUrl = String(url);
+    if (requestUrl.includes('/rpc/get_story_context')) {
+      return new Response(JSON.stringify({
+        turn_count: 3,
+        master: { characters: {} },
+        save: {
+          player: { name: '정우진', job: '원무과 주임' },
+          player_setup: { status: 'complete' },
+          opening_started: true,
+          last_choices: [
+            '한소영과 자연스럽게 대화를 더 이어간다.',
+            '사실은 궁금한 게 좀 있어서요라고 부드럽게 말을 건넨다.',
+            '스마트폰을 꺼내 화면을 켠다.',
+            '업무적인 질문으로 대화를 자연스럽게 연장한다.'
+          ]
+        },
+        recent_memories: []
+      }), { headers: { 'content-type': 'application/json' } });
+    }
+    if (requestUrl.includes('api.deepseek.com')) {
+      deepseekBody = JSON.parse(init.body);
+      return new Response(new ReadableStream({ start(controller) { controller.close(); } }), { status: 200 });
+    }
+    throw new Error(`unexpected fetch: ${requestUrl}`);
+  };
+  try {
+    const response = await worker.fetch(apiRequest('/api/story', { game_id: 'test-game', player_input: '2' }), { DEEPSEEK_API_KEY: 'test' });
+    assert.equal(response.status, 200);
+    const promptText = deepseekBody.messages.map(message => message.content).join('\n');
+    // The resolved full sentence — not the bare "2" — must be what the
+    // prompt presents as the player's stated action.
+    assert.match(promptText, /사실은 궁금한 게 좀 있어서요라고 부드럽게 말을 건넨다\./);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
 });
 
 test('/api/commit-turn strips ** from content and choices before persisting, keeping names and dialogue intact', async () => {

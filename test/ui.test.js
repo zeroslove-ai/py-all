@@ -379,3 +379,48 @@ test('input lock is re-synchronized at the top of retryExtract/retryCommit/regen
   const setLoadingFn = uiSource.match(/setLoading\(active, label = '처리 중'\)[\s\S]*?\n  \},/)?.[0] || '';
   assert.match(setLoadingFn, /state\.inputLocked/);
 });
+
+// ─────────────────────────────────────────────
+// Choice-click integrity (5th stage) — a click must submit the choice's full
+// sentence, never a bare index/marker, since only the Story prompt (not the
+// UI) knows the choice's actual content, and a bare "2" is ambiguous once
+// echoed back into the narrative continuity.
+// ─────────────────────────────────────────────
+
+test('renderChoices/renderGameplayChoices pass the full normalized choice sentence to onClick, never the loop index or a bare marker', () => {
+  const renderChoicesFn = uiSource.match(/renderChoices\(choices, onClick\)[\s\S]*?\n  \},/)?.[0] || '';
+  assert.match(renderChoicesFn, /const text = this\.normalizeChoice\(/);
+  assert.match(renderChoicesFn, /onClick\(text\)/);
+  assert.doesNotMatch(renderChoicesFn, /onClick\(index\)/);
+  assert.doesNotMatch(renderChoicesFn, /onClick\(marker\)/);
+
+  const renderGameplayFn = uiSource.match(/renderGameplayChoices\(choices, onClick, \{ setup = false \} = \{\}\)[\s\S]*?\n  \},/)?.[0] || '';
+  assert.match(renderGameplayFn, /const all = \(choices \|\| \[\]\)\.map\(choice => this\.normalizeChoice\(/);
+  assert.match(renderGameplayFn, /onClick\(text\)/);
+  assert.doesNotMatch(renderGameplayFn, /onClick\(index\)/);
+
+  // Every button in the group is disabled synchronously, before onClick
+  // fires — a second/rapid click on a sibling button can never also fire,
+  // so only one Story request is ever triggered per choice selection.
+  assert.match(renderChoicesFn, /querySelectorAll\('button'\)\.forEach\(button => \{ button\.disabled = true;/);
+  assert.match(renderGameplayFn, /querySelectorAll\('button'\)\.forEach\(item => \{ item\.disabled = true;/);
+  assert.match(renderChoicesFn, /\{ once: true \}/);
+  assert.match(renderGameplayFn, /\{ once: true \}/);
+});
+
+test('submitChoice forwards the full choice text into the same input path as free-typed text, and the user-facing message echoes that full text, not a number', () => {
+  const submitChoiceFn = pageSource.match(/function submitChoice\(choiceText\)[\s\S]*?\n    }/)?.[0] || '';
+  assert.match(submitChoiceFn, /document\.getElementById\('chat-input'\)\.value = choiceText/);
+  assert.match(submitChoiceFn, /handleTurnInput\(\)/);
+
+  const handleTurnInputFn = pageSource.match(/async function handleTurnInput\(\)[\s\S]*?\n    }/)?.[0] || '';
+  // Reads the input box verbatim and sends it on, unmodified — no
+  // marker/index substitution happens (or is needed) on the client, since
+  // submitChoice already placed the full sentence there.
+  assert.match(handleTurnInputFn, /const input = document\.getElementById\('chat-input'\)\.value\.trim\(\)/);
+  assert.match(handleTurnInputFn, /ui\.addUserMessage\(input\)/);
+  assert.match(handleTurnInputFn, /retryStory\(\{ input, nextTurn: state\.turnCount \+ 1/);
+
+  const addUserMessageFn = uiSource.match(/addUserMessage\(text\)[\s\S]*?\n  \},/)?.[0] || '';
+  assert.match(addUserMessageFn, /div\.textContent = `> \$\{text\}`/);
+});

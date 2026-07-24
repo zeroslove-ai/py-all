@@ -285,8 +285,9 @@ async function handleStory(req, env) {
   const contextMs = Date.now() - contextStart;
 
   const currentTurn = ctx?.turn_count ?? 0;
+  const resolvedPlayerInput = resolveMarkerChoiceInput(player_input, ctx?.save?.last_choices);
   const promptStart = Date.now();
-  const prompt = buildStoryPrompt(ctx, player_input, currentTurn, feedback);
+  const prompt = buildStoryPrompt(ctx, resolvedPlayerInput, currentTurn, feedback);
   const promptMs = Date.now() - promptStart;
 
   let deepseekRes;
@@ -752,6 +753,40 @@ async function handleTts(req, env) {
 // dialogue text themselves are untouched, only the literal ** characters go.
 function stripBoldMarkers(text) {
   return typeof text === 'string' ? text.replace(/\*\*/g, '') : text;
+}
+
+// Mirrors the frontend's own ui.normalizeChoice() marker-stripping — some
+// legacy-saved last_choices entries may still carry their ①②③④/1./bullet
+// decoration, and that must never get echoed back to the LLM glued onto the
+// front of the player's own words.
+function stripChoiceMarker(text) {
+  return String(text || '').replace(/^\s*(?:[①②③④⑤⑥⑦⑧⑨⑩]|\d+[.)]|[-*•])\s*/, '').trim();
+}
+
+// Defense-in-depth against a bare choice marker ("1"/"2"/"3"/"4",
+// "A"/"B"/"C"/"D", or "①"/"②"/"③"/"④") being sent as the player's own action
+// text: the frontend's own choice buttons already send the full sentence
+// (see pages/ui.js renderGameplayChoices), but a user typing a bare
+// digit/letter directly, or a non-standard client, would otherwise hand the
+// LLM an ambiguous single character with no guarantee it resolves to the
+// same choice the player actually meant. When the input is exactly one of
+// these markers, substitute it with the corresponding entry from the last
+// committed choice list (1-indexed for digits/circled numerals, A=1 for
+// letters) before it ever reaches the Story prompt.
+function resolveMarkerChoiceInput(playerInput, lastChoices) {
+  const trimmed = typeof playerInput === 'string' ? playerInput.trim() : '';
+  const markerMatch = trimmed.match(/^(?:([1-4])|([A-Da-d])|([①②③④]))$/);
+  if (!markerMatch) return playerInput;
+  if (!Array.isArray(lastChoices) || !lastChoices.length) return playerInput;
+
+  let index;
+  if (markerMatch[1]) index = Number(markerMatch[1]) - 1;
+  else if (markerMatch[2]) index = markerMatch[2].toUpperCase().charCodeAt(0) - 'A'.charCodeAt(0);
+  else index = '①②③④'.indexOf(markerMatch[3]);
+
+  const target = lastChoices[index];
+  if (typeof target !== 'string' || !target.trim()) return playerInput;
+  return stripChoiceMarker(target);
 }
 
 async function handleCommitTurn(req, env) {
@@ -3308,6 +3343,8 @@ export {
   buildCsaApplicationCheckSection,
   repairCsaOmission,
   stripBoldMarkers,
+  stripChoiceMarker,
+  resolveMarkerChoiceInput,
   findUnregisteredChoiceTargets,
   repairUnregisteredNpcChoices,
   insertNarrativeAdditionBeforeStatus,

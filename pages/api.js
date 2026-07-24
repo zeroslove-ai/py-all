@@ -107,5 +107,11 @@ const api = {
       body: JSON.stringify({ game_id: gameId })
     });
     return readApiResponse(res, 'reset');
+  },
+
+  // ─── 10. API 버전 조회 — 배포 확인용, 앱 초기화 시 1회만 호출 ───
+  async version() {
+    const res = await fetch(`${API_BASE}/api/version`);
+    return readApiResponse(res, 'version');
   }
 };

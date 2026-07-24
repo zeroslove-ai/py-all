@@ -518,3 +518,81 @@ test('resetAndStartNewGame and the systemStart failure path never treat free-typ
   assert.match(startSetupFn, /if \(!state\.gameId \|\| state\.isStreaming \|\| state\.startupRequested\) return;/);
   assert.match(startSetupFn, /state\.startupRequested = true;/);
 });
+
+// ─────────────────────────────────────────────
+// Long choice text (7th stage) — a choice button must show its full
+// sentence, never truncate with an ellipsis or clip to a fixed line height.
+// ─────────────────────────────────────────────
+
+test('.choice-btn wraps and grows to fit its full text instead of truncating with an ellipsis at a fixed height', () => {
+  const choiceBtnRule = pageSource.match(/\.choice-btn \{[\s\S]*?\n\s*\}/)?.[0] || '';
+  assert.match(choiceBtnRule, /height: auto/);
+  assert.match(choiceBtnRule, /white-space: normal/);
+  assert.match(choiceBtnRule, /overflow: visible/);
+  assert.match(choiceBtnRule, /text-overflow: clip/);
+  assert.match(choiceBtnRule, /word-break: keep-all/);
+  assert.match(choiceBtnRule, /overflow-wrap: anywhere/);
+  assert.doesNotMatch(choiceBtnRule, /white-space: nowrap/);
+  assert.doesNotMatch(choiceBtnRule, /text-overflow: ellipsis/);
+});
+
+test('.choice-buttons caps its own height with a scrollbar so many/long choices never push the input row off-screen', () => {
+  const choiceButtonsRule = pageSource.match(/\.choice-buttons \{[\s\S]*?\n\s*\}/)?.[0] || '';
+  assert.match(choiceButtonsRule, /max-height: 42vh/);
+  assert.match(choiceButtonsRule, /overflow-y: auto/);
+});
+
+test('the mobile media query no longer forces .choice-btn to a fixed 30px height, which would re-truncate long choices on small screens', () => {
+  const mobileBlock = pageSource.match(/@media \(max-width: 768px\) \{[\s\S]*?\n\s*\}\s*\n\s*<\/style>/)?.[0] || '';
+  assert.doesNotMatch(mobileBlock, /\.choice-btn \{[^}]*height: 30px/);
+  assert.doesNotMatch(mobileBlock, /\.choice-btn \{[^}]*min-height: 30px/);
+});
+
+// ─────────────────────────────────────────────
+// Frontend/API version identification (8th stage) — fetched once at
+// startup and cached in the DOM, never re-fetched on every render, and a
+// null API tag is never assumed to mean "latest".
+// ─────────────────────────────────────────────
+
+test('api.js exposes a version() call that hits GET /api/version through the same readApiResponse path as every other endpoint', () => {
+  const versionFn = apiSource.match(/async version\(\)[\s\S]*?\n  \},?\n\}/)?.[0] || apiSource.match(/async version\(\)[\s\S]*?\n  \}/)?.[0] || '';
+  assert.match(versionFn, /fetch\(`\$\{API_BASE\}\/api\/version`\)/);
+  assert.match(versionFn, /readApiResponse\(res, 'version'\)/);
+});
+
+test('loadVersionInfo is called once at startup as a fire-and-forget call, never awaited before or blocking loadGameContext', () => {
+  const entryPoint = pageSource.match(/\/\/ ─── Entry Point ───[\s\S]*?loadVersionInfo\(\);/)?.[0] || '';
+  assert.notEqual(entryPoint, '');
+  assert.doesNotMatch(entryPoint, /await loadVersionInfo\(\)/);
+  // Called exactly once, at the top-level entry point — never from inside
+  // retryStory/retryExtract/retryCommit or any other per-turn code path.
+  const perTurnFns = ['retryStory', 'retryExtract', 'retryCommit', 'handleTurnInput'].map(name => {
+    const re = new RegExp(`async function ${name}\\([^)]*\\)[\\s\\S]*?\\n    }`);
+    return pageSource.match(re)?.[0] || '';
+  });
+  perTurnFns.forEach(fnSource => assert.doesNotMatch(fnSource, /loadVersionInfo/));
+});
+
+test('loadVersionInfo never assumes a null/missing API tag means "latest", and falls back to unknown/unavailable without throwing on either fetch failing', () => {
+  const fn = pageSource.match(/async function loadVersionInfo\(\)[\s\S]*?\n    }/)?.[0] || '';
+  assert.notEqual(fn, '');
+  assert.match(fn, /let frontendSha = 'unknown'/);
+  assert.match(fn, /let apiTag = 'unavailable'/);
+  // Both external calls are individually try/caught — one failing must
+  // never prevent the other's result (or the fallback text) from showing.
+  const tryBlocks = fn.match(/try \{[\s\S]*?\} catch/g) || [];
+  assert.equal(tryBlocks.length, 2);
+  assert.match(fn, /fetch\('version\.json', \{ cache: 'no-store' \}\)/);
+  assert.match(fn, /await api\.version\(\)/);
+  // A present-but-null/blank tag must render as 'unknown', not be treated
+  // as if it were a real tag value (e.g. by defaulting to some "latest"
+  // label or leaving the null value in place).
+  assert.match(fn, /typeof version\?\.tag === 'string' && version\.tag\.trim\(\) \? version\.tag\.trim\(\) : 'unknown'/);
+});
+
+test('the version badge is a small, non-interactive, unobtrusive element that never blocks input', () => {
+  assert.match(pageSource, /<div class="version-info" id="version-info"><\/div>/);
+  const cssRule = pageSource.match(/\.version-info \{[\s\S]*?\n\s*\}/)?.[0] || '';
+  assert.match(cssRule, /pointer-events: none/);
+  assert.match(cssRule, /font-size: 0\.65rem/);
+});

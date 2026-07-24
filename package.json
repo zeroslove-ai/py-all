@@ -4,6 +4,7 @@
   "type": "module",
   "scripts": {
     "test": "node --test",
-    "deploy:worker": "node scripts/deploy-worker.mjs"
+    "deploy:worker": "node scripts/deploy-worker.mjs",
+    "deploy:frontend": "node scripts/deploy-frontend.mjs"
   }
 }

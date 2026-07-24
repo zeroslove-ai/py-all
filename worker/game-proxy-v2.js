@@ -655,6 +655,38 @@ async function handleExtract(req, env) {
     }
   }
 
+  // First-encounter safety net: mirrors the exact gate buildSavePatch itself
+  // uses (no recorded/inferred prior encounter for this NPC) so this only
+  // ever fires when a first-turn absolute value would otherwise silently be
+  // skipped — never for an NPC already known to have been met, and never a
+  // uniform fixed default (see repairMissingFirstEncounterStats).
+  // hasMeaningfulNpcEmotion(extract.npc_emotion) stands in for "genuinely
+  // engaged this turn, not just a background mention" — npc_emotion is only
+  // mandatory-filled when this NPC actually appeared as the scene's main
+  // character, not for an incidental background NPC.
+  let firstEncounterRepaired = false;
+  if (isSetupComplete(compatCtx.save) && extract.character_id && extract.character_id !== 'narrator'
+    && extract._npc_registration_rejected !== true && extract._npc_location_rejected !== true
+    && !isPlainObject(extract.first_encounter_stats)) {
+    const characterId = extract.character_id;
+    const alreadyEncountered = hasStructuredEncounter(compatCtx.save, characterId) || hasLegacyEncounterEvidence(compatCtx.save, characterId);
+    if (!alreadyEncountered && hasMeaningfulNpcEmotion(extract.npc_emotion)) {
+      const tFirstEncounter = Date.now();
+      try {
+        const repaired = await repairMissingFirstEncounterStats(
+          env, finalNarrativeText, compatCtx.save?.player || {}, characters[characterId] || {}
+        );
+        if (repaired) {
+          extract.first_encounter_stats = repaired;
+          firstEncounterRepaired = true;
+        }
+      } catch (error) {
+        console.error('First encounter repair failed:', { request_id: requestId, error: error.message });
+      }
+      timing.first_encounter_repair_ms = Date.now() - tFirstEncounter;
+    }
+  }
+
   // Unified final-choice validation (item 3): every rule — hypnosis
   // capability, unregistered target, location-ineligible target, near-
   // duplicate — is re-checked together after any repair, so fixing one
@@ -702,6 +734,7 @@ async function handleExtract(req, env) {
     mind_monitor_errors: validation.ok ? [] : validation.errors,
     choices_repaired: choicesRepaired,
     choices_fallback_used: choicesFallbackUsed,
+    first_encounter_repaired: firstEncounterRepaired,
     json_repaired: jsonRepaired,
     content_addition: null, // superseded by narrative_replacement; kept only for legacy clients
     timing
@@ -1324,8 +1357,16 @@ ${recentMemorySlice.map((m, index) => clipHeadTail(m.content || '', index === re
   const registeredNpcChoiceReminder = mode === 'normal' || mode === 'opening'
     ? `\n\n[REMINDER — REGISTERED NPC CHOICE TARGETS]\n[3. 선택지]에서 직접 상호작용 대상으로 실명을 제시하는 인물은 반드시 master.characters에 등록된 히로인이어야 한다. 미등록 의사·간호사·환자·보호자·직원·동료는 이름 없는 배경 인물로만 표현하고("같은 과 동료", "지나가던 간호사" 등), 그 실명을 선택지에 넣지 않는다.\n`
     : '';
+  // Same recency-favoring end position — a choice this long forces the
+  // frontend button to either truncate with an ellipsis or wrap across many
+  // lines. 120 characters is also the hard ceiling validateFinalChoices
+  // enforces server-side (findOverlongChoices), so a violation here still
+  // gets repaired even if this reminder is ignored.
+  const choiceLengthReminder = mode === 'normal' || mode === 'opening'
+    ? `\n\n[REMINDER — CHOICE LENGTH]\n[3. 선택지]의 각 문장은 35~80자를 목표로 하고 120자를 넘기지 않는다. 화면 버튼에 그대로 표시되므로 지나치게 길게 쓰지 않는다.\n`
+    : '';
   const eligibleNpcRosterSection = buildEligibleNpcRosterSection(save.world_state, master.characters || {});
-  const systemPrompt = coreRules + playerGate + modeSection + rulebookSection + eligibleNpcRosterSection + buildAppSystemRulesSection() + currentSceneSection + npcProfileSection + explicitMentionSection + csaSection + suggestionSection + narrativeLengthSection + npcDialogueSection + antiRepetitionSection + playerStatusPanel + contextSection + feedbackSection + continuitySection + finalFormatRules + openingFlow + playerSetupReminder + hypnosisCapabilitySection + registeredNpcChoiceReminder;
+  const systemPrompt = coreRules + playerGate + modeSection + rulebookSection + eligibleNpcRosterSection + buildAppSystemRulesSection() + currentSceneSection + npcProfileSection + explicitMentionSection + csaSection + suggestionSection + narrativeLengthSection + npcDialogueSection + antiRepetitionSection + playerStatusPanel + contextSection + feedbackSection + continuitySection + finalFormatRules + openingFlow + playerSetupReminder + hypnosisCapabilitySection + registeredNpcChoiceReminder + choiceLengthReminder;
 
   return {
     mode,
@@ -1418,7 +1459,7 @@ npc_emotion.physical_reaction은 표정, 시선, 자세, 목소리, 손동작, �
 npc_stat_changes만 반환한다. 서사에 숫자가 없어도 대사·행동·표정·판단의 실제 변화를 근거로 판단하되 변화 없는 반복 대화는 0이다. 의미 있는 호의·편안함·자발적 대화 지속은 호감 +1~2, 의심 완화·정직성 확인·도움 수용은 신뢰 +1~2, 부탁 자발 수용·자기합리화·자연스러운 따름은 순응 +1~3을 검토한다. 무례는 호감 -1~-2, 거짓말 발각·모순·신분 의심은 신뢰 -1~-3, 명확한 거부는 순응 -1~-3을 검토한다. 실제 반응 변화가 명백하면 모든 값을 기계적으로 0으로 두지 마라. 최면깊이는 플레이어가 어플을 사용해 실제로 최면을 시도·성공·실패·각성시켰거나 활성 암시가 작동했을 때만 변화하며, 일반 대화·설득만으로는 변화하지 않는다. 저항력은 항상 0이다. 한도는 호감·신뢰·최면 -5~+5, 순응 일반 -3~+3·최면 사건 -5~+5이고 ±4~5는 중요한 전환에만 쓴다. reason은 서사 근거 한 문장이다.
 
 [FIRST ENCOUNTER CONTRACT]
-저장된 npc_encounters에 현재 NPC(character_id) 기록이 없고 이번이 실제로 처음 직접 조우한 장면일 때만 first_encounter_stats에 호감도·신뢰도를 0~35 사이 정수로 판단해 반환한다. 공식이나 랜덤 없이, 플레이어의 저장된 외형·복장·직업·말투·현재 태도와 NPC의 성격·가치관·경계심·현재 상황을 근거로 종합적으로 정한다. 제공되지 않은 정보를 지어내지 마라. 두 수치는 같을 필요가 없고 NPC 성격에 따라 결과가 달라져야 한다. 이미 조우한 NPC이거나 처음 만나는 장면이 아니면 first_encounter_stats는 반드시 null이다.
+저장된 npc_encounters에 현재 NPC(character_id) 기록이 없고 이번이 실제로 처음 직접 조우한 장면일 때만 first_encounter_stats에 호감도·신뢰도를 0~35 사이 정수로 판단해 반환한다. 단순히 배경에 등장했거나 멀리서 본 것만으로는 첫 직접 조우가 아니다 — 직접 대화, 응대, 신체 접촉처럼 명확한 상호작용이 있어야 첫 직접 조우로 판단한다. 공식이나 랜덤 없이, 플레이어의 저장된 외형·복장·직업·말투·현재 태도와 NPC의 성격·가치관·경계심·현재 상황을 근거로 종합적으로 정한다. 제공되지 않은 정보를 지어내지 마라. 두 수치는 같을 필요가 없고 NPC 성격에 따라 결과가 달라져야 한다. 이미 조우한 NPC이거나 처음 만나는 장면이 아니면 first_encounter_stats는 반드시 null이다. 실제로 처음 직접 조우한 장면인데 이 판단을 빠뜨리지 마라 — 반드시 first_encounter_stats를 채워야 한다.
 
 [SUGGESTION ACTION CONTRACT]
 이번 서사에서 플레이어가 최면 어플을 실제로 조작해 암시를 만들거나 바꾸거나 끈 것이 명확히 완료됐을 때만 suggestion_action을 반환한다. action은 activate(새 암시 생성) / update(기존 암시 내용·강도 수정) / deactivate(해제) 중 하나다. strength는 반드시 "약함", "중간", "강함", "깊은 최면" 중 하나만 쓴다 — 다른 표현은 쓰지 마라.
@@ -2738,6 +2779,23 @@ function findNearDuplicateChoices(choices) {
   return problems;
 }
 
+// A choice this long forces the frontend button to either truncate with an
+// ellipsis or wrap across many lines — the target is 35~80 characters, and
+// this is the hard ceiling a choice must never exceed after repair.
+const CHOICE_MAX_LENGTH = 120;
+
+function findOverlongChoices(choices, maxLength = CHOICE_MAX_LENGTH) {
+  if (!Array.isArray(choices)) return [];
+  const problems = [];
+  choices.forEach(choice => {
+    const length = typeof choice === 'string' ? choice.trim().length : 0;
+    if (length > maxLength) {
+      problems.push({ choice, reason: `${length}자로 ${maxLength}자 제한을 초과함 — 더 짧게 다시 쓸 것` });
+    }
+  });
+  return problems;
+}
+
 // Deliberately generic, always-safe actions — no suggestion creation or
 // strengthening, no named individuals — used only when repaired choices
 // still fail validation and there's nothing left to repair further.
@@ -2776,6 +2834,7 @@ function validateFinalChoices(choices, { capability, characters = {}, worldState
   record(findUnregisteredChoiceTargets(choices, namedTargets, characters), 'unregistered target');
   record(findLocationIneligibleChoiceTargets(choices, namedTargets, worldState, characters), 'location-ineligible target');
   record(findNearDuplicateChoices(choices), 'near-duplicate');
+  record(findOverlongChoices(choices), 'overlong');
 
   return { ok: errors.length === 0, errors, problems, named_targets: namedTargets };
 }
@@ -2853,6 +2912,49 @@ async function repairCsaOmission(env, narrativeText, applicableCsaLines, omissio
   }, { timeoutMs: 30000, maxAttempts: 1 });
   const addition = typeof result.parsed?.addition === 'string' ? result.parsed.addition.trim() : '';
   return addition || null;
+}
+
+function buildFirstEncounterRepairPrompt(narrativeText, player, npcProfile) {
+  return `너는 방금 생성된 게임 서사에서 플레이어와 등록 NPC가 실제로 처음 직접 조우했는지 판단하는 역할이다. 단순히 배경에 등장했거나 멀리서 본 것만으로는 첫 직접 조우가 아니다 — 직접 대화, 응대, 신체 접촉처럼 명확한 상호작용이 있어야 첫 직접 조우다. 유효한 JSON 객체 하나만 출력한다.
+
+[방금 생성된 서사]
+${(narrativeText || '').slice(-2000)}
+
+[플레이어 정보]
+${JSON.stringify(cleanForLlm(player))}
+
+[NPC 프로필]
+${JSON.stringify(cleanForLlm(npcProfile))}
+
+판정 규칙:
+- 첫 직접 조우가 맞으면 is_direct_first_encounter를 true로 하고, 플레이어의 외모·복장·직업·말투·현재 태도와 NPC의 성격·가치관·경계심·현재 상황을 근거로 호감도·신뢰도를 각각 0~35 사이 정수로 판단한다. 공식이나 랜덤 없이 종합 판단하고, 두 수치는 같을 필요가 없다.
+- 첫 직접 조우가 아니면 is_direct_first_encounter를 false로 하고 호감도·신뢰도는 null로 둔다.
+
+[요구 JSON 스키마]
+{"is_direct_first_encounter": true, "호감도": 0, "신뢰도": 0, "reason": "짧은 근거 한 문장"}`;
+}
+
+// Story/Extract is expected to fill first_encounter_stats on a genuine first
+// direct encounter (see [FIRST ENCOUNTER CONTRACT] above), but the LLM can
+// still omit it on a busy multi-field turn. Silently falling through to the
+// normal delta path in that case would leave the NPC's affinity/trust at
+// whatever they defaulted to, and the very next turn would then misclassify
+// this as a "legacy" prior encounter (hasLegacyEncounterEvidence) and
+// permanently lock in that wrong baseline — this is the one-shot safety net:
+// a targeted re-ask focused on just this judgment, never a fixed default
+// value applied uniformly to every NPC.
+async function repairMissingFirstEncounterStats(env, narrativeText, player, npcProfile) {
+  const prompt = buildFirstEncounterRepairPrompt(narrativeText, player, npcProfile);
+  const result = await requestDeepSeekJsonWithRetry(env, {
+    model: 'deepseek-v4-flash',
+    thinking: { type: 'disabled' },
+    messages: [{ role: 'system', content: prompt }],
+    response_format: { type: 'json_object' },
+    stream: false,
+    max_tokens: 200
+  }, { timeoutMs: 20000, maxAttempts: 1 });
+  if (result.parsed?.is_direct_first_encounter !== true) return null;
+  return normalizeFirstEncounterStats(result.parsed);
 }
 
 // Inserts a CSA-omission repair addition at the end of [1. 서사 및 행동],
@@ -3323,7 +3425,10 @@ export {
   buildWorldStatePatch,
   hasStructuredEncounter,
   hasLegacyEncounterEvidence,
+  hasMeaningfulNpcEmotion,
   normalizeFirstEncounterStats,
+  buildFirstEncounterRepairPrompt,
+  repairMissingFirstEncounterStats,
   normalizeLegacyActiveSuggestions,
   applySuggestionAction,
   buildActiveSuggestionSection,
@@ -3356,6 +3461,8 @@ export {
   findLocationIneligibleChoiceTargets,
   choiceSimilarity,
   findNearDuplicateChoices,
+  findOverlongChoices,
+  CHOICE_MAX_LENGTH,
   buildSafeFallbackChoices,
   validateFinalChoices,
   repairFinalChoices,

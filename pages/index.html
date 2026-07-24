@@ -239,23 +239,27 @@
       grid-template-columns: 1fr;
       gap: 8px;
       margin-bottom: 8px;
+      max-height: 42vh;
+      overflow-y: auto;
     }
     .choice-btn {
       background: var(--bg-tertiary);
       border: 1px solid var(--border);
       color: var(--text-primary);
-      height: 30px;
-      min-height: 30px;
-      padding: 4px 10px;
+      height: auto;
+      min-height: 38px;
+      padding: 8px 10px;
       border-radius: var(--radius);
       cursor: pointer;
       font-size: 0.95rem;
       transition: all 0.2s;
       text-align: left;
-      line-height: 20px;
-      white-space: nowrap;
-      overflow: hidden;
-      text-overflow: ellipsis;
+      line-height: 1.45;
+      white-space: normal;
+      overflow: visible;
+      text-overflow: clip;
+      word-break: keep-all;
+      overflow-wrap: anywhere;
     }
     .choice-btn:hover {
       border-color: var(--accent);
@@ -353,12 +357,24 @@
       .header { padding: 10px 12px; gap: 8px; flex-wrap: wrap; }
       .header-controls { margin-left: 0; width: 100%; }
       .tts-status { max-width: none; flex: 1 1 160px; }
-      .choice-buttons { grid-template-columns: 1fr; gap: 9px; }
-      .choice-btn { width: 100%; min-width: 0; height: 30px; min-height: 30px; padding: 4px 10px; line-height: 20px; text-align: left; }
+      .choice-buttons { grid-template-columns: 1fr; gap: 9px; max-height: 46vh; }
+      .choice-btn { width: 100%; min-width: 0; padding: 8px 10px; text-align: left; }
+    }
+    .version-info {
+      position: fixed;
+      right: 6px;
+      bottom: 2px;
+      font-size: 0.65rem;
+      color: var(--muted);
+      opacity: 0.55;
+      pointer-events: none;
+      z-index: 5;
+      user-select: none;
     }
   </style>
 </head>
 <body>
+  <div class="version-info" id="version-info"></div>
   <header class="header">
     <h1>🎮 게임빌더 v2</h1>
     <div class="meta">
@@ -430,6 +446,36 @@
       loadGameContext();
     } else {
       ui.showSystemMessage('게임 ID가 없습니다. URL에 ?game=GAME_ID를 추가하거나 /api/context로 게임을 로드하세요.');
+    }
+    // Fire-and-forget, independent of game load — a slow or failed version
+    // check must never block or break the actual game.
+    loadVersionInfo();
+
+    // Deploy-mismatch check: frontend/version.json is a static asset
+    // regenerated at each frontend deploy (scripts/deploy-frontend.mjs) with
+    // the exact commit SHA being deployed; /api/version reports the API
+    // Worker's own tag the same way (scripts/deploy-worker.mjs). Fetched
+    // once here at startup and cached in the DOM text — never re-fetched on
+    // every render.
+    async function loadVersionInfo() {
+      const el = document.getElementById('version-info');
+      if (!el) return;
+      let frontendSha = 'unknown';
+      try {
+        const res = await fetch('version.json', { cache: 'no-store' });
+        if (res.ok) {
+          const data = await res.json();
+          if (typeof data?.sha === 'string' && data.sha.trim()) frontendSha = data.sha.trim().slice(0, 12);
+        }
+      } catch { /* frontendSha stays 'unknown' */ }
+      let apiTag = 'unavailable';
+      try {
+        const version = await api.version();
+        // A null tag is never assumed to mean "latest" — shown as unknown
+        // instead of silently treating a null/missing tag as up to date.
+        apiTag = typeof version?.tag === 'string' && version.tag.trim() ? version.tag.trim() : 'unknown';
+      } catch { /* apiTag stays 'unavailable' — /api/version itself failed */ }
+      el.textContent = `frontend: ${frontendSha} · api: ${apiTag}`;
     }
 
     async function loadGameContext() {

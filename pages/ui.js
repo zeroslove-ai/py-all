@@ -206,7 +206,7 @@ const ui = {
   // this, nothing else. Used when the user must make a real choice (retry
   // vs. discard, or regenerate vs. discard) rather than acknowledge a single
   // retry (see showRetryNotice for that simpler case).
-  showPendingTurnActions(text, actions) {
+  showPendingTurnActions(text, actions, details = []) {
     this.clearPendingTurnActions();
     const div = document.createElement('div');
     div.className = 'pending-turn-action-notice';
@@ -227,6 +227,24 @@ const ui = {
       }, { once: true });
       div.appendChild(button);
     });
+    // Collapsed by default — general users never need the raw internal
+    // validation strings, but they stay available for anyone who wants them
+    // instead of being either always shown or fully hidden.
+    if (Array.isArray(details) && details.length) {
+      const detailsEl = document.createElement('details');
+      detailsEl.className = 'pending-turn-action-details';
+      const summary = document.createElement('summary');
+      summary.textContent = '개발자용 상세보기';
+      detailsEl.appendChild(summary);
+      const list = document.createElement('ul');
+      details.forEach(item => {
+        const li = document.createElement('li');
+        li.textContent = item;
+        list.appendChild(li);
+      });
+      detailsEl.appendChild(list);
+      div.appendChild(detailsEl);
+    }
     this.els.storyStream.appendChild(div);
     this.scrollToBottom();
   },
@@ -284,9 +302,14 @@ const ui = {
     this.els.choiceButtons.replaceChildren();
     this.els.characterImg.removeAttribute('src');
     this.els.characterImg.classList.add('hidden');
-    this.els.audioPlayer.pause();
-    this.els.audioPlayer.removeAttribute('src');
-    this.els.audioPlayer.classList.remove('active');
+    // audioPlayer can be null — sidebar.init() rebuilds .side-panel's
+    // innerHTML (which the static <audio id="audio-player"> lives inside)
+    // and re-runs ui.init() afterward, so this element is not guaranteed to
+    // exist by the time this runs. Never let that abort the rest of the
+    // view reset.
+    this.els.audioPlayer?.pause();
+    this.els.audioPlayer?.removeAttribute('src');
+    this.els.audioPlayer?.classList.remove('active');
   },
 
   // ─── 오디오 ───

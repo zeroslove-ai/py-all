@@ -78,6 +78,9 @@
 
     .story-stream .narrative { margin-bottom: 16px; }
     .story-stream .pending-turn-action-notice { margin-bottom: 16px; white-space: pre-wrap; word-break: keep-all; }
+    .pending-turn-action-details { margin-top: 8px; font-size: 0.85rem; color: var(--muted); }
+    .pending-turn-action-details summary { cursor: pointer; }
+    .pending-turn-action-details ul { margin: 6px 0 0; padding-left: 20px; }
     .story-stream .divider {
       border: none;
       border-top: 1px solid var(--border);
@@ -459,19 +462,53 @@
       }
     }
 
-    // Reset then immediately kick off the player_setup Story call in one
-    // flow, so the recommendation cards appear without the user typing
-    // anything — loadGameContext() alone never triggers Story requests.
+    // Reset then re-load the (now empty) server context — loadGameContext()
+    // already auto-starts player_setup on its own whenever it sees turn 0 +
+    // incomplete setup + no memories, which is exactly what a fresh reset
+    // always produces. Reusing that path (instead of calling
+    // startPlayerSetup() directly) is what makes this behave identically to
+    // a page refresh, which is the same recovery a user was previously
+    // forced into.
+    //
+    // Every step from api.reset() onward is wrapped so a DOM-layer failure
+    // (clearGameView() touches optional DOM some layouts don't have) can
+    // never silently swallow the rest of the reset — previously there was
+    // no try/catch here at all, so an exception thrown mid-reset aborted
+    // before startPlayerSetup() ever ran, and only a full page refresh
+    // (which never calls clearGameView()) recovered.
     async function resetAndStartNewGame() {
-      await api.reset(state.gameId);
-      ui.clearGameView();
+      try {
+        await api.reset(state.gameId);
+      } catch (error) {
+        const code = error.status || error.details?.error_code || 'UNKNOWN';
+        ui.showSystemMessage(`게임 초기화에 실패했습니다. [${code}]`);
+        return;
+      }
+
+      // Full local reset — mirrors a fresh page load's starting state so no
+      // flag/notice/pending state left over from before the reset can block
+      // or corrupt the new game's own startup.
+      state.startupRequested = false;
+      state.inputLocked = false;
+      state.isStreaming = false;
       state.turnCount = 0;
       state.context = null;
-      state.isStreaming = false;
-      // startPlayerSetup() owns the state.startupRequested guard itself, so
-      // a second click (or a race with the page-load auto-start) can't fire
-      // a duplicate Story request.
-      await startPlayerSetup();
+
+      try {
+        // Removes the previous game's narrative/dividers (and, nested
+        // inside them, any uncommitted badge), the pending-turn-action
+        // notice, and the choice buttons in one call.
+        ui.clearGameView();
+      } catch (error) {
+        console.error('clearGameView() failed during reset', error);
+      }
+      ui.showSystemMessage('게임을 초기화했습니다.\n새 게임을 준비하고 있습니다…');
+
+      // loadGameContext() owns the state.startupRequested guard (via
+      // startPlayerSetup()), so this can never fire a duplicate Story
+      // request even under a rapid double-click or a race with another
+      // in-flight load.
+      await loadGameContext();
     }
 
     // ─── Event Listeners ───
@@ -583,7 +620,16 @@
         const code = error.status || 'UNKNOWN';
         const suffix = error.requestId ? ` · 요청 ${error.requestId}` : '';
         if (pending.systemStart) {
-          ui.showRetryNotice(`새 게임을 시작하지 못했습니다. [${code}]${suffix}`, '새 게임 다시 시작', () => startPlayerSetup());
+          // Matches resetAndStartNewGame()'s auto-start path — offers a
+          // retry AND a plain page refresh (which takes the already-working
+          // loadGameContext() auto-start path) rather than a single button.
+          ui.showPendingTurnActions(
+            `게임 초기화는 완료됐지만 새 게임을 시작하지 못했습니다. [${code}]${suffix}`,
+            [
+              { label: '새 게임 시작 다시 시도', onClick: () => startPlayerSetup() },
+              { label: '페이지 새로고침', onClick: () => window.location.reload() }
+            ]
+          );
         } else {
           ui.showRetryNotice(`서사 생성에 실패했습니다. [${code}]${suffix}`, '다시 생성', () => retryStory(pending));
         }
@@ -633,7 +679,8 @@
             [
               { label: '같은 입력으로 서사 다시 생성', onClick: () => regenerateStoryAfterContractFailure(pending, validationErrors) },
               { label: '이번 서사 버리고 이전 턴으로 돌아가기', onClick: () => discardFailedTurn() }
-            ]
+            ],
+            validationErrors
           );
         } else {
           ui.showPendingTurnActions(

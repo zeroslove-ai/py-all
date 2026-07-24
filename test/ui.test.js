@@ -52,12 +52,12 @@ test('reset clears the view and starts only the player setup prologue', () => {
   assert.match(startSetup, /__START_PLAYER_SETUP__/);
 });
 
-test('resetAndStartNewGame resets state then immediately calls startPlayerSetup — no user input required to see recommendations', () => {
+test('resetAndStartNewGame resets state then immediately calls loadGameContext (which auto-starts player_setup on its own) — no user input or page refresh required to see recommendations', () => {
   const resetFn = pageSource.match(/async function resetAndStartNewGame\(\)[\s\S]*?\n    }/)?.[0] || '';
   assert.match(resetFn, /await api\.reset\(state\.gameId\)/);
   assert.match(resetFn, /ui\.clearGameView\(\)/);
   assert.match(resetFn, /state\.turnCount = 0/);
-  assert.match(resetFn, /await startPlayerSetup\(\)/);
+  assert.match(resetFn, /await loadGameContext\(\)/);
 });
 
 test('loadGameContext auto-starts player setup on a fresh/empty game (turn 0, incomplete setup, no memories) without requiring user input', () => {
@@ -73,10 +73,10 @@ test('startPlayerSetup guards against duplicate concurrent Story requests with a
   assert.match(startSetup, /state\.startupRequested/);
 });
 
-test('a failed auto-start (systemStart) shows a distinct "새 게임 다시 시작" retry button instead of demanding input', () => {
+test('a failed auto-start (systemStart) shows a distinct "새 게임 시작 다시 시도" retry action instead of demanding input', () => {
   const retryStoryFn = pageSource.match(/async function retryStory\(pending, extraFeedback = \[\]\)[\s\S]*?\n    }/)?.[0] || '';
   assert.match(retryStoryFn, /pending\.systemStart/);
-  assert.match(retryStoryFn, /새 게임 다시 시작/);
+  assert.match(retryStoryFn, /새 게임 시작 다시 시도/);
 });
 
 test('mind monitor preserves quoted monologues and separates observable reactions', () => {
@@ -131,7 +131,7 @@ test('an Extract failure locks the choice buttons and chat input, offers retry a
   assert.match(discardFn, /state\.inputLocked = false/);
   assert.match(discardFn, /ui\.setChatInputEnabled/);
 
-  assert.match(uiSource, /showPendingTurnActions\(text, actions\)/);
+  assert.match(uiSource, /showPendingTurnActions\(text, actions, details = \[\]\)/);
   assert.match(uiSource, /markLastNarrativeUncommitted\(\)/);
   assert.match(uiSource, /setChatInputEnabled\(enabled\)/);
   // setLoading(false) must not silently override the failure lock —
@@ -202,7 +202,7 @@ test('the frontend logs per-stage turn timing without exposing a permanent on-sc
 // ─────────────────────────────────────────────
 
 test('showPendingTurnActions/clearPendingTurnActions use a dedicated class, never .narrative, and disable both buttons the instant either is clicked', () => {
-  const showFn = uiSource.match(/showPendingTurnActions\(text, actions\)[\s\S]*?\n  },/)?.[0] || '';
+  const showFn = uiSource.match(/showPendingTurnActions\(text, actions, details = \[\]\)[\s\S]*?\n  },/)?.[0] || '';
   assert.match(showFn, /className = 'pending-turn-action-notice'/);
   assert.match(showFn, /this\.clearPendingTurnActions\(\)/);
   // Every button in the notice must be disabled when ANY one of them is
@@ -214,6 +214,25 @@ test('showPendingTurnActions/clearPendingTurnActions use a dedicated class, neve
   assert.match(clearFn, /querySelectorAll\('\.pending-turn-action-notice'\)/);
 
   assert.match(pageSource, /\.pending-turn-action-notice/);
+});
+
+test('showPendingTurnActions renders an optional collapsed <details> block for validation_errors, shown to no one by default and never forced open', () => {
+  const showFn = uiSource.match(/showPendingTurnActions\(text, actions, details = \[\]\)[\s\S]*?\n  },/)?.[0] || '';
+  assert.match(showFn, /if \(Array\.isArray\(details\) && details\.length\)/);
+  assert.match(showFn, /document\.createElement\('details'\)/);
+  assert.match(showFn, /document\.createElement\('summary'\)/);
+  // <details> is collapsed by default unless an "open" attribute is set —
+  // this must never set one, so it stays closed until the user clicks it.
+  assert.doesNotMatch(showFn, /detailsEl\.open/);
+  assert.doesNotMatch(showFn, /setAttribute\('open'/);
+
+  const retryExtractFn = pageSource.match(/async function retryExtract\(pending\)[\s\S]*?\n    }/)?.[0] || '';
+  const contractBranch = retryExtractFn.match(/if \(code === 'STORY_NPC_CONTRACT_FAILED'\) \{[\s\S]*?\n        \} else \{/)?.[0] || '';
+  // The Worker's validation_errors are passed through as the details
+  // argument — this is the one place they're allowed to reach the DOM, and
+  // only inside the collapsed details block, never interpolated into the
+  // always-visible notice text (already covered by a separate test).
+  assert.match(contractBranch, /,\s*\n\s*validationErrors\s*\n\s*\);/);
 });
 
 test('retryStory/retryExtract/retryCommit/regenerateStoryAfterContractFailure all clear the pending-turn notice as their first act, so a stale notice never survives a retry, regenerate, or successful commit', () => {
@@ -423,4 +442,79 @@ test('submitChoice forwards the full choice text into the same input path as fre
 
   const addUserMessageFn = uiSource.match(/addUserMessage\(text\)[\s\S]*?\n  \},/)?.[0] || '';
   assert.match(addUserMessageFn, /div\.textContent = `> \$\{text\}`/);
+});
+
+// ─────────────────────────────────────────────
+// Reset → auto-start recovery (6th stage) — root cause: resetAndStartNewGame()
+// had no try/catch, so ui.clearGameView() throwing (this.els.audioPlayer was
+// null because sidebar.init() rebuilds .side-panel's innerHTML — which the
+// static <audio id="audio-player"> lives inside — and re-runs ui.init()
+// afterward) silently aborted before startPlayerSetup() ever ran. A page
+// refresh "worked" only because loadGameContext() never calls
+// clearGameView() at all.
+// ─────────────────────────────────────────────
+
+test('ui.clearGameView() never throws when the audio player element is missing from the DOM', () => {
+  const clearGameViewFn = uiSource.match(/clearGameView\(\) \{[\s\S]*?\n  \},/)?.[0] || '';
+  assert.match(clearGameViewFn, /this\.els\.audioPlayer\?\.pause\(\)/);
+  assert.match(clearGameViewFn, /this\.els\.audioPlayer\?\.removeAttribute\('src'\)/);
+  assert.match(clearGameViewFn, /this\.els\.audioPlayer\?\.classList\.remove\('active'\)/);
+  assert.doesNotMatch(clearGameViewFn, /this\.els\.audioPlayer\.pause\(\)/);
+});
+
+test('resetAndStartNewGame wraps every step so an api.reset() failure, a clearGameView() DOM exception, or a startup failure can never leave the reset appearing to do nothing', () => {
+  const resetFn = pageSource.match(/async function resetAndStartNewGame\(\)[\s\S]*?\n    }/)?.[0] || '';
+
+  // api.reset() failure is caught and reported, not left to throw uncaught.
+  assert.match(resetFn, /try \{\s*\n\s*await api\.reset\(state\.gameId\);\s*\n\s*\} catch \(error\) \{/);
+  assert.match(resetFn, /게임 초기화에 실패했습니다/);
+
+  // Full local reset — mirrors a fresh page load, so nothing left over from
+  // before the reset (a stuck failed-turn lock, a startup-in-progress flag)
+  // can block or corrupt the new game's startup.
+  assert.match(resetFn, /state\.startupRequested = false/);
+  assert.match(resetFn, /state\.inputLocked = false/);
+  assert.match(resetFn, /state\.isStreaming = false/);
+  assert.match(resetFn, /state\.turnCount = 0/);
+  assert.match(resetFn, /state\.context = null/);
+
+  // clearGameView() is wrapped — a DOM-layer exception there must not abort
+  // the rest of the reset (this was the actual root cause of the reported
+  // "reset succeeds but nothing starts" bug).
+  assert.match(resetFn, /try \{\s*\n(?:\s*\/\/[^\n]*\n)*\s*ui\.clearGameView\(\);\s*\n\s*\} catch \(error\) \{/);
+
+  assert.match(resetFn, /게임을 초기화했습니다/);
+  assert.match(resetFn, /새 게임을 준비하고 있습니다/);
+
+  // Reuses loadGameContext()'s own turn===0/incomplete-setup/no-memories
+  // auto-start detection (the same path a page refresh already takes)
+  // instead of calling startPlayerSetup() directly — this is what makes the
+  // in-page reset behave identically to the refresh that used to be
+  // required.
+  assert.match(resetFn, /await loadGameContext\(\);/);
+  assert.doesNotMatch(resetFn, /await startPlayerSetup\(\);\s*\n\s*\}\s*$/);
+});
+
+test('a failed auto-start after reset offers both a retry and a plain page refresh, matching the "게임 초기화는 완료됐지만..." wording, not the old single-button notice', () => {
+  const retryStoryFn = pageSource.match(/async function retryStory\(pending, extraFeedback = \[\]\)[\s\S]*?\n    }/)?.[0] || '';
+  const systemStartBranch = retryStoryFn.match(/if \(pending\.systemStart\) \{[\s\S]*?\n        \} else \{/)?.[0] || '';
+  assert.match(systemStartBranch, /게임 초기화는 완료됐지만 새 게임을 시작하지 못했습니다/);
+  assert.match(systemStartBranch, /ui\.showPendingTurnActions\(/);
+  assert.match(systemStartBranch, /새 게임 시작 다시 시도/);
+  assert.match(systemStartBranch, /페이지 새로고침/);
+  assert.match(systemStartBranch, /window\.location\.reload\(\)/);
+  assert.doesNotMatch(systemStartBranch, /ui\.showRetryNotice/);
+});
+
+test('resetAndStartNewGame and the systemStart failure path never treat free-typed input or an unrelated button click as a "start the game" signal', () => {
+  const resetFn = pageSource.match(/async function resetAndStartNewGame\(\)[\s\S]*?\n    }/)?.[0] || '';
+  assert.doesNotMatch(resetFn, /아무 키나|press any key|any key/i);
+  assert.doesNotMatch(resetFn, /handleTurnInput/);
+
+  const startSetupFn = pageSource.match(/async function startPlayerSetup\(\)[\s\S]*?\n    }/)?.[0] || '';
+  // startPlayerSetup's own guard prevents a second concurrent call from
+  // firing a duplicate Story request (rapid double-click on the reset
+  // confirm button, or a race with the page-load auto-start).
+  assert.match(startSetupFn, /if \(!state\.gameId \|\| state\.isStreaming \|\| state\.startupRequested\) return;/);
+  assert.match(startSetupFn, /state\.startupRequested = true;/);
 });

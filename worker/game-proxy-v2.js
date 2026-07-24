@@ -1194,6 +1194,21 @@ function buildCurrentNpcProfileSection(save = {}, characters = {}) {
     if (typeof value === 'string' && value.trim()) lines.push(`${label}: ${value.trim()}`);
   };
   pushField('소속/직급', '소속');
+  // Public profile fields (item 1) — every one is optional; a field that
+  // isn't set on this character simply never appears here. None are ever
+  // filled with 0 or a placeholder default.
+  pushField('직종', 'profession');
+  pushField('부서', 'department');
+  pushField('직급', 'rank');
+  const careerYears = character.career_years;
+  if (careerYears !== undefined && careerYears !== null && careerYears !== '') lines.push(`총경력: ${careerYears}년`);
+  const rankYears = character.rank_years;
+  if (rankYears !== undefined && rankYears !== null && rankYears !== '') lines.push(`현 직급 경력: ${rankYears}년`);
+  pushField('근무지', 'work_location');
+  pushField('공식 호칭', 'formal_title');
+  pushField('동료 간 호칭', 'peer_address');
+  pushField('상급자 호칭', 'superior_address');
+  pushField('공개 역할', 'public_role_summary');
   pushField('성격', '성격');
   pushField('말투', '말투');
   pushField('연인관계', '연인관계');
@@ -1202,7 +1217,18 @@ function buildCurrentNpcProfileSection(save = {}, characters = {}) {
   pushField('관찰 가능 특징', '외형');
   pushField('체형', '체형');
 
-  return `\n\n[CURRENT NPC PROFILE — ESTABLISHED FACT]\n\n${lines.join('\n')}\n\n규칙:\n- 위 정보는 최근 기억·선택지·요약에 섞인 잘못된 이름, 나이, 직급, 말투보다 우선한다.\n- 소속이 간호사인데 근거 없이 실장·과장·수간호사 등으로 승격시키지 않는다.\n- 숨겨진설정과 취향은 행동 일관성에만 사용하고 NPC가 직접 고백하거나 플레이어가 아는 사실처럼 노출하지 않는다.\n- 플레이어가 잘못된 호칭을 사용하면 NPC 성격에 맞게 자연스럽게 정정하거나 호칭을 흘려넘길 수 있지만, 서술자와 선택지는 잘못된 직급을 확정 사실로 반복하지 않는다.`;
+  return `\n\n[CURRENT NPC PROFILE — ESTABLISHED FACT]\n\n${lines.join('\n')}\n\n규칙:\n- 위 정보는 최근 기억·선택지·요약에 섞인 잘못된 이름, 나이, 직급, 말투보다 우선한다.\n- 소속이 간호사인데 근거 없이 실장·과장·수간호사 등으로 승격시키지 않는다.\n- 직종·부서·직급이 위에 적혀 있으면 그 값을 그대로 유지한다. 근거 없이 다른 직종·부서·직급으로 바꾸거나 승격·강등시키지 않는다.\n- 숨겨진설정과 취향은 행동 일관성에만 사용하고 NPC가 직접 고백하거나 플레이어가 아는 사실처럼 노출하지 않는다.\n- 플레이어가 잘못된 호칭을 사용하면 NPC 성격에 맞게 자연스럽게 정정하거나 호칭을 흘려넘길 수 있지만, 서술자와 선택지는 잘못된 직급을 확정 사실로 반복하지 않는다.`;
+}
+
+// Injected every turn (unlike the periodic rulebook_address block, which
+// still only comes in via needsRulebook every ~10 turns and is kept
+// unchanged) — a short, always-present fallback so common hospital address
+// forms stay consistent even on turns the detailed rulebook isn't resent.
+// An NPC's own individual formal_title/peer_address/superior_address
+// (surfaced in [CURRENT NPC PROFILE — ESTABLISHED FACT] when set) always
+// takes priority over this general fallback — see the priority note below.
+function buildAddressAbbreviationSection() {
+  return `\n\n[호칭 규칙 — 요약]\n\n- 간호사끼리: 이름+쌤\n- 일반 간호사 → 수간호사: 수간호사님\n- 의료진 → 일반 의사: 선생님\n- 과장급 의사: 과장님 또는 교수님\n- 환자·보호자 → 간호사: 간호사님 또는 선생님\n- 저장된 직종·직급·부서를 임의 변경하지 않는다.\n\n우선순위: 1) [CURRENT NPC PROFILE]에 그 NPC의 공식 호칭/동료 간 호칭/상급자 호칭이 있으면 그것을 우선한다. 2) 없으면 위 병원 공통 규칙을 따른다. 3) 그래도 애매하면 자연스러운 존칭으로 판단한다. 모든 어색한 호칭까지 강제로 통일할 필요는 없다.`;
 }
 
 function buildNarrativeLengthSection() {
@@ -1366,7 +1392,7 @@ ${recentMemorySlice.map((m, index) => clipHeadTail(m.content || '', index === re
     ? `\n\n[REMINDER — CHOICE LENGTH]\n[3. 선택지]의 각 문장은 35~80자를 목표로 하고 120자를 넘기지 않는다. 화면 버튼에 그대로 표시되므로 지나치게 길게 쓰지 않는다.\n`
     : '';
   const eligibleNpcRosterSection = buildEligibleNpcRosterSection(save.world_state, master.characters || {});
-  const systemPrompt = coreRules + playerGate + modeSection + rulebookSection + eligibleNpcRosterSection + buildAppSystemRulesSection() + currentSceneSection + npcProfileSection + explicitMentionSection + csaSection + suggestionSection + narrativeLengthSection + npcDialogueSection + antiRepetitionSection + playerStatusPanel + contextSection + feedbackSection + continuitySection + finalFormatRules + openingFlow + playerSetupReminder + hypnosisCapabilitySection + registeredNpcChoiceReminder + choiceLengthReminder;
+  const systemPrompt = coreRules + playerGate + modeSection + rulebookSection + eligibleNpcRosterSection + buildAppSystemRulesSection() + currentSceneSection + npcProfileSection + explicitMentionSection + csaSection + suggestionSection + narrativeLengthSection + npcDialogueSection + antiRepetitionSection + playerStatusPanel + contextSection + feedbackSection + continuitySection + finalFormatRules + openingFlow + playerSetupReminder + hypnosisCapabilitySection + registeredNpcChoiceReminder + choiceLengthReminder + buildAddressAbbreviationSection();
 
   return {
     mode,
@@ -2705,6 +2731,89 @@ function findLocationIneligibleChoiceTargets(choices, namedTargets, worldState =
   return problems;
 }
 
+// Present-tense/current-state claims only — a past-tense or historical
+// mention (item 3's explicit "과거 근무 경력 언급" exclusion) is never an
+// error, no matter how it describes the NPC.
+const HISTORICAL_MENTION_MARKERS = /(했었|였다|이었다|였었|근무했|예전|과거|한때|이전에|전에는|왕년에|출신이|퇴사|그만두|전\s*직장|이직\s*전)/;
+
+function splitIntoSentences(text) {
+  return String(text || '').split(/(?<=[.!?])\s+|\n+/).map(s => s.trim()).filter(Boolean);
+}
+
+// A short adjacency window around the exact registered name — wide enough
+// to cover a subject particle plus the role word ("한소영은 의사",
+// "의사 한소영") but tight enough that a keyword appearing elsewhere in a
+// long sentence about someone/something else never counts.
+function hasRoleWordNearName(text, name, keyword) {
+  const nameIndex = text.indexOf(name);
+  if (nameIndex === -1) return false;
+  const windowStart = Math.max(0, nameIndex - 8);
+  const windowEnd = Math.min(text.length, nameIndex + name.length + 8);
+  return text.slice(windowStart, windowEnd).includes(keyword);
+}
+
+// Flags an explicit, present-tense narrative claim that contradicts a
+// registered NPC's *confirmed* stored profession/rank — never checked
+// unless that NPC actually has a profession/rank value on file, so an NPC
+// with no confirmed data is never judged against an invented assumption.
+// Deliberately narrow: only the 간호사/의사 profession swap and the
+// 수간호사/일반 간호사 rank swap, matching item 3's explicit scope.
+function findProfessionRankErrors(narrativeText, characters = {}) {
+  const problems = [];
+  if (!isPlainObject(characters)) return problems;
+  const mentions = detectExplicitRegisteredNpcMentions(narrativeText, characters);
+  if (!mentions.length) return problems;
+
+  const sentences = splitIntoSentences(narrativeText);
+  const seen = new Set();
+  const record = (characterId, name, kind, reason) => {
+    const key = `${characterId}:${kind}`;
+    if (seen.has(key)) return;
+    seen.add(key);
+    problems.push({ character_id: characterId, name, reason });
+  };
+
+  for (const mention of mentions) {
+    const character = characters[mention.character_id];
+    if (!isPlainObject(character)) continue;
+    const storedProfession = typeof character.profession === 'string' ? character.profession.trim() : '';
+    const storedRank = typeof character.rank === 'string' ? character.rank.trim() : '';
+    if (!storedProfession && !storedRank) continue;
+
+    const sentence = sentences.find(s => s.includes(mention.name));
+    if (!sentence || HISTORICAL_MENTION_MARKERS.test(sentence)) continue;
+
+    if (storedProfession === '간호사' && hasRoleWordNearName(sentence, mention.name, '의사') && !hasRoleWordNearName(sentence, mention.name, '간호사')) {
+      record(mention.character_id, mention.name, 'profession', `저장된 직종은 간호사인데 서사에서 의사로 서술함`);
+    } else if (storedProfession === '의사' && hasRoleWordNearName(sentence, mention.name, '간호사')) {
+      record(mention.character_id, mention.name, 'profession', `저장된 직종은 의사인데 서사에서 간호사로 서술함`);
+    }
+
+    if (storedRank === '수간호사' && (hasRoleWordNearName(sentence, mention.name, '일반 간호사') || hasRoleWordNearName(sentence, mention.name, '평간호사'))) {
+      record(mention.character_id, mention.name, 'rank', `저장된 직급은 수간호사인데 서사에서 일반 간호사로 강등 서술함`);
+    } else if (storedRank && storedRank !== '수간호사' && storedProfession === '간호사' && hasRoleWordNearName(sentence, mention.name, '수간호사')) {
+      record(mention.character_id, mention.name, 'rank', `저장된 직급은 ${storedRank}인데 서사에서 수간호사로 승격 서술함`);
+    }
+
+    // "신입" mislabeling — only checked when confirmed non-trivial
+    // experience exists; with no career_years/rank_years on file, this is
+    // simply never validated (never assumed either way).
+    const rankYears = Number(character.rank_years);
+    const careerYears = Number(character.career_years);
+    const hasConfirmedExperience = (Number.isFinite(rankYears) && rankYears > 0) || (Number.isFinite(careerYears) && careerYears > 0);
+    // Sentence-level (not the tight name-adjacency window used above) — a
+    // "신입" claim is almost always the sentence's own predicate ("이번에
+    // 들어온 신입이다"), with descriptive words between the name and the
+    // keyword, and "신입"/"이제 막 입사" aren't risky substrings of
+    // unrelated words the way "의사"/"간호사" can be.
+    if (hasConfirmedExperience && (sentence.includes('신입') || sentence.includes('이제 막 입사'))) {
+      record(mention.character_id, mention.name, 'newbie', `확인된 경력이 있는데 서사에서 신입으로 서술함`);
+    }
+  }
+
+  return problems;
+}
+
 function validateNarrativeNpcContract({ narrativeText, characters = {}, worldState = {}, playerName = '', playerJob = '' } = {}) {
   const errors = [];
 
@@ -2722,6 +2831,10 @@ function validateNarrativeNpcContract({ narrativeText, characters = {}, worldSta
 
   for (const speaker of findUnregisteredDialogueSpeakers(narrativeText, characters, playerName, playerJob)) {
     errors.push(`unregistered dialogue speaker "${speaker}"`);
+  }
+
+  for (const problem of findProfessionRankErrors(narrativeText, characters)) {
+    errors.push(`registered NPC "${problem.name}"(${problem.character_id}) profession/rank contract violation: ${problem.reason}`);
   }
 
   // An unregistered/location-ineligible *choice* target is deliberately not
@@ -3455,6 +3568,9 @@ export {
   insertNarrativeAdditionBeforeStatus,
   looksLikeKoreanFullName,
   validateNarrativeNpcContract,
+  findProfessionRankErrors,
+  hasRoleWordNearName,
+  buildAddressAbbreviationSection,
   findUnregisteredNamedIndividualsInNarrative,
   findUnregisteredDialogueSpeakers,
   deriveChoiceNamedTargets,

@@ -596,3 +596,31 @@ test('the version badge is a small, non-interactive, unobtrusive element that ne
   assert.match(cssRule, /pointer-events: none/);
   assert.match(cssRule, /font-size: 0\.65rem/);
 });
+
+// ─────────────────────────────────────────────
+// NPC public profile display (stage 3, item 5) — a missing field simply
+// hides its own line; nothing is ever filled with a placeholder or 0.
+// ─────────────────────────────────────────────
+
+test('renderCharacterInfo shows department/rank, career/rank-year experience, and formal/peer address only when their fields are actually present', () => {
+  const fn = sidebarSource.match(/renderCharacterInfo\(character = \{\}\) \{[\s\S]*?\n  \},/)?.[0] || '';
+  assert.notEqual(fn, '');
+  assert.match(fn, /character\.department, character\.rank/);
+  assert.match(fn, /character\.career_years/);
+  assert.match(fn, /character\.rank_years/);
+  assert.match(fn, /character\.formal_title, character\.peer_address/);
+  // The new department/rank fields take priority over the older combined
+  // 소속 text so the same fact is never shown twice.
+  assert.match(fn, /if \(deptRank\) \{[\s\S]*?\} else \{[\s\S]*?character\['소속'\]/);
+});
+
+test('renderCharacterInfo never renders a placeholder line for a missing public profile field — appendLine already no-ops on empty/falsy text', () => {
+  const appendLineFn = sidebarSource.match(/const appendLine = \(text, className = ''\) => \{[\s\S]*?\n\s*\};/)?.[0] || '';
+  assert.match(appendLineFn, /if \(!text\) return;/);
+  // The experience line is built by joining an array with ' · ' — an empty
+  // array joins to '', which appendLine's own !text guard then hides.
+  const fn = sidebarSource.match(/renderCharacterInfo\(character = \{\}\) \{[\s\S]*?\n  \},/)?.[0] || '';
+  assert.match(fn, /experienceParts\.join\(' · '\)/);
+  assert.doesNotMatch(fn, /career_years \|\| 0/);
+  assert.doesNotMatch(fn, /rank_years \|\| 0/);
+});

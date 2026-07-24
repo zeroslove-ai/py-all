@@ -103,8 +103,37 @@ const sidebar = {
       line.textContent = text;
       root.appendChild(line);
     };
-    const affiliation = character.affiliation || character.organization || character['소속'];
-    appendLine(affiliation, 'character-affiliation');
+    // Public profile fields — each line appears only when at least one of
+    // its fields is actually set on this character; nothing is filled with
+    // a placeholder or derived guess for a missing value. The new
+    // department/rank fields take priority over the older combined 소속
+    // text when both happen to be present, to avoid showing the same fact
+    // twice.
+    const deptRank = [character.department, character.rank]
+      .filter(value => typeof value === 'string' && value.trim())
+      .join(' ');
+    if (deptRank) {
+      appendLine(deptRank, 'character-affiliation');
+    } else {
+      const affiliation = character.affiliation || character.organization || character['소속'];
+      appendLine(affiliation, 'character-affiliation');
+    }
+
+    const experienceParts = [];
+    if (character.career_years !== undefined && character.career_years !== null && character.career_years !== '') {
+      experienceParts.push(`총경력 ${character.career_years}년`);
+    }
+    if (character.rank_years !== undefined && character.rank_years !== null && character.rank_years !== ''
+      && typeof character.rank === 'string' && character.rank.trim()) {
+      experienceParts.push(`${character.rank.trim()} ${character.rank_years}년차`);
+    }
+    appendLine(experienceParts.join(' · '));
+
+    const addressParts = [character.formal_title, character.peer_address]
+      .filter(value => typeof value === 'string' && value.trim())
+      .map(value => value.trim());
+    if (addressParts.length) appendLine(`공식 호칭: ${addressParts.join(' / ')}`);
+
     const age = this.withUnit(character.age || character['나이'], '세');
     const height = this.withUnit(character.height || character.height_cm || character['키'], 'cm');
     const weight = this.withUnit(character.weight || character.weight_kg || character['몸무게'], 'kg');

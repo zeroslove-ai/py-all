@@ -54,6 +54,9 @@ import {
   buildEligibleNpcRosterSection,
   computeEffectiveWorldState,
   validateNarrativeNpcContract,
+  findProfessionRankErrors,
+  hasRoleWordNearName,
+  buildAddressAbbreviationSection,
   findUnregisteredNamedIndividualsInNarrative,
   findUnregisteredDialogueSpeakers,
   deriveChoiceNamedTargets,
@@ -688,6 +691,106 @@ test('validateNarrativeNpcContract flags a registered NPC named in the narrative
   });
   assert.equal(result.ok, false);
   assert.match(result.errors.join('\n'), /김지은.*not eligible/);
+});
+
+// ─────────────────────────────────────────────
+// NPC public profile / profession-rank contract (stage 3) — only ever
+// checked against a *confirmed* stored profession/rank; an NPC with no such
+// field on file is never judged, matching the explicit "확인되지 않은
+// 정보로 임의 판단하지 말 것" constraint. Test fixtures below use synthetic
+// example data purely to exercise the validator — none of it is claimed to
+// be real heroine1-10 master data.
+// ─────────────────────────────────────────────
+
+test('hasRoleWordNearName only matches a keyword within a tight window of the exact name, not anywhere in a longer sentence', () => {
+  assert.equal(hasRoleWordNearName('김지은은 의사다.', '김지은', '의사'), true);
+  assert.equal(hasRoleWordNearName('의사 김지은이 다가온다.', '김지은', '의사'), true);
+  assert.equal(hasRoleWordNearName('김지은은 오늘 아침 회진을 마친 뒤 다른 병동의 의사와 잠시 이야기를 나눴다.', '김지은', '의사'), false);
+  assert.equal(hasRoleWordNearName('박소현이 다가온다.', '김지은', '의사'), false);
+});
+
+test('findProfessionRankErrors flags a confirmed nurse described as a doctor, and a confirmed doctor described as a nurse', () => {
+  const characters = {
+    heroineA: { name: '김지은', profession: '간호사' },
+    heroineB: { name: '서지아', profession: '의사' }
+  };
+  const nurseAsDoctor = findProfessionRankErrors('김지은은 의사다. 오늘도 바쁜 하루였다.', characters);
+  assert.equal(nurseAsDoctor.length, 1);
+  assert.equal(nurseAsDoctor[0].character_id, 'heroineA');
+  assert.match(nurseAsDoctor[0].reason, /간호사인데.*의사로 서술/);
+
+  const doctorAsNurse = findProfessionRankErrors('서지아 간호사가 차트를 확인한다.', characters);
+  assert.equal(doctorAsNurse.length, 1);
+  assert.equal(doctorAsNurse[0].character_id, 'heroineB');
+  assert.match(doctorAsNurse[0].reason, /의사인데.*간호사로 서술/);
+});
+
+test('findProfessionRankErrors flags an arbitrary promotion or demotion of a confirmed nursing rank', () => {
+  const headNurse = { heroineA: { name: '김지은', profession: '간호사', rank: '수간호사' } };
+  const demoted = findProfessionRankErrors('김지은은 일반 간호사다.', headNurse);
+  assert.equal(demoted.length, 1);
+  assert.match(demoted[0].reason, /수간호사인데.*일반 간호사로 강등/);
+
+  const regularNurse = { heroineB: { name: '박소현', profession: '간호사', rank: '일반 간호사' } };
+  const promoted = findProfessionRankErrors('박소현 수간호사가 지시를 내렸다.', regularNurse);
+  assert.equal(promoted.length, 1);
+  assert.match(promoted[0].reason, /일반 간호사인데.*수간호사로 승격/);
+});
+
+test('findProfessionRankErrors never flags a past-tense/historical mention of a different role', () => {
+  const characters = { heroineA: { name: '김지은', profession: '간호사', rank: '수간호사' } };
+  assert.deepEqual(findProfessionRankErrors('김지은은 예전에 일반 간호사였다.', characters), []);
+  assert.deepEqual(findProfessionRankErrors('김지은은 간호사로 일하기 전에는 다른 직장에 다녔다.', characters), []);
+  assert.deepEqual(findProfessionRankErrors('김지은은 과거 6병동에서 근무했었다.', characters), []);
+});
+
+test('findProfessionRankErrors never flags a bare/brief name mention with no nearby role claim', () => {
+  const characters = { heroineA: { name: '김지은', profession: '간호사', rank: '수간호사' } };
+  assert.deepEqual(findProfessionRankErrors('김지은이 복도를 지나갔다.', characters), []);
+  assert.deepEqual(findProfessionRankErrors('멀리서 김지은의 목소리가 들렸다.', characters), []);
+});
+
+test('findProfessionRankErrors never checks an NPC with no confirmed profession/rank on file, no matter what the narrative claims', () => {
+  const characters = { heroineA: { name: '김지은' } };
+  assert.deepEqual(findProfessionRankErrors('김지은은 의사다. 김지은은 수간호사다.', characters), []);
+});
+
+test('findProfessionRankErrors flags a confirmed non-新 nurse described as a newcomer, but only when experience is actually on file', () => {
+  const withExperience = { heroineA: { name: '김지은', profession: '간호사', rank_years: 5 } };
+  const flagged = findProfessionRankErrors('김지은은 이번에 들어온 신입이다.', withExperience);
+  assert.equal(flagged.length, 1);
+  assert.match(flagged[0].reason, /신입으로 서술/);
+
+  const noExperienceData = { heroineB: { name: '박소현', profession: '간호사' } };
+  assert.deepEqual(findProfessionRankErrors('박소현은 이번에 들어온 신입이다.', noExperienceData), []);
+});
+
+test('validateNarrativeNpcContract folds findProfessionRankErrors into its own error list', () => {
+  const characters = { heroine1: { name: '한소영', profession: '간호사', rank: '수간호사' } };
+  const result = validateNarrativeNpcContract({
+    narrativeText: '한소영은 일반 간호사다.', characters, worldState: {}, playerName: ''
+  });
+  assert.equal(result.ok, false);
+  assert.match(result.errors.join('\n'), /profession\/rank contract violation/);
+});
+
+test('buildAddressAbbreviationSection states the abbreviated hospital-wide address rules and the priority order over them', () => {
+  const section = buildAddressAbbreviationSection();
+  assert.match(section, /이름\+쌤/);
+  assert.match(section, /수간호사님/);
+  assert.match(section, /과장님 또는 교수님/);
+  assert.match(section, /저장된 직종·직급·부서를 임의 변경하지 않는다/);
+  // NPC-individual address (surfaced via [CURRENT NPC PROFILE]) is stated
+  // to take priority over this general fallback.
+  assert.match(section, /CURRENT NPC PROFILE.*우선/);
+});
+
+test('the abbreviated address section is injected into every Story turn, not gated to normal/opening mode like the choice-length/registered-NPC reminders', () => {
+  const reentry = buildStoryPrompt({ master: { characters: {} }, save: { player_setup: { status: 'complete' }, player: { name: 'a', job: 'b' }, opening_started: true }, recent_memories: [] }, '', 3);
+  assert.match(reentry.messages.map(m => m.content).join('\n'), /호칭 규칙 — 요약/);
+
+  const setup = buildStoryPrompt({ master: {}, save: { player: {} }, recent_memories: [] }, 'start', 0);
+  assert.match(setup.messages.map(m => m.content).join('\n'), /호칭 규칙 — 요약/);
 });
 
 test('findUnregisteredDialogueSpeakers detects an unregistered "박미영 (연기지시): "대사"" line but not a registered speaker or the player', () => {
@@ -3066,6 +3169,48 @@ test('buildCurrentNpcProfileSection states that it overrides misremembered names
   const section = buildCurrentNpcProfileSection({ last_character_id: 'heroine9' }, NPC_PROFILE_CHARACTERS);
   assert.match(section, /최근 기억·선택지·요약에 섞인 잘못된 이름, 나이, 직급, 말투보다 우선한다/);
   assert.match(section, /근거 없이 실장·과장·수간호사 등으로 승격시키지 않는다/);
+});
+
+test('buildCurrentNpcProfileSection includes every set public profile field (item 1), each only when present, never filled with 0/placeholder', () => {
+  const fullyPopulated = {
+    heroine1: {
+      name: '테스트NPC', profession: '간호사', department: '6병동', rank: '수간호사',
+      career_years: 15, rank_years: 5, work_location: '서울중앙병원 6병동',
+      formal_title: '김지은 수간호사', peer_address: '지은쌤', superior_address: '수간호사님',
+      public_role_summary: '6병동 간호 인력 총괄'
+    }
+  };
+  const section = buildCurrentNpcProfileSection({ last_character_id: 'heroine1' }, fullyPopulated);
+  assert.match(section, /직종: 간호사/);
+  assert.match(section, /부서: 6병동/);
+  assert.match(section, /직급: 수간호사/);
+  assert.match(section, /총경력: 15년/);
+  assert.match(section, /현 직급 경력: 5년/);
+  assert.match(section, /근무지: 서울중앙병원 6병동/);
+  assert.match(section, /공식 호칭: 김지은 수간호사/);
+  assert.match(section, /동료 간 호칭: 지은쌤/);
+  assert.match(section, /상급자 호칭: 수간호사님/);
+  assert.match(section, /공개 역할: 6병동 간호 인력 총괄/);
+
+  // Sparsely populated: only the set fields appear, nothing invented for
+  // the missing ones (no "0", no empty "직급: " line, etc).
+  const sparse = { heroine1: { name: '테스트NPC', profession: '간호사' } };
+  const sparseSection = buildCurrentNpcProfileSection({ last_character_id: 'heroine1' }, sparse);
+  assert.match(sparseSection, /직종: 간호사/);
+  assert.doesNotMatch(sparseSection, /부서:/);
+  assert.doesNotMatch(sparseSection, /직급:/);
+  assert.doesNotMatch(sparseSection, /총경력:/);
+  assert.doesNotMatch(sparseSection, /현 직급 경력:/);
+  assert.doesNotMatch(sparseSection, /근무지:/);
+  assert.doesNotMatch(sparseSection, /공식 호칭:/);
+  assert.doesNotMatch(sparseSection, /동료 간 호칭:/);
+  assert.doesNotMatch(sparseSection, /상급자 호칭:/);
+  assert.doesNotMatch(sparseSection, /공개 역할:/);
+});
+
+test('buildCurrentNpcProfileSection instructs Story not to change a stored profession/department/rank without basis', () => {
+  const section = buildCurrentNpcProfileSection({ last_character_id: 'heroine9' }, NPC_PROFILE_CHARACTERS);
+  assert.match(section, /직종·부서·직급이 위에 적혀 있으면 그 값을 그대로 유지한다/);
 });
 
 test('CURRENT NPC PROFILE sits right after CURRENT SCENE and before EXPLICIT REGISTERED NPC MENTIONS', () => {

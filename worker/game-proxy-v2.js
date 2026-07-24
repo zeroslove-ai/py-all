@@ -1261,60 +1261,129 @@ function isIntegerInRange(value, [min, max]) {
   return Number.isFinite(n) && n === Math.round(n) && n >= min && n <= max ? n : null;
 }
 
-// Every field here maps directly onto game_save.player (or, for
-// speech_style/personality, onto player_setup.selected_profile) with no DB
-// migration — so anything missing here is something the confirmed opening
-// prompt or the save patch would otherwise have to silently fake.
-function normalizeRecommendationCandidate(value, fallbackId) {
+// H3-A item 2: deterministically recovers name/job from a "이름 · 직업"-style
+// choice label (or the model-generated [3. 선택지] line itself) when the
+// structured value.name/value.job fields are missing — no LLM call.
+function parseSetupChoiceLabel(value = '') {
+  const text = stripBoldMarkers(String(value || ''))
+    .replace(/^\s*(?:[①②③④]|[1-4][.)])\s*/, '')
+    .trim();
+
+  if (!text) return null;
+
+  const parts = text
+    .split(/\s*[·|｜]\s*|\s+[-—]\s+/)
+    .map(part => part.trim())
+    .filter(Boolean);
+
+  if (parts.length < 2) return null;
+
+  return {
+    name: parts[0],
+    job: parts.slice(1).join(' · '),
+    choice_label: text
+  };
+}
+
+// H3-A item 1/2: only name/job/adult-age/male-if-stated are required to keep
+// a candidate at all — every other field (body measurements, style,
+// speech_style, personality, background, starting_location, short_feature,
+// major, rank) is optional and simply omitted from the candidate object when
+// missing or out of range, never zero/empty-string-defaulted and never a
+// reason to discard the whole candidate. id/slot are always the structural
+// array-position values, never trusted from the model.
+function normalizeRecommendationCandidate(value, index, narrativeChoice = '') {
   if (!isPlainObject(value)) return null;
-  const id = typeof value.id === 'string' && value.id.trim() ? value.id.trim() : fallbackId;
-  const slot = SETUP_ROLE_SLOTS.includes(value.slot) ? value.slot : null;
-  const age = Number(value.age);
-  if (!slot || !Number.isFinite(age) || age < MIN_ADULT_AGE || age > MAX_ADULT_AGE) return null;
-  if (typeof value.gender !== 'string' || value.gender.trim() !== '남성') return null;
 
-  const name = typeof value.name === 'string' ? value.name.trim() : '';
-  const job = typeof value.job === 'string' ? value.job.trim() : '';
-  const style = typeof value.style === 'string' ? value.style.trim() : '';
-  const speechStyle = typeof value.speech_style === 'string' ? value.speech_style.trim() : '';
-  const personality = typeof value.personality === 'string' ? value.personality.trim() : '';
-  const background = typeof value.background === 'string' ? value.background.trim() : '';
-  const startingLocation = typeof value.starting_location === 'string' ? value.starting_location.trim() : '';
-  const shortFeature = typeof value.short_feature === 'string' ? value.short_feature.trim() : '';
-  const choiceLabel = typeof value.choice_label === 'string' ? value.choice_label.trim() : '';
-  if (!name || !job || !style || !speechStyle || !personality || !background || !startingLocation || !shortFeature || !choiceLabel) return null;
+  const parsed = parseSetupChoiceLabel(value.choice_label) || parseSetupChoiceLabel(narrativeChoice) || {};
 
-  // Empty, zero, or wildly unrealistic body values reject the candidate —
-  // never silently defaulted, since these feed game_save.player directly.
-  const heightCm = isIntegerInRange(value.height_cm, PLAYER_HEIGHT_RANGE_CM);
-  const weightKg = isIntegerInRange(value.weight_kg, PLAYER_WEIGHT_RANGE_KG);
-  const penisLengthCm = isIntegerInRange(value.penis_length_cm, PLAYER_PENIS_LENGTH_RANGE_CM);
-  if (heightCm === null || weightKg === null || penisLengthCm === null) return null;
+  const name = typeof value.name === 'string' && value.name.trim() ? value.name.trim() : (parsed.name || '');
+  const job = typeof value.job === 'string' && value.job.trim() ? value.job.trim() : (parsed.job || '');
+  if (!name || !job) return null;
+
+  const explicitGender = typeof value.gender === 'string' ? value.gender.trim() : '';
+  if (explicitGender && explicitGender !== '남성') return null;
+
+  const ageNumber = Number(value.age);
+  if (Number.isFinite(ageNumber) && ageNumber < MIN_ADULT_AGE) return null;
 
   const candidate = {
-    id, slot, name, age: Math.round(age), gender: '남성', job,
-    height_cm: heightCm, weight_kg: weightKg, penis_length_cm: penisLengthCm,
-    style, speech_style: speechStyle, personality, background,
-    starting_location: startingLocation, short_feature: shortFeature, choice_label: choiceLabel
+    id: `preset_${index + 1}`,
+    slot: SETUP_ROLE_SLOTS[index],
+    name,
+    gender: '남성',
+    job,
+    choice_label: parsed.choice_label || (typeof value.choice_label === 'string' && value.choice_label.trim()) || `${name} · ${job}`
   };
-  for (const key of ['major', 'rank']) {
+
+  // age: in-range keeps it, missing omits it, out-of-range (>MAX) or
+  // non-numeric also just omits it — only an explicit under-19 age rejects
+  // the whole candidate (checked above).
+  if (Number.isFinite(ageNumber) && ageNumber >= MIN_ADULT_AGE && ageNumber <= MAX_ADULT_AGE) {
+    candidate.age = Math.round(ageNumber);
+  }
+
+  const heightCm = isIntegerInRange(value.height_cm, PLAYER_HEIGHT_RANGE_CM);
+  if (heightCm !== null) candidate.height_cm = heightCm;
+  const weightKg = isIntegerInRange(value.weight_kg, PLAYER_WEIGHT_RANGE_KG);
+  if (weightKg !== null) candidate.weight_kg = weightKg;
+  const penisLengthCm = isIntegerInRange(value.penis_length_cm, PLAYER_PENIS_LENGTH_RANGE_CM);
+  if (penisLengthCm !== null) candidate.penis_length_cm = penisLengthCm;
+
+  for (const key of ['style', 'speech_style', 'personality', 'background', 'starting_location', 'short_feature', 'major', 'rank']) {
     if (typeof value[key] === 'string' && value[key].trim()) candidate[key] = value[key].trim();
   }
+
   return candidate;
 }
 
-// A partial or malformed set is rejected wholesale (null) rather than saved
-// half-broken — the caller then treats setup as "not recommended yet".
-function normalizeRecommendations(list) {
+// H3-A item 3/4: a single candidate's missing optional fields (or even a
+// single candidate's outright rejection for a real reason) never discards
+// the other valid candidates — but the caller still needs exactly 4 to
+// proceed (player_setup.recommendations always has 4 structural slots), so
+// this still returns null when fewer than 4 come out valid. No LLM re-call
+// happens here; the next turn's own Story/Extract cycle would regenerate.
+function normalizeRecommendations(list, narrativeChoices = []) {
   if (!Array.isArray(list)) return null;
-  const normalized = list
-    .map((item, index) => normalizeRecommendationCandidate(item, `preset_${index + 1}`))
-    .filter(Boolean);
-  if (normalized.length !== 4) return null;
-  if (new Set(normalized.map(c => c.id)).size !== 4) return null;
-  if (new Set(normalized.map(c => c.choice_label)).size !== 4) return null;
-  if (!normalized.some(c => c.slot === 'hospital_worker')) return null;
-  if (!normalized.some(c => c.slot === 'patient')) return null;
+  const items = list.slice(0, 4);
+  const choices = Array.isArray(narrativeChoices) ? narrativeChoices.slice(0, 4) : [];
+
+  const results = items.map((item, index) => normalizeRecommendationCandidate(item, index, choices[index] || ''));
+  const normalized = results.filter(Boolean);
+
+  if (normalized.length !== 4) {
+    console.warn('player_recommendations: fewer than 4 valid candidates', {
+      total: items.length,
+      valid: normalized.length,
+      failedIndexes: results.map((r, i) => (r ? null : i)).filter(i => i !== null)
+    });
+    return null;
+  }
+
+  // H3-A item 4: a duplicate choice_label is disambiguated, never a reason
+  // to discard the set — id (always preset_1..4 by array position) stays
+  // usable for selection regardless.
+  const seenLabels = new Map();
+  for (const candidate of normalized) {
+    const count = seenLabels.get(candidate.choice_label) || 0;
+    seenLabels.set(candidate.choice_label, count + 1);
+  }
+  const labelOccurrence = new Map();
+  for (const candidate of normalized) {
+    const total = seenLabels.get(candidate.choice_label);
+    if (total <= 1) continue;
+    const seenSoFar = (labelOccurrence.get(candidate.choice_label) || 0) + 1;
+    labelOccurrence.set(candidate.choice_label, seenSoFar);
+    if (seenSoFar === 1) continue; // first occurrence keeps the original label
+    const roleLabel = SETUP_ROLE_LABELS[candidate.slot] || candidate.slot;
+    let disambiguated = `${candidate.name} · ${candidate.job} · ${roleLabel}`;
+    if (normalized.some(c => c !== candidate && c.choice_label === disambiguated)) {
+      const index = normalized.indexOf(candidate);
+      disambiguated = `${disambiguated} · ${index + 1}`;
+    }
+    candidate.choice_label = disambiguated;
+  }
+
   return normalized;
 }
 
@@ -1357,37 +1426,61 @@ function resolveConfirmedPlayerProfile(save, selection) {
   return isPlainObject(save?.player) ? save.player : {};
 }
 
+// H3-A item 5: only lines with a real value are emitted — never
+// "undefined"/blank placeholders — since a candidate's optional fields may
+// now legitimately be absent.
 function buildConfirmedPlayerSetupSection(profile = {}) {
-  const lines = [
-    `이름: ${profile.name || ''}`,
-    `나이: ${profile.age ?? ''}`,
-    `성별: ${profile.gender || ''}`,
-    `직업: ${profile.job || ''}`,
-    `전공/직급: ${[profile.major, profile.rank].filter(Boolean).join(' / ')}`,
-    `키: ${profile.height_cm ?? ''}cm`,
-    `몸무게: ${profile.weight_kg ?? ''}kg`,
-    `성기 크기: ${profile.penis_length_cm ?? ''}cm`,
-    `외형: ${profile.style || ''}`,
-    `성격: ${profile.personality || ''}`,
-    `말투: ${profile.speech_style || ''}`,
-    `배경: ${profile.background || ''}`,
-    `시작 장소: ${profile.starting_location || profile.location || ''}`,
-    `특징: ${profile.short_feature || profile.play_hook || ''}`
-  ];
-  return `\n\n[CONFIRMED PLAYER SETUP — ESTABLISHED FACT]\n\n${lines.join('\n')}\n\n규칙:\n- 이 설정을 다시 추천하거나 질문하지 않는다.\n- 이름·나이·직업·키·몸무게·성기 크기·외형·성격·말투 등 위 값을 임의로 바꾸거나 누락하지 않는다.\n- 선택한 캐릭터로 병원 오프닝을 즉시 시작한다.`;
+  const lines = [`이름: ${profile.name || ''}`];
+  if (Number.isFinite(profile.age)) lines.push(`나이: ${profile.age}`);
+  lines.push(`성별: ${profile.gender || '남성'}`);
+  lines.push(`직업: ${profile.job || ''}`);
+  const rankPart = [profile.major, profile.rank].filter(Boolean).join(' / ');
+  if (rankPart) lines.push(`전공/직급: ${rankPart}`);
+  if (Number.isFinite(profile.height_cm)) lines.push(`키: ${profile.height_cm}cm`);
+  if (Number.isFinite(profile.weight_kg)) lines.push(`몸무게: ${profile.weight_kg}kg`);
+  if (Number.isFinite(profile.penis_length_cm)) lines.push(`성기 크기: ${profile.penis_length_cm}cm`);
+  if (profile.style) lines.push(`외형: ${profile.style}`);
+  if (profile.personality) lines.push(`성격: ${profile.personality}`);
+  if (profile.speech_style) lines.push(`말투: ${profile.speech_style}`);
+  if (profile.background) lines.push(`배경: ${profile.background}`);
+  const location = profile.starting_location || profile.location;
+  if (location) lines.push(`시작 장소: ${location}`);
+  const feature = profile.short_feature || profile.play_hook;
+  if (feature) lines.push(`특징: ${feature}`);
+  return `\n\n[CONFIRMED PLAYER SETUP — ESTABLISHED FACT]\n\n${lines.join('\n')}\n\n규칙:\n- 이 설정을 다시 추천하거나 질문하지 않는다.\n- 위에 표시된 값만 확정 사실이며, 없는 값을 임의로 새로 만들지 않는다.\n- 표시된 값을 임의로 바꾸지 않는다.\n- 선택한 캐릭터로 병원 오프닝을 즉시 시작한다.`;
 }
 
 function buildPlayerSetupGenerationSection() {
   return `\n\n[PLAYER SETUP PHASE — GENERATE 4 CANDIDATES — HIGHEST PRIORITY, NO QUESTIONS]\n사용자에게 "어떤 캐릭터를 원하시나요?", "어떤 세계에서 시작하고 싶나요?" 같은 열린 질문을 절대 하지 않는다. 사용자의 대답을 기다리지 말고, 지금 이 응답 안에서 아래 4개 후보를 전부 직접 만들어서 완성된 형태로 즉시 보여준다. "대기", "대기 중", "곧 결정됩니다", "캐릭터 생성 단계"처럼 후보 생성을 다음 턴으로 미루거나 진행 중이라고 암시하는 표현을 본문 어디에도 쓰지 않는다. [3. 선택지]를 비워두거나 다른 용도로 쓰지 않는다 — 반드시 아래 4번(플레이어 후보 4개의 짧은 선택지)으로 채운다. [3. 선택지]에 등록 NPC 이름이나 NPC를 고르는 선택지를 넣지 않는다 — 이건 플레이어 자신의 캐릭터를 고르는 단계이지 NPC를 고르는 단계가 아니다.\n1. 삭제되지 않는 최면 어플 발견과 핵심 기능을 2~3문장으로 짧게 알린다.\n2. 병원 장면이나 등록 NPC는 아직 등장시키지 않는다.\n3. 바로 이어서, 플레이어 캐릭터 후보 4개를 전부 확정해서 만든다(질문으로 대체하지 않는다). 네 후보 모두 성인 남성이다. 역할 슬롯은 고정한다:\n   1번(hospital_worker): 병원에서 근무하는 성인 남성 — 의사, 인턴, 간호사, 임상병리사, 방사선사, 물리치료사, 병원 행정직, 보안요원 등\n   2번(patient): 현재 입원 중이거나 외래 진료를 받는 성인 남성 환자. 질병·부상은 정상적인 플레이를 막지 않는 수준이어야 하며, 의식불명이나 심각한 인지장애 등 플레이가 어려운 설정은 금지한다.\n   3번(hospital_adjacent): 병원과 연결된 성인 남성 외부인 — 보호자, 면회객, 납품업자, 보험조사원, 기자, 실습생, 병원 재단 관계자 등\n   4번(wildcard): 앞의 세 역할과 플레이 방식이 겹치지 않으면서 병원 세계관에서 자연스럽게 시작할 수 있는 성인 남성\n4. 이름·나이·직업 세부 설정은 매번 새롭고 다양하게 만들되, 네 후보는 신분과 병원 접근 권한, NPC에게 접근하는 방식, 초반 난이도, 최면 어플을 쓸 동기, 시작 장소가 서로 확실히 달라야 한다.\n5. 모든 후보는 성인(만 19세 이상)이며 성별은 남성으로 고정한다.\n6. 네 후보 각각에 키(cm)·몸무게(kg)·성기 크기(cm)를 현실적인 성인 범위 안에서 반드시 정하고, 외형(style)·성격(personality)·말투(speech_style)도 각 후보가 서로 다르게 만든다.\n7. 네 후보 각각을 다음 카드 형식으로 짧고 정보 중심으로 출력한다 — 배경은 최대 2문장, 플레이 특징은 한 문장으로 압축한다(병원 접근 권한·초반 난이도·어플 활용 동기를 그 한 문장 안에 녹인다). 마크다운 굵게 **는 새로 쓰지 않는다:\n[후보 N · 역할 한글명]\n이름 · 나이 · 남성\n직업: 직업 / 전공·직급(있으면)\n신체: 키cm / 몸무게kg / 성기 크기cm\n외형: style\n성격·말투: personality / speech_style\n배경: 최대 2문장\n특징: 한 문장\n8. [선택지]에는 정확히 네 개, 각 후보를 "이름 · 직업" 형태로만 짧게 적는다(공백 포함 24자 이하 목표). 시작 장소·접근 방식·어플 활용 계획·배경 설명 등 긴 문장을 넣지 않는다. 번호나 마커 없이 "이름 · 직업" 문구 자체만 적는다. 카테고리를 묻는 질문형 선택지나 NPC 선택지를 만들지 않는다.\n9. 항목별로 하나씩 질문하지 않는다. 사용자가 특정 조건을 말하면 다음 응답에서 네 후보 전체를 그 조건에 맞게 다시 만든다.\n\n[출력 형태 예시 — 실제 이름·설정은 매번 새로 만들 것, 이 예시를 그대로 베끼지 말 것]\n[1. 서사 및 행동]\n(어플 발견 2~3문장)\n\n[후보 1 · 병원 직원]\n(이름) · (나이) · 남성\n직업: (직업)\n신체: (키)cm / (몸무게)kg / (성기 크기)cm\n외형: (style)\n성격·말투: (personality) / (speech_style)\n배경: (최대 2문장)\n특징: (한 문장)\n\n[후보 2 · 환자] ... (후보 3, 4도 동일한 형식으로 이어짐)\n\n[2. 플레이어 상황판]\n(간단한 상태 표시, "대기" 표현 없이)\n\n[3. 선택지]\n(후보1 이름) · (후보1 직업)\n(후보2 이름) · (후보2 직업)\n(후보3 이름) · (후보3 직업)\n(후보4 이름) · (후보4 직업)`;
 }
 
+// H3-A item 5: same no-placeholder rule as buildConfirmedPlayerSetupSection
+// — a card only ever shows fields that actually have a value.
 function buildPlayerSetupRedisplaySection(recommendations) {
   const cards = recommendations.map((rec, index) => {
     const label = SETUP_ROLE_LABELS[rec.slot] || rec.slot;
     const rankPart = [rec.major, rec.rank].filter(Boolean).join(' / ');
-    return `[후보 ${index + 1} · ${label}]\nID: ${rec.id}\n이름: ${rec.name} · 나이: ${rec.age} · 남성\n직업: ${rec.job}${rankPart ? ` (${rankPart})` : ''}\n신체: ${rec.height_cm}cm / ${rec.weight_kg}kg / ${rec.penis_length_cm}cm\n외형: ${rec.style}\n성격·말투: ${rec.personality} / ${rec.speech_style}\n배경: ${rec.background}\n특징: ${rec.short_feature}\n선택지 문구: ${rec.choice_label}`;
+    const ageLine = Number.isFinite(rec.age) ? ` · 나이: ${rec.age}` : '';
+    const lines = [
+      `[후보 ${index + 1} · ${label}]`,
+      `ID: ${rec.id}`,
+      `이름: ${rec.name}${ageLine} · 남성`,
+      `직업: ${rec.job}${rankPart ? ` (${rankPart})` : ''}`
+    ];
+    const bodyParts = [];
+    if (Number.isFinite(rec.height_cm)) bodyParts.push(`키 ${rec.height_cm}cm`);
+    if (Number.isFinite(rec.weight_kg)) bodyParts.push(`몸무게 ${rec.weight_kg}kg`);
+    if (Number.isFinite(rec.penis_length_cm)) bodyParts.push(`성기 크기 ${rec.penis_length_cm}cm`);
+    if (bodyParts.length) lines.push(`신체: ${bodyParts.join(' · ')}`);
+    if (rec.style) lines.push(`외형: ${rec.style}`);
+    const styleParts = [rec.personality, rec.speech_style].filter(Boolean).join(' / ');
+    if (styleParts) lines.push(`성격·말투: ${styleParts}`);
+    if (rec.background) lines.push(`배경: ${rec.background}`);
+    if (rec.short_feature) lines.push(`특징: ${rec.short_feature}`);
+    lines.push(`선택지 문구: ${rec.choice_label}`);
+    return lines.join('\n');
   }).join('\n\n');
-  return `\n\n[PLAYER SETUP PHASE — CANDIDATES ALREADY GENERATED]\n아래 4개는 이미 확정되어 저장된 후보다. 내용을 바꾸지 말고 정확히 같은 이름·직업·신체·설정으로 카드 형식으로 다시 보여준다. 새 후보를 만들지 않는다.\n\n${cards}\n\n[선택지]에는 각 후보의 "선택지 문구"를 그대로, 정확히 네 개만 적는다. 마크다운 굵게 **는 새로 쓰지 않는다.\n사용자가 네 후보와 다른 캐릭터를 직접 설명하면, 그 설명을 반영한 완성형 새 캐릭터를 만들어 보여주고 승인을 구한다(이 경우 기존 4개 카드를 다시 보여줄 필요는 없다).`;
+  return `\n\n[PLAYER SETUP PHASE — CANDIDATES ALREADY GENERATED]\n아래 4개는 이미 확정되어 저장된 후보다. 내용을 바꾸지 말고 정확히 같은 이름·직업·설정으로 카드 형식으로 다시 보여준다. 표시되지 않은 항목은 새로 지어내지 않는다. 새 후보를 만들지 않는다.\n\n${cards}\n\n[선택지]에는 각 후보의 "선택지 문구"를 그대로, 정확히 네 개만 적는다. 마크다운 굵게 **는 새로 쓰지 않는다.\n사용자가 네 후보와 다른 캐릭터를 직접 설명하면, 그 설명을 반영한 완성형 새 캐릭터를 만들어 보여주고 승인을 구한다(이 경우 기존 4개 카드를 다시 보여줄 필요는 없다).`;
 }
 
 // Applies broadly (opening + normal turns), not just player_setup: bans the
@@ -2132,7 +2225,7 @@ function buildSavePatch(extract, enginePatch = {}, summaryPlan = null, previousS
       // own character instead of picking one of the 4 presets.
       const legacyRecommendation = mergeRecommendation(previousSetup.recommendation, extract.player_recommendation);
       const legacyApproval = Boolean(previousSetup.recommendation) && isApprovalInput(playerInput);
-      const newRecommendations = normalizeRecommendations(extract.player_recommendations);
+      const newRecommendations = normalizeRecommendations(extract.player_recommendations, extract.choices);
       if (legacyApproval) {
         patch.player = legacyRecommendation;
         patch.player_setup = { ...previousSetup, status: 'complete', recommendation: legacyRecommendation };
@@ -4002,6 +4095,7 @@ export {
   normalizeRecommendation,
   normalizeRecommendationCandidate,
   normalizeRecommendations,
+  parseSetupChoiceLabel,
   resolveRecommendationSelection,
   resolveConfirmedPlayerProfile,
   buildConfirmedPlayerSetupSection,

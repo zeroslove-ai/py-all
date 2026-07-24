@@ -417,11 +417,12 @@
         </div>
       </div>
 
-      <div class="panel-section">
-        <audio class="audio-player" id="audio-player" controls></audio>
-      </div>
     </aside>
   </div>
+  <!-- H3-A item 7: lives outside .side-panel — sidebar.init() replaces
+       .side-panel's entire innerHTML on every (re)render, which would
+       otherwise destroy and orphan this element and its live playback. -->
+  <audio class="audio-player" id="audio-player" controls></audio>
 
   <div class="bottom-bar">
     <div class="choice-buttons" id="choice-buttons"></div>

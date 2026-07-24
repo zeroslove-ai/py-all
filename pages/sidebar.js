@@ -16,6 +16,10 @@ const sidebar = {
       <section class="panel-section"><div class="panel-title">마인드 모니터</div><div class="mind-monitor" id="mind-monitor"><div class="mind-item"><b>표면의식</b><blockquote id="mind-surface">-</blockquote></div><div class="mind-item"><b>잠재의식</b><blockquote id="mind-inner">-</blockquote></div><div class="mind-item"><b>신체적·행동적 반응</b><p id="mind-physical">-</p></div></div></section>
       <section class="panel-section"><div class="panel-title" id="npc-status-title">NPC 상태</div><div class="npc-status" id="npc-status"></div></section>`;
     ui.init();
+    // H3-A item 8: the audio element lives outside .side-panel now, but
+    // re-resolve/re-bind it here anyway after every panel re-render so
+    // tts.audio (and ui.els.audioPlayer) never drift onto a stale reference.
+    tts.rebindAudioElement?.();
     const relationship = document.createElement('section');
     relationship.className = 'panel-section';
     relationship.innerHTML = '<div class="panel-title" id="npc-relationship-title">관계 기록</div><div id="npc-relationship" class="relationship-inline"></div>';

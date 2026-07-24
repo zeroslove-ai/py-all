@@ -33,6 +33,9 @@ import {
   normalizeRecommendationCandidate,
   normalizeRecommendations,
   resolveRecommendationSelection,
+  buildPlayerSetupRedisplaySection,
+  buildConfirmedPlayerSetupSection,
+  parseSetupChoiceLabel,
   normalizeRegisteredNpcExtract,
   mindMonologueLength,
   validateMindMonologue,
@@ -1319,32 +1322,46 @@ test('all 4 candidates carry non-empty style/speech_style/personality', () => {
   }
 });
 
-test('a zero or missing body-measurement field rejects that candidate, which rejects the whole 4-candidate set', () => {
+test('[H3-A #6,7] a zero, missing, or out-of-range body-measurement field never rejects the candidate — it just omits that one field, keeping the other 3 candidates and the rest of that candidate untouched', () => {
   for (const field of ['height_cm', 'weight_kg', 'penis_length_cm']) {
     const zeroed = FOUR_SETUP_PRESETS.map((c, i) => i === 2 ? { ...c, [field]: 0 } : c);
-    assert.equal(normalizeRecommendations(zeroed), null, `zero ${field} should reject the set`);
+    const zeroedResult = normalizeRecommendations(zeroed);
+    assert.equal(zeroedResult.length, 4, `zero ${field} should keep all 4 candidates`);
+    assert.equal(field in zeroedResult[2], false, `zero ${field} should be omitted, not defaulted`);
+    assert.equal(zeroedResult[2].name, FOUR_SETUP_PRESETS[2].name);
+
     const missing = FOUR_SETUP_PRESETS.map((c, i) => {
       if (i !== 2) return c;
       const clone = { ...c };
       delete clone[field];
       return clone;
     });
-    assert.equal(normalizeRecommendations(missing), null, `missing ${field} should reject the set`);
+    const missingResult = normalizeRecommendations(missing);
+    assert.equal(missingResult.length, 4, `missing ${field} should keep all 4 candidates`);
+    assert.equal(field in missingResult[2], false);
   }
 });
 
-test('a body-measurement value outside the realistic adult range rejects the candidate set (no absurd extremes)', () => {
+test('[H3-A #7] a body-measurement value outside the realistic adult range omits only that field, never rejects the candidate set', () => {
   const tooTall = FOUR_SETUP_PRESETS.map((c, i) => i === 0 ? { ...c, height_cm: 400 } : c);
-  assert.equal(normalizeRecommendations(tooTall), null);
+  const tooTallResult = normalizeRecommendations(tooTall);
+  assert.equal(tooTallResult.length, 4);
+  assert.equal('height_cm' in tooTallResult[0], false);
+
   const tooLight = FOUR_SETUP_PRESETS.map((c, i) => i === 0 ? { ...c, weight_kg: 5 } : c);
-  assert.equal(normalizeRecommendations(tooLight), null);
+  const tooLightResult = normalizeRecommendations(tooLight);
+  assert.equal(tooLightResult.length, 4);
+  assert.equal('weight_kg' in tooLightResult[0], false);
+
   const absurdLength = FOUR_SETUP_PRESETS.map((c, i) => i === 0 ? { ...c, penis_length_cm: 90 } : c);
-  assert.equal(normalizeRecommendations(absurdLength), null);
+  const absurdLengthResult = normalizeRecommendations(absurdLength);
+  assert.equal(absurdLengthResult.length, 4);
+  assert.equal('penis_length_cm' in absurdLengthResult[0], false);
 });
 
-test('normalizeRecommendationCandidate requires gender to be exactly "남성" — all 4 candidates are adult men', () => {
-  assert.equal(normalizeRecommendationCandidate({ ...FOUR_SETUP_PRESETS[0], gender: '여성' }, 'preset_1'), null);
-  assert.equal(normalizeRecommendationCandidate(FOUR_SETUP_PRESETS[0], 'preset_1')?.gender, '남성');
+test('[H3-A #14] normalizeRecommendationCandidate rejects only an explicit non-"남성" gender — all 4 preset candidates are adult men', () => {
+  assert.equal(normalizeRecommendationCandidate({ ...FOUR_SETUP_PRESETS[0], gender: '여성' }, 0), null);
+  assert.equal(normalizeRecommendationCandidate(FOUR_SETUP_PRESETS[0], 0)?.gender, '남성');
 });
 
 test('all 4 choice_label values are short (target <=24 chars including spaces), unique, and free of long explanations', () => {
@@ -1357,30 +1374,125 @@ test('all 4 choice_label values are short (target <=24 chars including spaces), 
   }
 });
 
-test('normalizeRecommendations rejects a wrong array size', () => {
+test('normalizeRecommendations rejects fewer than 4 valid candidates, silently uses only the first 4 of a longer array, and rejects non-array input', () => {
   assert.equal(normalizeRecommendations(FOUR_SETUP_PRESETS.slice(0, 3)), null);
-  assert.equal(normalizeRecommendations([...FOUR_SETUP_PRESETS, { ...FOUR_SETUP_PRESETS[3], id: 'preset_5', choice_label: '다섯 번째' }]), null);
+  // H3-A item 3: a 5th entry is not an error — just ignored (first 4 used).
+  const fiveEntries = normalizeRecommendations([...FOUR_SETUP_PRESETS, { ...FOUR_SETUP_PRESETS[3], id: 'preset_5', choice_label: '다섯 번째' }]);
+  assert.equal(fiveEntries.length, 4);
+  assert.deepEqual(fiveEntries.map(c => c.name), FOUR_SETUP_PRESETS.map(c => c.name));
   assert.equal(normalizeRecommendations(null), null);
   assert.equal(normalizeRecommendations('not-an-array'), null);
 });
 
-test('normalizeRecommendations requires at least one hospital_worker and one patient slot', () => {
-  const noWorker = FOUR_SETUP_PRESETS.map(c => c.slot === 'hospital_worker' ? { ...c, slot: 'wildcard' } : c);
-  assert.equal(normalizeRecommendations(noWorker), null);
-  const noPatient = FOUR_SETUP_PRESETS.map(c => c.slot === 'patient' ? { ...c, slot: 'wildcard' } : c);
-  assert.equal(normalizeRecommendations(noPatient), null);
+test('[H3-A #8] slot (and id) are always forced by array position, never trusted from the model — an LLM-provided slot/id is silently overwritten', () => {
+  const wrongSlotsAndIds = FOUR_SETUP_PRESETS.map((c, i) => ({ ...c, slot: 'wildcard', id: `bogus_${i}` }));
+  const normalized = normalizeRecommendations(wrongSlotsAndIds);
+  assert.deepEqual(normalized.map(c => c.slot), ['hospital_worker', 'patient', 'hospital_adjacent', 'wildcard']);
+  assert.deepEqual(normalized.map(c => c.id), ['preset_1', 'preset_2', 'preset_3', 'preset_4']);
 });
 
-test('normalizeRecommendations rejects duplicate ids or duplicate choice_labels', () => {
-  const dupeIds = FOUR_SETUP_PRESETS.map((c, i) => i === 1 ? { ...c, id: 'preset_1' } : c);
-  assert.equal(normalizeRecommendations(dupeIds), null);
+test('[H3-A #16] a duplicate choice_label disambiguates only the later occurrence — the set is never discarded, and ids stay usable for selection', () => {
   const dupeLabels = FOUR_SETUP_PRESETS.map((c, i) => i === 1 ? { ...c, choice_label: FOUR_SETUP_PRESETS[0].choice_label } : c);
-  assert.equal(normalizeRecommendations(dupeLabels), null);
+  const normalized = normalizeRecommendations(dupeLabels);
+  assert.equal(normalized.length, 4);
+  assert.equal(normalized[0].choice_label, FOUR_SETUP_PRESETS[0].choice_label); // first occurrence untouched
+  assert.notEqual(normalized[1].choice_label, FOUR_SETUP_PRESETS[0].choice_label); // second disambiguated
+  assert.match(normalized[1].choice_label, /환자/); // disambiguated with its role label
+  assert.equal(new Set(normalized.map(c => c.choice_label)).size, 4);
+  assert.equal(new Set(normalized.map(c => c.id)).size, 4); // ids never collide (always index-forced)
 });
 
-test('normalizeRecommendationCandidate rejects a candidate younger than 19', () => {
-  assert.equal(normalizeRecommendationCandidate({ ...FOUR_SETUP_PRESETS[1], age: 17 }, 'preset_2'), null);
-  assert.equal(normalizeRecommendationCandidate({ ...FOUR_SETUP_PRESETS[1], age: 19 }, 'preset_2')?.age, 19);
+test('[H3-A #13] normalizeRecommendationCandidate rejects only an explicit age under 19 — a missing age keeps the candidate without an age field', () => {
+  assert.equal(normalizeRecommendationCandidate({ ...FOUR_SETUP_PRESETS[1], age: 17 }, 1), null);
+  assert.equal(normalizeRecommendationCandidate({ ...FOUR_SETUP_PRESETS[1], age: 19 }, 1)?.age, 19);
+});
+
+test('[H3-A #15] a candidate with no age at all (the "adult by game contract" gender default) still survives, just without an age field', () => {
+  const { age, ...noAge } = FOUR_SETUP_PRESETS[1];
+  const candidate = normalizeRecommendationCandidate(noAge, 1);
+  assert.notEqual(candidate, null);
+  assert.equal('age' in candidate, false);
+  assert.equal(candidate.gender, '남성');
+});
+
+test('[H3-A #2,3,4,5] individually missing style/speech_style/personality/background/starting_location/short_feature never rejects that candidate — only that field is absent from the result', () => {
+  for (const field of ['style', 'speech_style', 'personality', 'background', 'starting_location', 'short_feature']) {
+    const list = FOUR_SETUP_PRESETS.map((c, i) => {
+      if (i !== 1) return c;
+      const clone = { ...c };
+      delete clone[field];
+      return clone;
+    });
+    const normalized = normalizeRecommendations(list);
+    assert.equal(normalized.length, 4, `missing ${field} should still keep all 4`);
+    assert.equal(field in normalized[1], false, `missing ${field} should be omitted, not defaulted`);
+    assert.equal(normalized[1].name, FOUR_SETUP_PRESETS[1].name);
+    assert.equal(normalized[1].job, FOUR_SETUP_PRESETS[1].job);
+  }
+});
+
+test('[H3-A #10] a candidate with no choice_label builds one deterministically from name/job', () => {
+  const { choice_label, ...noLabel } = FOUR_SETUP_PRESETS[0];
+  const candidate = normalizeRecommendationCandidate(noLabel, 0);
+  assert.equal(candidate.choice_label, `${FOUR_SETUP_PRESETS[0].name} · ${FOUR_SETUP_PRESETS[0].job}`);
+});
+
+test('[H3-A #11] a candidate missing name/job recovers both from its own choice_label ("이름 · 직업")', () => {
+  const candidate = normalizeRecommendationCandidate({ choice_label: '한지민 · 응급구조사' }, 0);
+  assert.notEqual(candidate, null);
+  assert.equal(candidate.name, '한지민');
+  assert.equal(candidate.job, '응급구조사');
+  assert.equal(candidate.choice_label, '한지민 · 응급구조사');
+});
+
+test('[H3-A #12] a candidate missing name/job/choice_label recovers both from the narrative\'s own [3. 선택지] line (extract.choices)', () => {
+  const candidate = normalizeRecommendationCandidate({}, 0, '① 한지민 · 응급구조사');
+  assert.notEqual(candidate, null);
+  assert.equal(candidate.name, '한지민');
+  assert.equal(candidate.job, '응급구조사');
+});
+
+test('[H3-A #12] normalizeRecommendations threads extract.choices through per index so all 4 candidates can recover name/job from the narrative choices', () => {
+  const bareList = FOUR_SETUP_PRESETS.map(() => ({}));
+  const narrativeChoices = FOUR_SETUP_PRESETS.map(c => c.choice_label);
+  const normalized = normalizeRecommendations(bareList, narrativeChoices);
+  assert.equal(normalized.length, 4);
+  assert.deepEqual(normalized.map(c => c.name), FOUR_SETUP_PRESETS.map(c => c.name));
+});
+
+test('[H3-A #18] isSetupComplete only requires player_setup.status===complete and player.name/job — a candidate\'s missing age/body fields never block opening start', () => {
+  assert.equal(isSetupComplete({ player_setup: { status: 'complete' }, player: { name: '김준호', job: '전공의' } }), true);
+  assert.equal(isSetupComplete({ player_setup: { status: 'recommended' }, player: { name: '김준호', job: '전공의' } }), false);
+});
+
+test('[H3-A #19] buildPlayerSetupRedisplaySection never prints "undefined" or an empty-value unit line for a candidate missing several optional fields', () => {
+  const sparse = [
+    { id: 'preset_1', slot: 'hospital_worker', name: '김준호', gender: '남성', job: '전공의', choice_label: '김준호 · 전공의' },
+    FOUR_SETUP_PRESETS[1], FOUR_SETUP_PRESETS[2], FOUR_SETUP_PRESETS[3]
+  ];
+  const section = buildPlayerSetupRedisplaySection(sparse);
+  assert.doesNotMatch(section, /undefined/);
+  assert.doesNotMatch(section, /나이: (?:\s|$)/);
+  assert.doesNotMatch(section, /신체: *(?:cm)?\/?\s*(?:kg)?\s*\n/);
+  assert.doesNotMatch(section, /외형: *\n/);
+  assert.doesNotMatch(section, /성격·말투: *\/? *\n/);
+  assert.doesNotMatch(section, /배경: *\n/);
+  assert.doesNotMatch(section, /특징: *\n/);
+  assert.match(section, /이름: 김준호/);
+  assert.match(section, /직업: 전공의/);
+});
+
+test('[H3-A #20] buildConfirmedPlayerSetupSection never prints "undefined" or an empty established-fact line for a profile with only name/job, and states the "no inventing missing values" rule', () => {
+  const section = buildConfirmedPlayerSetupSection({ name: '김준호', job: '전공의' });
+  assert.doesNotMatch(section, /undefined/);
+  assert.doesNotMatch(section, /나이: *\n/);
+  assert.doesNotMatch(section, /키: *cm/);
+  assert.doesNotMatch(section, /몸무게: *kg/);
+  assert.doesNotMatch(section, /성기 크기: *cm/);
+  assert.doesNotMatch(section, /외형: *\n/);
+  assert.match(section, /이름: 김준호/);
+  assert.match(section, /직업: 전공의/);
+  assert.match(section, /없는 값을 임의로 새로 만들지 않는다/);
 });
 
 test('resolveRecommendationSelection maps ①-④, 1-4, and the stored choice_label (with or without a leading marker) to the right preset', () => {

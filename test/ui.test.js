@@ -7,6 +7,7 @@ const pageSource = await readFile(new URL('../pages/index.html', import.meta.url
 const uiSource = await readFile(new URL('../pages/ui.js', import.meta.url), 'utf8');
 const apiSource = await readFile(new URL('../pages/api.js', import.meta.url), 'utf8');
 const streamSource = await readFile(new URL('../pages/stream.js', import.meta.url), 'utf8');
+const ttsSource = await readFile(new URL('../pages/tts.js', import.meta.url), 'utf8');
 
 test('NPC status is rendered as one inline status sentence, not five rows', () => {
   const renderStats = sidebarSource.match(/renderStats\(stats[\s\S]*?\n  signal\(/)?.[0] || '';
@@ -637,4 +638,80 @@ test('[H2 #39] Extract hard failures (degraded not allowed, or the failure itsel
   assert.match(catchBlock, /이번 서사 버리고 이전 턴으로 돌아가기/);
   assert.match(catchBlock, /discardFailedTurn\(\)/);
   assert.doesNotMatch(catchBlock, /extract_degraded/);
+});
+
+// ─────────────────────────────────────────────
+// H3-A: TTS audio DOM lifecycle (item 11, frontend/TTS items 21-30)
+// ─────────────────────────────────────────────
+
+test('[H3-A #21] the <audio id="audio-player"> element lives outside .side-panel', () => {
+  const sidePanelBlock = pageSource.match(/<aside class="side-panel">[\s\S]*?<\/aside>/)?.[0] || '';
+  assert.notEqual(sidePanelBlock, '');
+  assert.doesNotMatch(sidePanelBlock, /id="audio-player"/);
+  assert.match(pageSource, /<audio class="audio-player" id="audio-player" controls><\/audio>/);
+});
+
+test('[H3-A #22] sidebar.init()\'s panel.innerHTML template never includes the audio element, so re-rendering the sidebar can\'t destroy/orphan it', () => {
+  const initFn = sidebarSource.match(/init\(\) \{[\s\S]*?panel\.innerHTML = `[\s\S]*?`;/)?.[0] || '';
+  assert.notEqual(initFn, '');
+  assert.doesNotMatch(initFn, /audio-player/);
+});
+
+test('[H3-A #23] sidebar.init() rebinds tts\'s audio reference right after ui.init(), so tts.audio always points at a currently-live element', () => {
+  const initFn = sidebarSource.match(/init\(\) \{[\s\S]*?\n  \},/)?.[0] || '';
+  assert.match(initFn, /ui\.init\(\);[\s\S]*?tts\.rebindAudioElement\?\.\(\);/);
+});
+
+test('[H3-A #24,25] ensureAudioElement recreates a missing #audio-player element and re-binds both tts.audio and ui.els.audioPlayer to it', () => {
+  const fn = ttsSource.match(/ensureAudioElement\(\) \{[\s\S]*?\n  \},/)?.[0] || '';
+  assert.notEqual(fn, '');
+  assert.match(fn, /let audio = document\.getElementById\('audio-player'\)/);
+  assert.match(fn, /if \(!audio\) \{/);
+  assert.match(fn, /document\.createElement\('audio'\)/);
+  assert.match(fn, /document\.body\.appendChild\(audio\)/);
+  assert.match(fn, /this\.audio = audio;/);
+  assert.match(fn, /ui\.els\.audioPlayer = audio;/); // #25
+  assert.match(fn, /return audio;/);
+
+  const rebindFn = ttsSource.match(/rebindAudioElement\(\) \{[\s\S]*?\n  \},/)?.[0] || '';
+  assert.match(rebindFn, /return this\.ensureAudioElement\(\);/);
+});
+
+test('[H3-A #26] stopAndClear resolves the audio element via ensureAudioElement instead of trusting a possibly-stale this.audio, so a reset never throws on a null reference', () => {
+  const fn = ttsSource.match(/stopAndClear\(\) \{[\s\S]*?\n  \},/)?.[0] || '';
+  assert.match(fn, /const audio = this\.ensureAudioElement\(\);/);
+  assert.match(fn, /audio\.pause\(\);/);
+  assert.match(fn, /audio\.removeAttribute\('src'\);/);
+  assert.match(fn, /audio\.load\(\);/);
+});
+
+test('[H3-A #27] enqueue wraps its entire body in try/catch, so a TTS failure (missing DOM, malformed extract) is reported via showStatus and never thrown to prepareMedia\'s caller', () => {
+  const fn = ttsSource.match(/enqueue\(extract, turn\) \{[\s\S]*?\n  \},/)?.[0] || '';
+  assert.notEqual(fn, '');
+  assert.match(fn, /try \{/);
+  assert.match(fn, /\} catch \(error\) \{/);
+  assert.match(fn, /console\.error\('TTS enqueue failed', error\);/);
+  assert.match(fn, /this\.showStatus\(/);
+});
+
+test('[H3-A #28] prepareMedia calls tts.enqueue without awaiting it, so a slow/failing TTS call can never block the choice render or loading-state cleanup that follow it in retryCommit', () => {
+  const prepareMediaFn = pageSource.match(/function prepareMedia\(extract\) \{[\s\S]*?\n    }/)?.[0] || '';
+  assert.match(prepareMediaFn, /^\s*tts\.enqueue\(extract, state\.turnCount\);/m);
+  assert.doesNotMatch(prepareMediaFn, /await tts\.enqueue/);
+});
+
+test('[H3-A #29] play() and waitForPlayback() both resolve the audio element via ensureAudioElement, so a manual replay always targets the currently-live element', () => {
+  const playFn = ttsSource.match(/async play\(job\) \{[\s\S]*?\n  \},/)?.[0] || '';
+  assert.match(playFn, /const audio = this\.ensureAudioElement\(\);/);
+  assert.doesNotMatch(playFn, /this\.audio\.(?:src|classList)/);
+
+  const waitFn = ttsSource.match(/waitForPlayback\(\) \{[\s\S]*?\n  \},/)?.[0] || '';
+  assert.match(waitFn, /const audio = this\.ensureAudioElement\(\);/);
+  assert.doesNotMatch(waitFn, /this\.audio\.on(?:ended|error)/);
+});
+
+test('[H3-A #30] the existing duplicate-playback-prevention keying (pendingKeys/completedKeys, sessionStorage persistence) is unchanged', () => {
+  assert.match(ttsSource, /key\(turn, line\) \{\s*\n\s*return `\$\{turn\}:\$\{line\.speaker\}:\$\{line\.text\}`;/);
+  assert.match(ttsSource, /if \(!force && \(this\.pendingKeys\.has\(key\) \|\| this\.completedKeys\.has\(key\)\)\) continue;/);
+  assert.match(ttsSource, /sessionStorage\.setItem\('playedTtsKeys', JSON\.stringify\(\[\.\.\.this\.completedKeys\]\)\)/);
 });

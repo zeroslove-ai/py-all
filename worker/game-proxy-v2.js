@@ -399,60 +399,16 @@ async function repairRawJsonOutput(env, rawText) {
   return result.parsed;
 }
 
-async function handleExtract(req, env) {
-  const requestId = crypto.randomUUID();
+// One full "narrative text -> structured extract" cycle: prompt build,
+// DeepSeek call (with the JSON-repair fallback), NPC normalization/location
+// eligibility, and mind-monitor validation+repair. Factored out so the CSA-
+// omission fix (item 7) can re-run the exact same pipeline once against a
+// corrected narrative without duplicating any of this logic.
+async function performExtractionPass(env, { narrativeText, playerInput, compatCtx, shortlistedImages, nextTurn, requestId }) {
   const timing = {};
-  const totalStart = Date.now();
-  const { game_id, narrative_text, player_input } = await readJson(req);
-  if (!game_id || !narrative_text) {
-    return jsonResponse({ error: 'game_id and narrative_text required', request_id: requestId }, 400);
-  }
-
-  let ctx;
-  try {
-    const t0 = Date.now();
-    ctx = await supabaseRpc(env, 'get_extract_context', { p_game_id: game_id });
-    timing.context_rpc_ms = Date.now() - t0;
-  } catch (error) {
-    return jsonResponse({ error: error.message, error_code: 'SUPABASE_ERROR', request_id: requestId }, 502);
-  }
-
-  const candidateIds = detectRegisteredCharacterIds(narrative_text, player_input, ctx?.master?.characters, ctx?.save?.last_character_id);
-  let images = [];
-  const t1 = Date.now();
-  if (candidateIds.length) {
-    images = await supabaseRpc(env, 'get_image_catalog_for_characters', { p_game_id: game_id, p_character_ids: candidateIds });
-  }
-  timing.image_catalog_rpc_ms = Date.now() - t1;
-
-  const fullImageCatalog = flattenImageCatalog(images);
-  const shortlistedImages = selectTopImageCandidates(fullImageCatalog, {
-    candidateCharacterIds: candidateIds,
-    narrativeText: narrative_text,
-    playerInput: player_input,
-    lastImageId: ctx?.save?.last_image_id,
-    characters: ctx?.master?.characters || {},
-    totalLimit: 12
-  });
-
-  const nextTurn = (ctx?.turn_count ?? 0) + 1;
-  const compatCtx = withSetupCompatibility(ctx);
-  const t2 = Date.now();
-  const prompt = buildExtractPrompt(narrative_text, player_input, compatCtx, shortlistedImages, nextTurn);
-  timing.prompt_build_ms = Date.now() - t2;
-
-  const shortlistByCharacter = {};
-  for (const img of shortlistedImages) {
-    shortlistByCharacter[img.character_id] = (shortlistByCharacter[img.character_id] || 0) + 1;
-  }
-  console.log(JSON.stringify({
-    event: 'gamebuilder_image_shortlist',
-    request_id: requestId,
-    game_id,
-    image_catalog_count: fullImageCatalog.length,
-    image_shortlist_count: shortlistedImages.length,
-    image_shortlist_by_character: shortlistByCharacter
-  }));
+  const tPrompt = Date.now();
+  const prompt = buildExtractPrompt(narrativeText, playerInput, compatCtx, shortlistedImages, nextTurn);
+  timing.prompt_build_ms = Date.now() - tPrompt;
 
   let result;
   let jsonRepaired = false;
@@ -492,33 +448,44 @@ async function handleExtract(req, env) {
       jsonRepaired = true;
     } else {
       console.error('Extract request failed:', { request_id: requestId, error_code: errorCode, error: error.message, raw: (error.rawText || '').slice(0, 500) });
-      return jsonResponse({
-        error: error.message,
-        error_code: errorCode,
-        request_id: requestId,
-        upstream_status: error.upstreamStatus ?? null,
-        finish_reason: error.finishReason ?? null
-      }, 502);
+      return {
+        ok: false,
+        timing,
+        status: 502,
+        response: {
+          error: error.message,
+          error_code: errorCode,
+          request_id: requestId,
+          upstream_status: error.upstreamStatus ?? null,
+          finish_reason: error.finishReason ?? null
+        }
+      };
     }
   }
 
   const t4 = Date.now();
   let extract = normalizeExtract(result.parsed);
-  extract = normalizeRegisteredNpcExtract(extract, ctx?.master?.characters, ctx?.save?.last_character_id);
+  // Merge this same turn's own world_state_patch in before judging NPC
+  // eligibility — otherwise a turn that both moves the player AND meets an
+  // NPC in the new ward would judge eligibility against the stale, pre-move
+  // location and reject a perfectly valid NPC.
+  const effectiveWorldState = computeEffectiveWorldState(compatCtx?.save?.world_state, extract.world_state_patch);
+  extract = normalizeRegisteredNpcExtract(extract, compatCtx?.master?.characters, compatCtx?.save?.last_character_id, effectiveWorldState);
   timing.extract_parse_ms = Date.now() - t4;
 
   const t5 = Date.now();
-  let validation = validateNpcEmotion(extract.npc_emotion, extract._npc_registration_rejected ? 'narrator' : extract.character_id);
+  const npcRejected = extract._npc_registration_rejected || extract._npc_location_rejected;
+  let validation = validateNpcEmotion(extract.npc_emotion, npcRejected ? 'narrator' : extract.character_id);
   timing.mind_validation_ms = Date.now() - t5;
 
   let mindMonitorRepaired = false;
   if (!validation.ok) {
-    const characterId = extract._npc_registration_rejected ? null : extract.character_id;
-    const character = characterId ? ctx?.master?.characters?.[characterId] : null;
+    const characterId = npcRejected ? null : extract.character_id;
+    const character = characterId ? compatCtx?.master?.characters?.[characterId] : null;
     if (character) {
       const t6 = Date.now();
       try {
-        const repaired = await repairMindMonitor(env, character.name || character['이름'], character['말투'], narrative_text, extract.npc_emotion, validation.errors);
+        const repaired = await repairMindMonitor(env, character.name || character['이름'], character['말투'], narrativeText, extract.npc_emotion, validation.errors);
         if (isPlainObject(repaired)) {
           const repairedValidation = validateNpcEmotion(repaired, characterId);
           // Adopt whichever fields the repair actually fixed even if the
@@ -542,7 +509,7 @@ async function handleExtract(req, env) {
   }
   if (!validation.ok) {
     const characterId = extract.character_id;
-    const existing = ctx?.save?.npc_emotion?.[characterId];
+    const existing = compatCtx?.save?.npc_emotion?.[characterId];
     const fallbackAvailable = Boolean(characterId) && characterId !== 'narrator' && isPlainObject(existing);
     // Only the field(s) that actually failed fall back — a valid surface
     // must survive even when inner (or vice versa) still fails.
@@ -554,79 +521,166 @@ async function handleExtract(req, env) {
     extract.mind_monitor_error = validation.errors;
     console.error('Mind monitor validation failed after repair:', { request_id: requestId, characterId, errors: validation.errors });
   }
-  extract.dialogue_lines = filterMainNpcDialogue(extract, ctx?.master?.characters || {});
+  extract.dialogue_lines = filterMainNpcDialogue(extract, compatCtx?.master?.characters || {});
 
-  // Story's [3. 선택지] is only ever transcribed here, never invented — so a
-  // choice that's structurally impossible under the current hypnosis
-  // capability (full slot pool / strength ceiling) means Story ignored its
-  // HARD CONSTRAINT block. One repair call fixes just the choices instead of
-  // re-running the whole (expensive) narrative generation.
-  let choicesRepaired = false;
-  if (isSetupComplete(compatCtx.save)) {
-    const t7 = Date.now();
-    const hypnosisCapability = calculateHypnosisCapability(compatCtx.save, compatCtx.master);
-    const infeasible = findInfeasibleChoices(extract.choices, hypnosisCapability);
-    if (infeasible.length) {
-      try {
-        const replacement = await repairInfeasibleChoices(env, narrative_text, hypnosisCapability, infeasible);
-        if (replacement) {
-          extract.choices = replacement;
-          choicesRepaired = true;
-        } else {
-          console.error('Choice repair returned no usable replacement:', { request_id: requestId, infeasible });
-        }
-      } catch (error) {
-        console.error('Choice repair failed:', { request_id: requestId, error: error.message });
-      }
-      timing.choice_repair_ms = Date.now() - t7;
-    }
+  return { ok: true, extract, jsonRepaired, mindMonitorRepaired, validation, rawText: result.rawText, effectiveWorldState, timing };
+}
+
+async function handleExtract(req, env) {
+  const requestId = crypto.randomUUID();
+  const timing = {};
+  const totalStart = Date.now();
+  const { game_id, narrative_text, player_input } = await readJson(req);
+  if (!game_id || !narrative_text) {
+    return jsonResponse({ error: 'game_id and narrative_text required', request_id: requestId }, 400);
   }
 
-  // choice_named_targets is Extract's own semantic read of which choices
-  // name a person; the Worker decides registered-vs-not via a deterministic
-  // roster lookup (findUnregisteredChoiceTargets), so the model's judgment
-  // is never trusted for the actual pass/fail call.
-  let unregisteredNpcChoicesRepaired = false;
-  if (isSetupComplete(compatCtx.save)) {
-    const t9 = Date.now();
-    const unregisteredTargets = findUnregisteredChoiceTargets(extract.choices, extract.choice_named_targets, compatCtx.master?.characters);
-    if (unregisteredTargets.length) {
-      try {
-        const replacement = await repairUnregisteredNpcChoices(env, narrative_text, unregisteredTargets);
-        if (replacement) {
-          extract.choices = replacement;
-          unregisteredNpcChoicesRepaired = true;
-        } else {
-          console.error('Unregistered-NPC choice repair returned no usable replacement:', { request_id: requestId, unregisteredTargets });
-        }
-      } catch (error) {
-        console.error('Unregistered-NPC choice repair failed:', { request_id: requestId, error: error.message });
-      }
-      timing.unregistered_npc_choice_repair_ms = Date.now() - t9;
-    }
+  let ctx;
+  try {
+    const t0 = Date.now();
+    ctx = await supabaseRpc(env, 'get_extract_context', { p_game_id: game_id });
+    timing.context_rpc_ms = Date.now() - t0;
+  } catch (error) {
+    return jsonResponse({ error: error.message, error_code: 'SUPABASE_ERROR', request_id: requestId }, 502);
+  }
+
+  const candidateIds = detectRegisteredCharacterIds(narrative_text, player_input, ctx?.master?.characters, ctx?.save?.last_character_id);
+  let images = [];
+  const t1 = Date.now();
+  if (candidateIds.length) {
+    images = await supabaseRpc(env, 'get_image_catalog_for_characters', { p_game_id: game_id, p_character_ids: candidateIds });
+  }
+  timing.image_catalog_rpc_ms = Date.now() - t1;
+
+  const fullImageCatalog = flattenImageCatalog(images);
+  const shortlistedImages = selectTopImageCandidates(fullImageCatalog, {
+    candidateCharacterIds: candidateIds,
+    narrativeText: narrative_text,
+    playerInput: player_input,
+    lastImageId: ctx?.save?.last_image_id,
+    characters: ctx?.master?.characters || {},
+    totalLimit: 12
+  });
+
+  const nextTurn = (ctx?.turn_count ?? 0) + 1;
+  const compatCtx = withSetupCompatibility(ctx);
+
+  const shortlistByCharacter = {};
+  for (const img of shortlistedImages) {
+    shortlistByCharacter[img.character_id] = (shortlistByCharacter[img.character_id] || 0) + 1;
+  }
+  console.log(JSON.stringify({
+    event: 'gamebuilder_image_shortlist',
+    request_id: requestId,
+    game_id,
+    image_catalog_count: fullImageCatalog.length,
+    image_shortlist_count: shortlistedImages.length,
+    image_shortlist_by_character: shortlistByCharacter
+  }));
+
+  const firstPass = await performExtractionPass(env, {
+    narrativeText: narrative_text, playerInput: player_input, compatCtx, shortlistedImages, nextTurn, requestId
+  });
+  Object.assign(timing, firstPass.timing);
+  if (!firstPass.ok) return jsonResponse(firstPass.response, firstPass.status);
+
+  let { extract, jsonRepaired, mindMonitorRepaired, validation, rawText, effectiveWorldState } = firstPass;
+  const characters = compatCtx?.master?.characters || {};
+  const playerName = typeof compatCtx?.save?.player?.name === 'string' ? compatCtx.save.player.name.trim() : '';
+
+  // A registered-but-wrong-location NPC, an unregistered named individual,
+  // or an unregistered independent dialogue speaker all mean the Story turn
+  // itself is wrong — no JSON-level repair fixes that, so this fails fast
+  // (before any repair call) with an error code the frontend can use to
+  // decide "regenerate Story", not "retry Extract". Gated on setup being
+  // complete: the player_setup candidate cards aren't NPC scenes and
+  // shouldn't be checked against the registered-NPC roster at all.
+  const narrativeContract = isSetupComplete(compatCtx.save)
+    ? validateNarrativeNpcContract({ narrativeText: narrative_text, characters, worldState: effectiveWorldState, playerName })
+    : { ok: true, errors: [] };
+  if (!narrativeContract.ok) {
+    console.error('Story NPC contract failed:', { request_id: requestId, errors: narrativeContract.errors });
+    return jsonResponse({
+      error: 'Story violated the registered-NPC contract',
+      error_code: 'STORY_NPC_CONTRACT_FAILED',
+      validation_errors: narrativeContract.errors,
+      request_id: requestId
+    }, 422);
   }
 
   // A self-reported CSA omission means the narrative had a clear trigger for
-  // an active, applicable forced rule but never executed it. One repair call
-  // produces a short continuation that actually performs the missed action —
-  // it never rewrites the narrative already shown to the player.
-  let contentAddition = null;
+  // an active, applicable forced rule but never executed it. The fix inserts
+  // a short corrective continuation right before [2. 플레이어 상황판] (never
+  // after [3. 선택지]) and re-runs the extraction pipeline once against the
+  // corrected narrative — every downstream field (choices, npc_emotion,
+  // stats, image) then comes from that corrected pass, not a piecemeal patch.
+  let narrativeReplacement = null;
+  let finalNarrativeText = narrative_text;
   if (isSetupComplete(compatCtx.save) && extract.csa_omission.length) {
     const applicableCsa = getApplicableCsaEntries(compatCtx.save);
     if (applicableCsa.length) {
-      const t8 = Date.now();
+      const tCsa = Date.now();
       try {
-        contentAddition = await repairCsaOmission(
-          env,
-          narrative_text,
-          applicableCsa.map(csa => `- (${csa.id}) ${csa.content}`),
-          extract.csa_omission
+        const addition = await repairCsaOmission(
+          env, narrative_text, applicableCsa.map(csa => `- (${csa.id}) ${csa.content}`), extract.csa_omission
         );
+        if (addition) {
+          const corrected = insertNarrativeAdditionBeforeStatus(narrative_text, addition);
+          // skipCsaCheck by simply not acting on the second pass's own
+          // csa_omission field below — prevents infinite repair loops.
+          const secondPass = await performExtractionPass(env, {
+            narrativeText: corrected, playerInput: player_input, compatCtx, shortlistedImages, nextTurn, requestId
+          });
+          if (secondPass.ok) {
+            ({ extract, validation } = secondPass);
+            jsonRepaired = jsonRepaired || secondPass.jsonRepaired;
+            mindMonitorRepaired = mindMonitorRepaired || secondPass.mindMonitorRepaired;
+            effectiveWorldState = secondPass.effectiveWorldState;
+            narrativeReplacement = corrected;
+            finalNarrativeText = corrected;
+          } else {
+            console.error('CSA omission re-extraction failed, keeping original extract:', { request_id: requestId });
+          }
+        }
       } catch (error) {
         console.error('CSA omission repair failed:', { request_id: requestId, error: error.message });
       }
-      timing.csa_omission_repair_ms = Date.now() - t8;
+      timing.csa_omission_repair_ms = Date.now() - tCsa;
     }
+  }
+
+  // Unified final-choice validation (item 3): every rule — hypnosis
+  // capability, unregistered target, location-ineligible target, near-
+  // duplicate — is re-checked together after any repair, so fixing one
+  // violation can never silently reintroduce another. Falls back to
+  // deterministically-safe generic choices if even the repair still fails.
+  let choicesRepaired = false;
+  let choicesFallbackUsed = false;
+  if (isSetupComplete(compatCtx.save)) {
+    const tChoices = Date.now();
+    const hypnosisCapability = calculateHypnosisCapability(compatCtx.save, compatCtx.master);
+    const validateOptions = { capability: hypnosisCapability, characters, worldState: effectiveWorldState, playerName };
+    let check = validateFinalChoices(extract.choices, validateOptions);
+    if (!check.ok) {
+      try {
+        const replacement = await repairFinalChoices(env, finalNarrativeText, check.problems);
+        if (replacement) { extract.choices = replacement; choicesRepaired = true; }
+      } catch (error) {
+        console.error('Final choice repair failed:', { request_id: requestId, error: error.message });
+      }
+      check = validateFinalChoices(extract.choices, validateOptions);
+      if (!check.ok) {
+        console.error('Choices still invalid after repair, using safe fallback:', { request_id: requestId, errors: check.errors });
+        extract.choices = buildSafeFallbackChoices();
+        choicesFallbackUsed = true;
+        check = validateFinalChoices(extract.choices, validateOptions);
+      }
+    }
+    // choice_named_targets is discarded and recomputed from the final
+    // choices text — a value reported against choices that have since been
+    // repaired or replaced would be stale.
+    extract.choice_named_targets = check.named_targets;
+    timing.choice_validation_ms = Date.now() - tChoices;
   }
 
   timing.total_ms = Date.now() - totalStart;
@@ -635,14 +689,15 @@ async function handleExtract(req, env) {
 
   return jsonResponse({
     extract,
+    narrative_replacement: narrativeReplacement,
     request_id: requestId,
-    raw: result.rawText.slice(0, 200),
+    raw: (rawText || '').slice(0, 200),
     mind_monitor_retried: mindMonitorRepaired,
     mind_monitor_errors: validation.ok ? [] : validation.errors,
     choices_repaired: choicesRepaired,
-    unregistered_npc_choices_repaired: unregisteredNpcChoicesRepaired,
+    choices_fallback_used: choicesFallbackUsed,
     json_repaired: jsonRepaired,
-    content_addition: contentAddition,
+    content_addition: null, // superseded by narrative_replacement; kept only for legacy clients
     timing
   });
 }
@@ -716,7 +771,8 @@ async function handleCommitTurn(req, env) {
   const rawCtx = await supabaseRpc(env, 'get_commit_context', { p_game_id: game_id });
   timing.commit_context_ms = Date.now() - t0;
   const ctx = withSetupCompatibility(rawCtx);
-  const safeExtract = normalizeRegisteredNpcExtract({ ...extract, is_sexual: extract.is_sexual === true }, ctx?.master?.characters, ctx?.save?.last_character_id);
+  const effectiveWorldStateForCommit = computeEffectiveWorldState(ctx?.save?.world_state, extract.world_state_patch);
+  const safeExtract = normalizeRegisteredNpcExtract({ ...extract, is_sexual: extract.is_sexual === true }, ctx?.master?.characters, ctx?.save?.last_character_id, effectiveWorldStateForCommit);
   if (Array.isArray(safeExtract.choices)) safeExtract.choices = safeExtract.choices.map(stripBoldMarkers);
 
   const t1 = Date.now();
@@ -1069,7 +1125,7 @@ function buildNarrativeLengthSection() {
 }
 
 function buildNpcDialogueMinimumSection() {
-  return `\n\n[NPC DIALOGUE MINIMUM CONTRACT]\n\n- 등록 NPC가 실제 장면에 있고 플레이어와 대화·상호작용하는 일반 턴이라면 의미 있는 NPC 발언을 최소 3회 포함한다. 형식은 기존과 동일하게 **캐릭터명** (연기지시): "대사 내용"이다.\n- "의미 있는 발언"은 다음 중 하나를 새로 수행해야 한다: 입력에 직접 답변 / 새 정보 제공 / 질문 또는 확인 / 결정·수락·거절·조건 제시 / 감정이나 관계 변화 표현 / 행동을 시작하거나 중단시키는 말 / 다른 NPC와의 실제 상호작용.\n- 각 NPC 발언 사이에는 새로운 행동·정보·결정·관계 변화 중 하나가 있어야 한다. 한 문장을 세 조각으로 나누거나 같은 의미를 반복해서 3회를 채우는 것은 금지한다.\n- 다음 경우에는 최소 3회를 강제하지 않는다: NPC가 없는 narrator 장면 / 플레이어가 말없이 관찰만 하겠다고 명시한 장면 / NPC가 잠들었거나 의식을 잃었거나 말할 수 없는 장면 / 대사보다 즉각적인 물리 행동이 중심이고 발언 3회가 부자연스러운 순간 / 재진입 모드 / player_setup 모드. 다만 NPC가 있는 일반 대화 장면에서 단순히 짧게 끝내기 위해 이 예외를 쓰지 않는다.\n- 여러 NPC가 등장하면 장면 전체 등록 NPC 발언 합계가 최소 3회이면 되고, NPC마다 3회씩 강제하지 않는다. 메인 NPC가 대화의 중심을 유지하고, 다른 NPC의 짧은 발언만으로 메인 NPC를 자동 전환하지 않는 기존 계약을 유지한다.\n- 플레이어가 입력하지 않은 새 플레이어 발언을 임의로 만들어 대화 횟수를 채우지 않는다. 플레이어 입력은 이미 발생한 말 또는 행동으로 취급하고, 이후 NPC 반응과 장면 전개만 쓴다.`;
+  return `\n\n[NPC DIALOGUE MINIMUM CONTRACT]\n\n- 등록 NPC가 실제 장면에 있고 플레이어와 대화·상호작용하는 일반 턴이라면 의미 있는 NPC 발언을 최소 3회 포함한다. 형식은 기존과 동일하게 캐릭터명 (연기지시): "대사 내용"이다.\n- "의미 있는 발언"은 다음 중 하나를 새로 수행해야 한다: 입력에 직접 답변 / 새 정보 제공 / 질문 또는 확인 / 결정·수락·거절·조건 제시 / 감정이나 관계 변화 표현 / 행동을 시작하거나 중단시키는 말 / 다른 NPC와의 실제 상호작용.\n- 각 NPC 발언 사이에는 새로운 행동·정보·결정·관계 변화 중 하나가 있어야 한다. 한 문장을 세 조각으로 나누거나 같은 의미를 반복해서 3회를 채우는 것은 금지한다.\n- 다음 경우에는 최소 3회를 강제하지 않는다: NPC가 없는 narrator 장면 / 플레이어가 말없이 관찰만 하겠다고 명시한 장면 / NPC가 잠들었거나 의식을 잃었거나 말할 수 없는 장면 / 대사보다 즉각적인 물리 행동이 중심이고 발언 3회가 부자연스러운 순간 / 재진입 모드 / player_setup 모드. 다만 NPC가 있는 일반 대화 장면에서 단순히 짧게 끝내기 위해 이 예외를 쓰지 않는다.\n- 여러 NPC가 등장하면 장면 전체 등록 NPC 발언 합계가 최소 3회이면 되고, NPC마다 3회씩 강제하지 않는다. 메인 NPC가 대화의 중심을 유지하고, 다른 NPC의 짧은 발언만으로 메인 NPC를 자동 전환하지 않는 기존 계약을 유지한다.\n- 플레이어가 입력하지 않은 새 플레이어 발언을 임의로 만들어 대화 횟수를 채우지 않는다. 플레이어 입력은 이미 발생한 말 또는 행동으로 취급하고, 이후 NPC 반응과 장면 전개만 쓴다.`;
 }
 
 function buildAntiRepetitionSection() {
@@ -1099,7 +1155,7 @@ function buildStoryPrompt(ctx, playerInput, currentTurn, feedback = []) {
 
 [금지] 이미지(![), 오디오(<audio), URL(http), HTML 태그를 절대 쓰지 마라. 이건 렌더러가 처리한다.
 [순서] 출력 순서: [1. 서사 및 행동] [2. 플레이어 상황판] [3. 선택지]. 마인드 모니터는 본문에 절대 출력하지 않는다. 선택지는 항상 맨 마지막.
-[대사] NPC 대사는 **캐릭터명** (연기지시): "대사 내용" 형식으로만.
+[대사] NPC 대사는 캐릭터명 (연기지시): "대사 내용" 형식으로만. 캐릭터명을 마크다운 굵게(**)로 감싸지 않는다.
 [등록 상호작용 NPC] 이름·개별 대사·성격·마인드 모니터·NPC 수치·이미지·관계 기록을 가질 수 있는 NPC는 master.characters의 등록 히로인만 허용한다. 미등록 의사·간호사·환자·보호자·직원은 이름 없는 배경 묘사만 가능하며 먼저 말을 걸거나 선택지/현재 접근 대상이 될 수 없다. 플레이어가 배경 인물에게 접근하면 장소·소속에 맞는 등록 히로인이 응대한다. 새 고유 NPC 이름을 만들거나 외형만 보고 heroine ID를 추측하지 마라.
 [모니터] 매턴 [1.표면의식]/[2.잠재의식] 각 100~200자, 대화체로 작성.`;
 
@@ -1216,7 +1272,8 @@ ${recentMemorySlice.map((m, index) => clipHeadTail(m.content || '', index === re
   const registeredNpcChoiceReminder = mode === 'normal' || mode === 'opening'
     ? `\n\n[REMINDER — REGISTERED NPC CHOICE TARGETS]\n[3. 선택지]에서 직접 상호작용 대상으로 실명을 제시하는 인물은 반드시 master.characters에 등록된 히로인이어야 한다. 미등록 의사·간호사·환자·보호자·직원·동료는 이름 없는 배경 인물로만 표현하고("같은 과 동료", "지나가던 간호사" 등), 그 실명을 선택지에 넣지 않는다.\n`
     : '';
-  const systemPrompt = coreRules + playerGate + modeSection + rulebookSection + buildNpcLocationRules() + buildAppSystemRulesSection() + currentSceneSection + npcProfileSection + explicitMentionSection + csaSection + suggestionSection + narrativeLengthSection + npcDialogueSection + antiRepetitionSection + playerStatusPanel + contextSection + feedbackSection + continuitySection + finalFormatRules + openingFlow + playerSetupReminder + hypnosisCapabilitySection + registeredNpcChoiceReminder;
+  const eligibleNpcRosterSection = buildEligibleNpcRosterSection(save.world_state, master.characters || {});
+  const systemPrompt = coreRules + playerGate + modeSection + rulebookSection + eligibleNpcRosterSection + buildAppSystemRulesSection() + currentSceneSection + npcProfileSection + explicitMentionSection + csaSection + suggestionSection + narrativeLengthSection + npcDialogueSection + antiRepetitionSection + playerStatusPanel + contextSection + feedbackSection + continuitySection + finalFormatRules + openingFlow + playerSetupReminder + hypnosisCapabilitySection + registeredNpcChoiceReminder;
 
   return {
     mode,
@@ -1294,7 +1351,7 @@ narrator는 정말로 주변에 NPC가 단 한 명도 없는 장면에만 써라
 - 장면에 등록 NPC가 한 명 이상 실제 등장하면 narrator를 사용하지 않는다.
 
 [대사 추출 — TTS용]
-서사에서 **캐릭터명** (연기지시): "대사 내용" 형식을 찾아 dialogue_lines에 담아라.
+서사에서 캐릭터명 (연기지시): "대사 내용" 형식을 찾아 dialogue_lines에 담아라. 과거 저장본과의 호환을 위해 **캐릭터명** (연기지시): "대사 내용"처럼 이름이 마크다운 굵게로 감싸진 옛 형식도 동일하게 인식해서 담아라.
 {"speaker": "캐릭터명", "text": "대사 내용", "direction": "연기지시"}
 대사가 없으면 빈 배열 []로 둬라.
 
@@ -1312,7 +1369,11 @@ npc_stat_changes만 반환한다. 서사에 숫자가 없어도 대사·행동·
 저장된 npc_encounters에 현재 NPC(character_id) 기록이 없고 이번이 실제로 처음 직접 조우한 장면일 때만 first_encounter_stats에 호감도·신뢰도를 0~35 사이 정수로 판단해 반환한다. 공식이나 랜덤 없이, 플레이어의 저장된 외형·복장·직업·말투·현재 태도와 NPC의 성격·가치관·경계심·현재 상황을 근거로 종합적으로 정한다. 제공되지 않은 정보를 지어내지 마라. 두 수치는 같을 필요가 없고 NPC 성격에 따라 결과가 달라져야 한다. 이미 조우한 NPC이거나 처음 만나는 장면이 아니면 first_encounter_stats는 반드시 null이다.
 
 [SUGGESTION ACTION CONTRACT]
-이번 서사에서 플레이어가 최면 어플을 실제로 사용해 암시를 생성·변경·강화·삭제한 것이 명확히 완료됐을 때만 suggestion_action.action="activate"로 현재 NPC(character_id) 대상 암시를 반환한다. content는 암시 내용 문장, strength는 이번에 사용된 최면 강도다. 시도·계획·상상·가능성만으로는 저장하지 말고 실패한 최면도 저장하지 마라. 일반 대화·설득·반복 발언·분위기 조성만으로 암시를 활용하거나 암시 효과를 체감한 턴에는 suggestion_action을 반환하지 않는다 — 어플을 실제로 조작하지 않았기 때문이다. 각성이나 명확한 해제가 실제로 일어났을 때만 action="deactivate"와 동일 content를 반환한다. 대상은 반드시 현재 NPC여야 한다. 변화가 없으면 suggestion_action은 null이다.
+이번 서사에서 플레이어가 최면 어플을 실제로 조작해 암시를 만들거나 바꾸거나 끈 것이 명확히 완료됐을 때만 suggestion_action을 반환한다. action은 activate(새 암시 생성) / update(기존 암시 내용·강도 수정) / deactivate(해제) 중 하나다. strength는 반드시 "약함", "중간", "강함", "깊은 최면" 중 하나만 쓴다 — 다른 표현은 쓰지 마라.
+- activate: content(암시 내용 문장)와 strength를 채운다. 새 슬롯을 하나 사용하는 행동이다.
+- update: 이미 활성 상태인 암시의 내용이나 강도만 바꾼다. old_content에 그 암시의 기존 내용 문장을 그대로 적어 어떤 암시를 수정하는지 특정한다. 새 content(바뀐 내용, 안 바뀌면 생략)와 strength(바뀐 강도, 안 바뀌면 생략)만 채운다. 슬롯을 추가로 쓰지 않는다.
+- deactivate: content에 해제할 암시의 기존 내용 문장을 그대로 적는다.
+시도·계획·상상·가능성만으로는 저장하지 말고 실패한 최면도 저장하지 마라. 일반 대화·설득·반복 발언·분위기 조성만으로 암시를 활용하거나 암시 효과를 체감한 턴에는 suggestion_action을 반환하지 않는다 — 어플을 실제로 조작하지 않았기 때문이다. 대상은 반드시 현재 NPC(character_id)여야 한다. 변화가 없으면 suggestion_action은 null이다.
 
 [WORLD STATE PATCH CONTRACT]
 플레이어가 실제로 출발해서 새 장소에 도착했고 장면이 그 새 장소로 전환된 경우, world_state_patch에 building, floor, ward, location_label을 모두 채워서 반환한다. 바뀌지 않은 필드는 이전 저장값의 기존 명칭을 그대로 다시 적고, 실제로 바뀐 필드만 새 값으로 적는다. building/floor/ward는 장소를 설명하는 한국어 명칭으로 적으면 Worker가 표준 ID로 정규화하며, 표준 ID로 정규화되지 않는 값은 무시된다. 이동을 제안하거나 준비만 했을 뿐 아직 도착하지 않았다면 world_state_patch를 채우지 말고 비워둔다. 빈 문자열로 기존 값을 덮어쓰지 마라. 알 수 없는 장소를 지어내지 마라.
@@ -1472,15 +1533,56 @@ function isPlainObject(value) {
   return value !== null && typeof value === 'object' && !Array.isArray(value);
 }
 
-function buildNpcLocationRules() {
-  return `\n\n[REGISTERED NPC LOCATION RULE]\n3병동 상호작용은 heroine1, heroine2, heroine3, heroine4, heroine9, heroine10만, 6병동은 heroine5·heroine6만, 의사 중심 장면은 heroine7·heroine8만 허용한다.`;
+// Single server-side source of truth for which registered NPCs can appear
+// in which ward — previously this was only a prose sentence in the prompt,
+// so a registered NPC could still get saved (stats/emotion/image) in a ward
+// they don't belong to whenever Story ignored the sentence.
+const NPC_LOCATION_RULES = {
+  hospital_3ward: ['heroine1', 'heroine2', 'heroine3', 'heroine4', 'heroine9', 'heroine10'],
+  hospital_6ward: ['heroine5', 'heroine6']
+};
+// Doctors round through every ward rather than being assigned to one, so
+// they're eligible regardless of the current ward — this is the "doctor-
+// centric scene" allowance called out separately from the ward rosters.
+const DOCTOR_NPC_IDS = ['heroine7', 'heroine8'];
+
+function isNpcEligibleForScene(characterId, worldState = {}, characters = {}) {
+  if (!isPlainObject(characters) || !characters[characterId]) return false;
+  if (DOCTOR_NPC_IDS.includes(characterId)) return true;
+  const ward = isPlainObject(worldState) ? worldState.ward : null;
+  const roster = NPC_LOCATION_RULES[ward];
+  // An unrecognized/unset ward means the Worker doesn't yet know where the
+  // scene is — fail open rather than reject NPCs based on missing location
+  // data (this covers player_setup/early-opening turns before world_state
+  // has been populated by a WORLD STATE PATCH).
+  if (!roster) return true;
+  return roster.includes(characterId);
+}
+
+function getEligibleNpcIds(worldState = {}, characters = {}) {
+  return Object.keys(isPlainObject(characters) ? characters : {})
+    .filter(id => isNpcEligibleForScene(id, worldState, characters));
+}
+
+// Short ID/name/affiliation roster only — never the full character profile
+// or a repeated wall of rules, since this is injected every Story turn.
+function buildEligibleNpcRosterSection(worldState = {}, characters = {}) {
+  const eligible = getEligibleNpcIds(worldState, characters);
+  if (!eligible.length) return '';
+  const lines = eligible.map(id => {
+    const character = characters[id] || {};
+    const name = character.name || character['이름'] || id;
+    const affiliation = typeof character['소속'] === 'string' ? character['소속'] : '';
+    return `- ${id}: ${name}${affiliation ? ` (${affiliation})` : ''}`;
+  }).join('\n');
+  return `\n\n[ELIGIBLE NPC ROSTER — CURRENT SCENE]\n현재 장소에서 실제로 등장·상호작용할 수 있는 등록 NPC:\n${lines}\n위 목록에 없는 등록 NPC를 이번 장면에 등장시키지 않는다.`;
 }
 
 function registeredCharacterIds(characters = {}) {
   return new Set(Object.keys(isPlainObject(characters) ? characters : {}));
 }
 
-function normalizeRegisteredNpcExtract(extract = {}, characters = {}, lastCharacterId = null) {
+function normalizeRegisteredNpcExtract(extract = {}, characters = {}, lastCharacterId = null, worldState = {}) {
   const normalized = normalizeExtract(extract);
   const ids = registeredCharacterIds(characters);
   const requestedId = typeof normalized.character_id === 'string' ? normalized.character_id : '';
@@ -1489,6 +1591,13 @@ function normalizeRegisteredNpcExtract(extract = {}, characters = {}, lastCharac
   normalized.character_id = ids.has(requestedId) ? requestedId : (requestedId === 'narrator' ? 'narrator' : fallback);
   normalized._npc_registration_rejected = unregisteredRequestedId || normalized._npc_registration_rejected === true;
   if (unregisteredRequestedId) console.warn('Unregistered character_id replaced:', { requestedId, replacement: normalized.character_id });
+  // A registered NPC who simply can't be in the current ward is a distinct
+  // failure from an unregistered one: the id itself stays as reported (never
+  // silently swapped to the previous NPC) but is flagged so the caller (and
+  // validateNarrativeNpcContract) know the Story turn itself is wrong.
+  normalized._npc_location_rejected = normalized.character_id !== 'narrator'
+    && ids.has(normalized.character_id)
+    && !isNpcEligibleForScene(normalized.character_id, worldState, characters);
   normalized.npcs_present = [...new Set(Array.isArray(normalized.npcs_present)
     ? normalized.npcs_present.filter(id => typeof id === 'string' && ids.has(id))
     : [])];
@@ -1498,7 +1607,7 @@ function normalizeRegisteredNpcExtract(extract = {}, characters = {}, lastCharac
   normalized.dialogue_lines = Array.isArray(normalized.dialogue_lines)
     ? normalized.dialogue_lines.filter(line => isPlainObject(line) && typeof line.speaker === 'string' && names.has(line.speaker.trim()))
     : [];
-  if (normalized.character_id === 'narrator' || unregisteredRequestedId) {
+  if (normalized.character_id === 'narrator' || unregisteredRequestedId || normalized._npc_location_rejected) {
     normalized.npc_emotion = {};
     normalized.npc_stat_changes = {};
     normalized.npc_relationship_state = null;
@@ -1570,17 +1679,10 @@ function buildSavePatch(extract, enginePatch = {}, summaryPlan = null, previousS
   }
 
   const worldStatePatch = buildWorldStatePatch(extract.world_state_patch);
-  // Always send the full merged object, never the raw partial patch: if the
-  // model only returns a changed location_label (or any subset of fields),
-  // sending just that fragment risks a non-merging RPC wiping out the
-  // building/floor/ward the player was already in.
-  const mergedWorldState = {
-    ...(isPlainObject(previousSave?.world_state) ? previousSave.world_state : {}),
-    ...(worldStatePatch || {})
-  };
+  const mergedWorldState = computeEffectiveWorldState(previousSave?.world_state, extract.world_state_patch);
   if (worldStatePatch) patch.world_state = mergedWorldState;
 
-  if (characterId && characterId !== 'narrator' && extract._npc_registration_rejected !== true) {
+  if (characterId && characterId !== 'narrator' && extract._npc_registration_rejected !== true && extract._npc_location_rejected !== true) {
     const structured = hasStructuredEncounter(previousSave, characterId);
     const legacy = !structured && hasLegacyEncounterEvidence(previousSave, characterId);
     const firstEncounterStats = !structured && !legacy ? normalizeFirstEncounterStats(extract.first_encounter_stats) : null;
@@ -1794,6 +1896,7 @@ function getCsaLimits(level) {
 const CSA_SCOPE_LABELS = {
   seoul_central_hospital: '서울중앙병원',
   hospital_floor_3: '서울중앙병원 3층',
+  hospital_floor_5: '서울중앙병원 5층',
   hospital_floor_6: '서울중앙병원 6층',
   hospital_3ward: '서울중앙병원 3병동',
   hospital_6ward: '서울중앙병원 6병동',
@@ -1873,6 +1976,8 @@ const WORLD_STATE_BUILDING_IDS = { '서울중앙병원': 'seoul_central_hospital
 const WORLD_STATE_FLOOR_IDS = {
   '3층': 'hospital_floor_3',
   hospital_floor_3: 'hospital_floor_3',
+  '5층': 'hospital_floor_5',
+  hospital_floor_5: 'hospital_floor_5',
   '6층': 'hospital_floor_6',
   hospital_floor_6: 'hospital_floor_6'
 };
@@ -1898,6 +2003,19 @@ function buildWorldStatePatch(rawPatch) {
     result.location_label = rawPatch.location_label.trim();
   }
   return Object.keys(result).length ? result : null;
+}
+
+// Always the full merged object, never the raw partial patch: if the model
+// only returns a changed location_label (or any subset of fields), using
+// just that fragment would lose the building/floor/ward the player was
+// already in. Shared by buildSavePatch (commit time) and the NPC-location
+// eligibility check at Extract time so both see the same "current place"
+// even when this turn itself contains the move.
+function computeEffectiveWorldState(previousWorldState, rawWorldStatePatch) {
+  return {
+    ...(isPlainObject(previousWorldState) ? previousWorldState : {}),
+    ...(buildWorldStatePatch(rawWorldStatePatch) || {})
+  };
 }
 
 // ─────────────────────────────────────────────
@@ -1966,32 +2084,72 @@ function nextSuggestionId(existingList, turnNumber) {
   return `suggestion_${turnNumber}_${sameTurnCount + 1}`;
 }
 
+// Only the four official tier names are ever written by a new activate/
+// update — legacy free-form values ('surface', 'deep', ...) already stored
+// on old saves are left untouched by deactivate/update-without-strength,
+// but can never be (re)written going forward.
+function normalizeStrengthForStorage(value) {
+  return typeof value === 'string' && HYPNOSIS_STRENGTH_TIERS.includes(value.trim()) ? value.trim() : null;
+}
+
 function applySuggestionAction(previousSave, action, currentCharacterId, turnNumber) {
-  if (!isPlainObject(action) || !['activate', 'deactivate'].includes(action.action)) return null;
+  if (!isPlainObject(action) || !['activate', 'update', 'deactivate'].includes(action.action)) return null;
   if (!currentCharacterId || currentCharacterId === 'narrator') return null;
   const actionCharacterId = typeof action.character_id === 'string' ? action.character_id : null;
   if (actionCharacterId && actionCharacterId !== currentCharacterId) return null;
 
   const previousMap = normalizeLegacyActiveSuggestions(previousSave?.active_suggestions);
   const list = Array.isArray(previousMap[currentCharacterId]) ? previousMap[currentCharacterId] : [];
-  const content = normalizeSuggestionContent(action.content);
-  if (!content) return null;
+  const capability = calculateHypnosisCapability(previousSave);
 
   if (action.action === 'activate') {
+    const content = normalizeSuggestionContent(action.content);
+    if (!content) return null;
     // Structural guard: even if the model (or a manually-typed player action)
     // proposes a new suggestion while every slot is already full, the Worker
     // must refuse it rather than trust prompt compliance alone.
-    if (!calculateHypnosisCapability(previousSave).can_create_suggestion) return null;
-    const strength = typeof action.strength === 'string' && action.strength.trim() ? action.strength.trim() : 'surface';
+    if (!capability.can_create_suggestion) return null;
+    const strength = normalizeStrengthForStorage(action.strength);
+    // A request above the level-gated ceiling is rejected outright, never
+    // silently downgraded — auto-adjusting would let the saved state quietly
+    // diverge from what the narrative actually described.
+    if (!strength || hypnosisStrengthRank(strength) > capability.max_strength_rank) return null;
     const duplicate = list.some(item => item?.active && normalizeSuggestionContent(item.content) === content);
     if (duplicate) return null;
     const newItem = { id: nextSuggestionId(list, turnNumber), content, strength, created_turn: turnNumber, active: true };
     return { active_suggestions: { [currentCharacterId]: [...list, newItem] } };
   }
 
-  const target = list.find(item => item?.active && normalizeSuggestionContent(item.content) === content);
+  // 'update' and 'deactivate' both locate an existing entry by id (preferred)
+  // or by matching its current content — never by the action's new content,
+  // which for 'update' names what the entry is being changed *to*.
+  const targetId = typeof action.id === 'string' && action.id.trim() ? action.id.trim() : null;
+  const oldContent = normalizeSuggestionContent(action.old_content ?? (action.action === 'deactivate' ? action.content : undefined));
+  const target = list.find(item => {
+    if (!item?.active) return false;
+    if (targetId) return item.id === targetId;
+    return oldContent && normalizeSuggestionContent(item.content) === oldContent;
+  });
   if (!target) return null;
-  return { active_suggestions: { [currentCharacterId]: list.map(item => item === target ? { ...item, active: false } : item) } };
+
+  if (action.action === 'deactivate') {
+    return { active_suggestions: { [currentCharacterId]: list.map(item => item === target ? { ...item, active: false } : item) } };
+  }
+
+  // 'update': never consumes a new slot, and content changes are optional —
+  // a strength-only or content-only update is fine as long as one is given.
+  const newContent = normalizeSuggestionContent(action.content) || target.content;
+  let newStrength = target.strength;
+  if (action.strength !== undefined) {
+    const requestedStrength = normalizeStrengthForStorage(action.strength);
+    if (!requestedStrength || hypnosisStrengthRank(requestedStrength) > capability.max_strength_rank) return null;
+    newStrength = requestedStrength;
+  }
+  return {
+    active_suggestions: {
+      [currentCharacterId]: list.map(item => item === target ? { ...item, content: newContent, strength: newStrength } : item)
+    }
+  };
 }
 
 // Injects every registered NPC's active suggestions (not just the current
@@ -2090,7 +2248,7 @@ function calculateHypnosisCapability(save = {}, master = {}) {
   );
   const { max_active: maxActive, available_strength: availableStrength } = getHypnosisSuggestionLimits(level);
   const remainingSlots = Math.max(0, maxActive - activeCount);
-  const strengthRank = hypnosisStrengthRank(availableStrength);
+  const maxStrengthRank = hypnosisStrengthRank(availableStrength);
 
   const csaLimits = getCsaLimits(level);
   const csaActiveCount = (Array.isArray(save?.csa_active) ? save.csa_active : []).filter(item => item?.active).length;
@@ -2101,14 +2259,21 @@ function calculateHypnosisCapability(save = {}, master = {}) {
     exp,
     next_level_exp: nextLevelExp,
     available_strength: availableStrength,
+    // Explicit per-tier flags instead of one ambiguous "can go deeper"
+    // boolean — Lv.3 unlocks 중간 but must still reject 강한/깊은 최면,
+    // which a single strengthRank>0 check couldn't distinguish.
+    max_strength_rank: maxStrengthRank,
+    can_use_weak: true,
+    can_use_medium: maxStrengthRank >= 1,
+    can_use_strong: maxStrengthRank >= 2,
+    can_use_deep: maxStrengthRank >= 3,
     active_count: activeCount,
     max_active: maxActive,
     remaining_slots: remainingSlots,
     can_create_suggestion: remainingSlots > 0,
     can_edit_same_strength: activeCount > 0,
     can_disable_or_delete: activeCount > 0,
-    can_increase_strength: activeCount > 0 && strengthRank > 0,
-    can_attempt_deeper_hypnosis: strengthRank > 0,
+    can_increase_strength: activeCount > 0 && maxStrengthRank > 0,
     csa_active_count: csaActiveCount,
     csa_max_active: csaLimits.max_active,
     csa_daily_used: csaDailyUsed,
@@ -2132,17 +2297,26 @@ function buildCurrentHypnosisCapabilitySection(capability) {
     can_edit_same_strength: canEditSameStrength,
     can_disable_or_delete: canDisableOrDelete,
     can_increase_strength: canIncreaseStrength,
-    can_attempt_deeper_hypnosis: canAttemptDeeperHypnosis
+    can_use_medium: canUseMedium,
+    can_use_strong: canUseStrong,
+    can_use_deep: canUseDeep
   } = capability;
 
   const slotBan = !canCreateSuggestion
     ? `\n- 남은 암시 슬롯이 0이므로 [3. 선택지]에 다음 표현이 들어간 선택지를 만들지 마라: 새 암시, 추가 암시, 중첩 암시, 또 다른 암시.`
     : '';
-  const strengthBan = !canAttemptDeeperHypnosis
-    ? `\n- 현재 사용 가능한 최면 강도는 "${availableStrength}"이 최고치이므로 [3. 선택지]에 다음 표현이 들어간 선택지를 만들지 마라: 강화, 더 깊게, 깊은 최면, 중간 최면, 강한 최면, 한 단계 올린다.`
+  const tierBans = [];
+  if (!canUseMedium) tierBans.push('중간 최면');
+  if (!canUseStrong) tierBans.push('강한 최면');
+  if (!canUseDeep) tierBans.push('깊은 최면', '더 깊게');
+  const strengthBan = tierBans.length
+    ? `\n- 현재 사용 가능한 최면 강도는 "${availableStrength}"이 최고치이므로 [3. 선택지]에 다음 표현이 들어간 선택지를 만들지 마라: ${tierBans.join(', ')}.`
+    : '';
+  const increaseBan = !canIncreaseStrength
+    ? `\n- 강도를 올릴 활성 암시가 없거나 이미 최고 강도이므로 "강화", "한 단계 올린다" 같은 표현이 들어간 선택지를 만들지 마라.`
     : '';
 
-  return `\n\n[CURRENT HYPNOSIS APP CAPABILITY — HARD CONSTRAINT]\n\n현재 레벨: Lv.${currentLevel}\n사용 가능한 최면 강도: ${availableStrength}\n암시 슬롯: 활성 ${activeCount} / 최대 ${maxActive} (남은 슬롯 ${remainingSlots})\n\n이번 턴 실제로 가능한 어플 행동:\n- 새 암시 생성: ${canCreateSuggestion ? '가능' : '불가능'}\n- 기존 암시를 현재 허용 강도 안에서 수정: ${canEditSameStrength ? '가능' : '불가능(활성 암시 없음)'}\n- 기존 암시 OFF 또는 삭제: ${canDisableOrDelete ? '가능' : '불가능(활성 암시 없음)'}\n- 기존 암시 강도 올리기: ${canIncreaseStrength ? '가능' : '불가능'}\n- 더 깊거나 강한 최면 시도: ${canAttemptDeeperHypnosis ? '가능' : '불가능'}\n${slotBan}${strengthBan}\n- 슬롯이 가득 차 있어도 기존 암시를 같은 허용 강도 안에서 수정하거나 OFF/삭제하는 선택지는 항상 만들 수 있다.\n- 이미 활성 상태인 암시의 효과를 이용해 평범한 대화나 부탁을 하는 선택지는 항상 만들 수 있다. 단, 그 대화 자체를 암시 강화나 최면 심화로 표현하지 마라.\n- [3. 선택지] 네 개는 위 조건을 모두 만족해야 한다. 하나라도 위반하면 안 된다.`;
+  return `\n\n[CURRENT HYPNOSIS APP CAPABILITY — HARD CONSTRAINT]\n\n현재 레벨: Lv.${currentLevel}\n사용 가능한 최면 강도: ${availableStrength}\n암시 슬롯: 활성 ${activeCount} / 최대 ${maxActive} (남은 슬롯 ${remainingSlots})\n\n이번 턴 실제로 가능한 어플 행동:\n- 새 암시 생성: ${canCreateSuggestion ? '가능' : '불가능'}\n- 기존 암시를 현재 허용 강도 안에서 수정: ${canEditSameStrength ? '가능' : '불가능(활성 암시 없음)'}\n- 기존 암시 OFF 또는 삭제: ${canDisableOrDelete ? '가능' : '불가능(활성 암시 없음)'}\n- 기존 암시 강도 올리기: ${canIncreaseStrength ? '가능' : '불가능'}\n- 중간 강도 사용: ${canUseMedium ? '가능' : '불가능'}\n- 강한 강도 사용: ${canUseStrong ? '가능' : '불가능'}\n- 깊은 최면 사용: ${canUseDeep ? '가능' : '불가능'}\n${slotBan}${strengthBan}${increaseBan}\n- 슬롯이 가득 차 있어도 기존 암시를 같은 허용 강도 안에서 수정하거나 OFF/삭제하는 선택지는 항상 만들 수 있다.\n- 이미 활성 상태인 암시의 효과를 이용해 평범한 대화나 부탁을 하는 선택지는 항상 만들 수 있다. 단, 그 대화 자체를 암시 강화나 최면 심화로 표현하지 마라.\n- [3. 선택지] 네 개는 위 조건을 모두 만족해야 한다. 하나라도 위반하면 안 된다.`;
 }
 
 // Pre-computed display text for [2. 플레이어 상황판]'s 최면 어플 요약 4줄 — the
@@ -2159,8 +2333,16 @@ function buildHypnosisStatusPanelData(capability) {
 
 // Deterministic keyword check (not model judgment) for [3. 선택지] entries
 // that are structurally impossible given the current hypnosis capability.
+// Tier-name phrases are checked individually against the tier they name
+// (Lv.3 must still reject "깊은 최면" even though "중간 최면" is fine) —
+// a single blanket "can go deeper" flag can't make that distinction.
 const SLOT_FULL_FORBIDDEN_PHRASES = ['새 암시', '추가 암시', '중첩 암시', '또 다른 암시'];
-const STRENGTH_CAP_FORBIDDEN_PHRASES = ['강화', '더 깊게', '깊은 최면', '중간 최면', '강한 최면', '한 단계 올린다', '한 단계 올려'];
+const GENERIC_INCREASE_FORBIDDEN_PHRASES = ['강화', '한 단계 올린다', '한 단계 올려'];
+const TIER_NAME_FORBIDDEN_PHRASES = [
+  { phrases: ['중간 최면'], allowedWhen: capability => capability.can_use_medium },
+  { phrases: ['강한 최면'], allowedWhen: capability => capability.can_use_strong },
+  { phrases: ['깊은 최면', '더 깊게'], allowedWhen: capability => capability.can_use_deep }
+];
 
 function findInfeasibleChoices(choices, capability) {
   if (!Array.isArray(choices) || !capability) return [];
@@ -2171,9 +2353,20 @@ function findInfeasibleChoices(choices, capability) {
       const hit = SLOT_FULL_FORBIDDEN_PHRASES.find(phrase => choice.includes(phrase));
       if (hit) { problems.push({ choice, reason: `암시 슬롯이 가득 찼는데 "${hit}" 표현이 포함됨` }); continue; }
     }
-    if (!capability.can_attempt_deeper_hypnosis) {
-      const hit = STRENGTH_CAP_FORBIDDEN_PHRASES.find(phrase => choice.includes(phrase));
-      if (hit) problems.push({ choice, reason: `사용 가능 강도가 "${capability.available_strength}"인데 "${hit}" 표현이 포함됨` });
+    let tierViolation = false;
+    for (const tier of TIER_NAME_FORBIDDEN_PHRASES) {
+      if (tier.allowedWhen(capability)) continue;
+      const hit = tier.phrases.find(phrase => choice.includes(phrase));
+      if (hit) {
+        problems.push({ choice, reason: `사용 가능 강도가 "${capability.available_strength}"인데 "${hit}" 표현이 포함됨` });
+        tierViolation = true;
+        break;
+      }
+    }
+    if (tierViolation) continue;
+    if (!capability.can_increase_strength) {
+      const hit = GENERIC_INCREASE_FORBIDDEN_PHRASES.find(phrase => choice.includes(phrase));
+      if (hit) problems.push({ choice, reason: `강도를 올릴 활성 암시가 없거나 이미 최고 강도인데 "${hit}" 표현이 포함됨` });
     }
   }
   return problems;
@@ -2191,7 +2384,9 @@ ${(narrativeText || '').slice(-1500)}
 사용 가능한 최면 강도: ${capability.available_strength}
 암시 슬롯: 활성 ${capability.active_count} / 최대 ${capability.max_active} (남은 슬롯 ${capability.remaining_slots})
 새 암시 생성 가능: ${capability.can_create_suggestion ? '가능' : '불가능'}
-더 깊거나 강한 최면 시도 가능: ${capability.can_attempt_deeper_hypnosis ? '가능' : '불가능'}
+중간 강도 사용 가능: ${capability.can_use_medium ? '가능' : '불가능'}
+강한 강도 사용 가능: ${capability.can_use_strong ? '가능' : '불가능'}
+깊은 최면 사용 가능: ${capability.can_use_deep ? '가능' : '불가능'}
 
 [방금 실패한 선택지와 이유]
 ${reasonLines}
@@ -2278,6 +2473,269 @@ async function repairUnregisteredNpcChoices(env, narrativeText, problems) {
   return choices.length === 4 ? choices : null;
 }
 
+// ─────────────────────────────────────────────
+// Narrative/choice NPC-contract validation — a Story turn that names a
+// wrong-location registered NPC, invents an unregistered named individual,
+// or gives one independent dialogue lines is a broken Story turn, not a
+// fixable JSON field, so this is checked before any of the JSON-level
+// repairs run.
+// ─────────────────────────────────────────────
+
+const GENERIC_NPC_DESCRIPTORS = new Set([
+  '동료', '지나가던', '다른', '같은', '어떤', '낯선', '젊은', '나이든', '근처', '옆', '한'
+]);
+const NAMED_INDIVIDUAL_ROLE_SUFFIXES = ['수간호사', '간호사', '의사', '과장', '환자', '보호자', '직원', '실장', '주임', '대리', '부장'];
+
+function isGenericOrKnownName(candidate, characters, playerName) {
+  if (GENERIC_NPC_DESCRIPTORS.has(candidate)) return true;
+  if (playerName && candidate === playerName) return true;
+  const registeredNames = new Set(
+    Object.values(isPlainObject(characters) ? characters : {}).map(c => c?.name || c?.['이름']).filter(Boolean)
+  );
+  return registeredNames.has(candidate);
+}
+
+// "박미영 간호사", "이민호 의사" — a 2-4 char Hangul name directly followed
+// by a role/title. Deliberately narrow (role-suffix required) since a bare
+// 2-4 char Hangul token alone is far too ambiguous to safely flag as a name.
+function findUnregisteredNamedIndividualsInNarrative(text, characters = {}, playerName = '') {
+  if (typeof text !== 'string' || !text) return [];
+  const pattern = new RegExp(`([가-힣]{2,4})\\s?(?:${NAMED_INDIVIDUAL_ROLE_SUFFIXES.join('|')})`, 'g');
+  const found = [];
+  const seen = new Set();
+  let match;
+  while ((match = pattern.exec(text))) {
+    const candidate = match[1];
+    if (isGenericOrKnownName(candidate, characters, playerName) || seen.has(match[0])) continue;
+    seen.add(match[0]);
+    found.push(match[0]);
+  }
+  return found;
+}
+
+// Matches both the current "이름 (연기지시): "..."" dialogue format and the
+// legacy "**이름** (연기지시): "..."" one, so old-format narrative (e.g. a
+// replayed/regenerated turn) is still checked correctly.
+const DIALOGUE_SPEAKER_LINE_PATTERN = /^\s*(?:\*\*)?([가-힣]{2,6})(?:\*\*)?\s*\([^)\n]{0,40}\)\s*:\s*[“"]/gm;
+
+function findUnregisteredDialogueSpeakers(text, characters = {}, playerName = '') {
+  if (typeof text !== 'string' || !text) return [];
+  const found = [];
+  const seen = new Set();
+  DIALOGUE_SPEAKER_LINE_PATTERN.lastIndex = 0;
+  let match;
+  while ((match = DIALOGUE_SPEAKER_LINE_PATTERN.exec(text))) {
+    const speaker = match[1];
+    if (isGenericOrKnownName(speaker, characters, playerName) || seen.has(speaker)) continue;
+    seen.add(speaker);
+    found.push(speaker);
+  }
+  return found;
+}
+
+// Deterministically re-derives which choices name a specific individual as
+// a direct interaction target, from the choice text itself — used to
+// re-validate choices after a repair (which doesn't re-report
+// choice_named_targets) as well as for the narrative-wide contract check.
+function deriveChoiceNamedTargets(choices, characters = {}) {
+  if (!Array.isArray(choices)) return [];
+  const targets = [];
+  choices.forEach((choice, index) => {
+    if (typeof choice !== 'string' || !choice.trim()) return;
+    const registeredMention = detectExplicitRegisteredNpcMentions(choice, characters)[0];
+    if (registeredMention) {
+      targets.push({ choice_index: index, name: registeredMention.name });
+      return;
+    }
+    const pattern = new RegExp(`([가-힣]{2,4})\\s?(?:${NAMED_INDIVIDUAL_ROLE_SUFFIXES.join('|')})`);
+    const match = pattern.exec(choice);
+    if (match && !isGenericOrKnownName(match[1], characters, '')) {
+      targets.push({ choice_index: index, name: match[1] });
+    }
+  });
+  return targets;
+}
+
+function buildNameToCharacterIdMap(characters = {}) {
+  const map = new Map();
+  for (const [id, character] of Object.entries(isPlainObject(characters) ? characters : {})) {
+    const name = character?.name || character?.['이름'];
+    if (typeof name === 'string' && name.trim()) map.set(name.trim(), id);
+  }
+  return map;
+}
+
+function findLocationIneligibleChoiceTargets(choices, namedTargets, worldState = {}, characters = {}) {
+  if (!Array.isArray(namedTargets) || !Array.isArray(choices)) return [];
+  const nameToId = buildNameToCharacterIdMap(characters);
+  const problems = [];
+  for (const target of namedTargets) {
+    const choice = choices[target.choice_index];
+    const characterId = nameToId.get(target.name);
+    if (!choice || !characterId) continue;
+    if (!isNpcEligibleForScene(characterId, worldState, characters)) {
+      problems.push({ choice, name: target.name, reason: `"${target.name}"은(는) 현재 장소에 있을 수 없는 NPC` });
+    }
+  }
+  return problems;
+}
+
+function validateNarrativeNpcContract({ narrativeText, characters = {}, worldState = {}, playerName = '' } = {}) {
+  const errors = [];
+
+  const mentions = detectExplicitRegisteredNpcMentions(narrativeText, characters);
+  const seenIneligible = new Set();
+  for (const mention of mentions) {
+    if (seenIneligible.has(mention.character_id) || isNpcEligibleForScene(mention.character_id, worldState, characters)) continue;
+    seenIneligible.add(mention.character_id);
+    errors.push(`registered NPC "${mention.name}"(${mention.character_id}) named but not eligible for the current scene location`);
+  }
+
+  for (const label of findUnregisteredNamedIndividualsInNarrative(narrativeText, characters, playerName)) {
+    errors.push(`unregistered named individual "${label}" mentioned`);
+  }
+
+  for (const speaker of findUnregisteredDialogueSpeakers(narrativeText, characters, playerName)) {
+    errors.push(`unregistered dialogue speaker "${speaker}"`);
+  }
+
+  // An unregistered/location-ineligible *choice* target is deliberately not
+  // checked here even though it's the same underlying concern: unlike prose
+  // narrative text, [3. 선택지] is a JSON-level field validateFinalChoices
+  // can already repair in place (see below) — hard-rejecting the whole Story
+  // turn for something the choice-repair pipeline fixes on its own would
+  // make that pipeline dead code.
+
+  return { ok: errors.length === 0, errors };
+}
+
+// ─────────────────────────────────────────────
+// Final-choice unification (item 3) — the hypnosis-capability repair and
+// the unregistered-NPC repair used to run independently, so the second
+// repair's rewrite could silently reintroduce a violation the first one had
+// just fixed. validateFinalChoices re-checks every rule together, once,
+// against whatever the current choices actually are.
+// ─────────────────────────────────────────────
+
+function normalizeChoiceForComparison(text) {
+  return String(text || '').replace(/[\s"“”'‘’.,·…!?()\-]/g, '');
+}
+
+function choiceSimilarity(a, b) {
+  const na = normalizeChoiceForComparison(a);
+  const nb = normalizeChoiceForComparison(b);
+  if (!na || !nb) return 0;
+  if (na === nb) return 1;
+  const bigrams = value => {
+    const set = new Set();
+    for (let i = 0; i < value.length - 1; i++) set.add(value.slice(i, i + 2));
+    return set;
+  };
+  const ba = bigrams(na);
+  const bb = bigrams(nb);
+  if (!ba.size || !bb.size) return 0;
+  let overlap = 0;
+  for (const gram of ba) if (bb.has(gram)) overlap++;
+  return (2 * overlap) / (ba.size + bb.size);
+}
+
+const NEAR_DUPLICATE_SIMILARITY_THRESHOLD = 0.85;
+
+function findNearDuplicateChoices(choices) {
+  if (!Array.isArray(choices)) return [];
+  const problems = [];
+  for (let i = 0; i < choices.length; i++) {
+    for (let j = i + 1; j < choices.length; j++) {
+      if (choiceSimilarity(choices[i], choices[j]) >= NEAR_DUPLICATE_SIMILARITY_THRESHOLD) {
+        problems.push({ choice: choices[j], reason: `선택지 ${i + 1}번과 사실상 동일하거나 거의 동일함` });
+      }
+    }
+  }
+  return problems;
+}
+
+// Deliberately generic, always-safe actions — no suggestion creation or
+// strengthening, no named individuals — used only when repaired choices
+// still fail validation and there's nothing left to repair further.
+function buildSafeFallbackChoices() {
+  return [
+    '가벼운 질문을 건네본다.',
+    '주변 상황을 조용히 관찰한다.',
+    '다른 장소로 이동할지 생각해본다.',
+    '대화를 마무리하고 자리를 정리한다.'
+  ];
+}
+
+// Returns both a flat string `errors` list (logging/tests) and a structured
+// `problems` list of {choice, reason} (repair-prompt use) — every check
+// contributes to both so a single repair call can be told everything wrong
+// at once instead of chasing one rule at a time.
+function validateFinalChoices(choices, { capability, characters = {}, worldState = {}, playerName = '' } = {}) {
+  if (!Array.isArray(choices) || choices.length !== 4) {
+    return { ok: false, errors: ['choices must be exactly 4 entries'], problems: [], named_targets: [] };
+  }
+  const emptinessErrors = [];
+  choices.forEach((choice, index) => {
+    if (typeof choice !== 'string' || !choice.trim()) emptinessErrors.push(`choice[${index}] is empty`);
+  });
+  if (emptinessErrors.length) return { ok: false, errors: emptinessErrors, problems: [], named_targets: [] };
+
+  const errors = [];
+  const problems = [];
+  const record = (list, prefix) => list.forEach(p => {
+    errors.push(`${prefix}: ${p.reason}`);
+    problems.push(p);
+  });
+
+  if (capability) record(findInfeasibleChoices(choices, capability), 'hypnosis capability');
+  const namedTargets = deriveChoiceNamedTargets(choices, characters);
+  record(findUnregisteredChoiceTargets(choices, namedTargets, characters), 'unregistered target');
+  record(findLocationIneligibleChoiceTargets(choices, namedTargets, worldState, characters), 'location-ineligible target');
+  record(findNearDuplicateChoices(choices), 'near-duplicate');
+
+  return { ok: errors.length === 0, errors, problems, named_targets: namedTargets };
+}
+
+function buildFinalChoiceRepairPrompt(narrativeText, problems) {
+  const reasonLines = problems.map(p => `- "${p.choice}" → ${p.reason}`).join('\n');
+  return `너는 인터랙티브 게임의 [3. 선택지] 네 개만 다시 작성하는 역할이다. 서사 본문은 건드리지 않는다. 유효한 JSON 객체 하나만 출력한다. 마크다운 코드펜스와 설명문을 절대 쓰지 마라.
+
+[방금 생성된 서사]
+${(narrativeText || '').slice(-1500)}
+
+[문제 — 아래 항목을 모두 해결해야 한다]
+${reasonLines}
+
+규칙:
+- 정확히 4개의 선택지 문자열을 새로 만든다.
+- 위에서 지적된 모든 문제를 다시 포함하지 않는다.
+- 서로 뚜렷이 구별되는 행동이어야 하며, 사실상 같은 선택지를 두 개 이상 만들지 않는다.
+- 서사의 맥락과 자연스럽게 이어지는 행동이어야 한다.
+
+[요구 JSON 스키마]
+{"choices": ["", "", "", ""]}`;
+}
+
+// Single repair call covering every validateFinalChoices rule at once,
+// replacing the old pattern of running independent repairs (hypnosis,
+// then unregistered-NPC) that could each silently reintroduce the other's
+// violation.
+async function repairFinalChoices(env, narrativeText, problems) {
+  const prompt = buildFinalChoiceRepairPrompt(narrativeText, problems);
+  const result = await requestDeepSeekJsonWithRetry(env, {
+    model: 'deepseek-v4-flash',
+    thinking: { type: 'disabled' },
+    messages: [{ role: 'system', content: prompt }],
+    response_format: { type: 'json_object' },
+    stream: false,
+    max_tokens: 500
+  }, { timeoutMs: 30000, maxAttempts: 1 });
+  const choices = Array.isArray(result.parsed?.choices)
+    ? result.parsed.choices.filter(choice => typeof choice === 'string' && choice.trim())
+    : [];
+  return choices.length === 4 ? choices : null;
+}
+
 // Extract self-reports a missed forced CSA rule in csa_omission (judged
 // against the exact list the Worker computed, not a free guess). The repair
 // never rewrites the already-shown narrative — it only produces a short
@@ -2311,6 +2769,22 @@ async function repairCsaOmission(env, narrativeText, applicableCsaLines, omissio
   }, { timeoutMs: 30000, maxAttempts: 1 });
   const addition = typeof result.parsed?.addition === 'string' ? result.parsed.addition.trim() : '';
   return addition || null;
+}
+
+// Inserts a CSA-omission repair addition at the end of [1. 서사 및 행동],
+// right before [2. 플레이어 상황판] — never after [3. 선택지], which is
+// where naively appending to the end of the whole narrative used to land it.
+// Tolerant of both "[2. 플레이어 상황판]" and "# 2. 플레이어 상황판" heading
+// styles since Story doesn't always use the literal bracket form.
+function insertNarrativeAdditionBeforeStatus(narrative, addition) {
+  const text = typeof narrative === 'string' ? narrative : '';
+  if (!addition) return text;
+  const statusHeadingPattern = /^.*2\.\s*플레이어\s*상황판.*$/m;
+  const match = statusHeadingPattern.exec(text);
+  if (!match) return `${text}\n\n${addition}`.trim();
+  const before = text.slice(0, match.index).replace(/\s+$/, '');
+  const after = text.slice(match.index);
+  return `${before}\n\n${addition}\n\n${after}`;
 }
 
 function buildCurrentSceneSection(save, characters = {}) {
@@ -2729,7 +3203,10 @@ export {
   buildSavePatch,
   buildExtractPrompt,
   buildStoryPrompt,
-  buildNpcLocationRules,
+  isNpcEligibleForScene,
+  getEligibleNpcIds,
+  buildEligibleNpcRosterSection,
+  computeEffectiveWorldState,
   flattenImageCatalog,
   normalizeRegisteredNpcExtract,
   normalizeExtract,
@@ -2772,6 +3249,7 @@ export {
   calculateHypnosisCapability,
   getHypnosisSuggestionLimits,
   hypnosisStrengthRank,
+  normalizeStrengthForStorage,
   buildCurrentHypnosisCapabilitySection,
   buildHypnosisStatusPanelData,
   findInfeasibleChoices,
@@ -2783,6 +3261,17 @@ export {
   stripBoldMarkers,
   findUnregisteredChoiceTargets,
   repairUnregisteredNpcChoices,
+  insertNarrativeAdditionBeforeStatus,
+  validateNarrativeNpcContract,
+  findUnregisteredNamedIndividualsInNarrative,
+  findUnregisteredDialogueSpeakers,
+  deriveChoiceNamedTargets,
+  findLocationIneligibleChoiceTargets,
+  choiceSimilarity,
+  findNearDuplicateChoices,
+  buildSafeFallbackChoices,
+  validateFinalChoices,
+  repairFinalChoices,
   resolveCsaScopeId,
   resolveIsSexual,
   normalizeImagePool,

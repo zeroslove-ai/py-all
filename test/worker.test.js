@@ -47,6 +47,21 @@ import {
   buildCsaApplicationCheckSection,
   stripBoldMarkers,
   findUnregisteredChoiceTargets,
+  isNpcEligibleForScene,
+  getEligibleNpcIds,
+  buildEligibleNpcRosterSection,
+  computeEffectiveWorldState,
+  validateNarrativeNpcContract,
+  findUnregisteredNamedIndividualsInNarrative,
+  findUnregisteredDialogueSpeakers,
+  deriveChoiceNamedTargets,
+  findLocationIneligibleChoiceTargets,
+  choiceSimilarity,
+  findNearDuplicateChoices,
+  buildSafeFallbackChoices,
+  validateFinalChoices,
+  insertNarrativeAdditionBeforeStatus,
+  normalizeStrengthForStorage,
   hasLegacyEncounterEvidence,
   resolveIsSexual,
   normalizeImagePool,
@@ -554,6 +569,196 @@ test('narrator stores no NPC state while registered location characters remain v
   assert.equal(narratorPatch.npc_relationship_state, undefined);
 });
 
+// ─────────────────────────────────────────────
+// Server-side NPC location roster (item 1) — a registered NPC who can't be
+// in the current ward is a distinct failure from an unregistered one.
+// ─────────────────────────────────────────────
+
+test('isNpcEligibleForScene rejects heroine5 in 3병동, accepts her in 6병동, and accepts heroine1 in 3병동', () => {
+  const characters = { heroine1: { name: '한소영' }, heroine5: { name: '김지은' } };
+  assert.equal(isNpcEligibleForScene('heroine5', { ward: 'hospital_3ward' }, characters), false);
+  assert.equal(isNpcEligibleForScene('heroine5', { ward: 'hospital_6ward' }, characters), true);
+  assert.equal(isNpcEligibleForScene('heroine1', { ward: 'hospital_3ward' }, characters), true);
+});
+
+test('isNpcEligibleForScene fails open (allows) when the ward is unknown/unset, and doctors are eligible regardless of ward', () => {
+  const characters = { heroine5: { name: '김지은' }, heroine7: { name: '서지아' } };
+  assert.equal(isNpcEligibleForScene('heroine5', {}, characters), true);
+  assert.equal(isNpcEligibleForScene('heroine5', { ward: 'unknown_ward' }, characters), true);
+  assert.equal(isNpcEligibleForScene('heroine7', { ward: 'hospital_3ward' }, characters), true);
+  assert.equal(isNpcEligibleForScene('heroine7', { ward: 'hospital_6ward' }, characters), true);
+});
+
+test('a registered-but-wrong-location NPC keeps its own character_id (never silently swapped to the previous NPC) but drops sensitive fields', () => {
+  const characters = { heroine1: { name: '한소영' }, heroine5: { name: '김지은' } };
+  const extract = normalizeRegisteredNpcExtract({
+    character_id: 'heroine5', npcs_present: ['heroine5'],
+    npc_emotion: { surface: 'x' }, npc_stat_changes: { 호감도: { delta: 3, reason: 'x' } },
+    npc_relationship_state: { player_ejaculation_count: 1 }, image_id: 42, is_sexual: true,
+    first_encounter_stats: { 호감도: 10, 신뢰도: 10 },
+    suggestion_action: { action: 'activate', character_id: 'heroine5', content: 'x', strength: '약함' }
+  }, characters, 'heroine1', { ward: 'hospital_3ward' });
+  assert.equal(extract.character_id, 'heroine5'); // not silently swapped to heroine1
+  assert.equal(extract._npc_location_rejected, true);
+  assert.equal(extract._npc_registration_rejected, false);
+  assert.deepEqual(extract.npc_emotion, {});
+  assert.deepEqual(extract.npc_stat_changes, {});
+  assert.equal(extract.npc_relationship_state, null);
+  assert.equal(extract.image_id, null);
+  assert.equal(extract.first_encounter_stats, null);
+  assert.equal(extract.suggestion_action, null);
+  const patch = buildSavePatch(extract, {}, null, {}, 5, '');
+  assert.equal(patch.npc_stats, undefined);
+  assert.equal(patch.npc_emotion, undefined);
+  assert.equal('active_suggestions' in patch, false);
+});
+
+test('normalizeRegisteredNpcExtract with no worldState argument fails open (defaults to {}), matching existing 3-arg call sites', () => {
+  const characters = { heroine5: { name: '김지은' } };
+  const extract = normalizeRegisteredNpcExtract({ character_id: 'heroine5' }, characters, null);
+  assert.equal(extract._npc_location_rejected, false);
+});
+
+// ─────────────────────────────────────────────
+// validateNarrativeNpcContract (item 2)
+// ─────────────────────────────────────────────
+
+test('validateNarrativeNpcContract flags an unregistered "이름+직책" mention but allows an anonymous "동료 간호사"', () => {
+  const characters = { heroine1: { name: '한소영' } };
+  const named = validateNarrativeNpcContract({
+    narrativeText: '박미영 간호사가 서류를 건넨다.', characters, worldState: {}, playerName: '금태양'
+  });
+  assert.equal(named.ok, false);
+  assert.match(named.errors.join('\n'), /박미영 간호사/);
+
+  const anonymous = validateNarrativeNpcContract({
+    narrativeText: '동료 간호사가 서류를 건넨다.', characters, worldState: {}, playerName: '금태양'
+  });
+  assert.equal(anonymous.ok, true);
+});
+
+test('validateNarrativeNpcContract never flags the player\'s own name as an unregistered individual', () => {
+  const characters = { heroine1: { name: '한소영' } };
+  const result = validateNarrativeNpcContract({
+    narrativeText: '금태양 간호사가 서류를 정리한다.', characters, worldState: {}, playerName: '금태양'
+  });
+  assert.equal(result.ok, true);
+});
+
+test('validateNarrativeNpcContract flags a registered NPC named in the narrative while in the wrong ward', () => {
+  const characters = { heroine5: { name: '김지은' } };
+  const result = validateNarrativeNpcContract({
+    narrativeText: '김지은이 다가온다.', characters, worldState: { ward: 'hospital_3ward' }, playerName: ''
+  });
+  assert.equal(result.ok, false);
+  assert.match(result.errors.join('\n'), /김지은.*not eligible/);
+});
+
+test('findUnregisteredDialogueSpeakers detects an unregistered "박미영 (연기지시): "대사"" line but not a registered speaker or the player', () => {
+  const characters = { heroine1: { name: '한소영' } };
+  const text = '박미영 (미소를 지으며): "안녕하세요."\n한소영 (차분하게): "네, 알겠습니다."\n금태양 (웃으며): "고마워요."';
+  const speakers = findUnregisteredDialogueSpeakers(text, characters, '금태양');
+  assert.deepEqual(speakers, ['박미영']);
+});
+
+test('findUnregisteredDialogueSpeakers also recognizes the legacy **이름** bold-marked format', () => {
+  const characters = { heroine1: { name: '한소영' } };
+  const text = '**박미영** (미소를 지으며): "안녕하세요."';
+  assert.deepEqual(findUnregisteredDialogueSpeakers(text, characters, ''), ['박미영']);
+});
+
+test('/api/extract returns 422 STORY_NPC_CONTRACT_FAILED and never commits when the narrative violates the NPC contract', async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (url) => {
+    const requestUrl = String(url);
+    if (requestUrl.includes('/rpc/get_extract_context')) {
+      return new Response(JSON.stringify({
+        turn_count: 5,
+        master: { characters: { heroine1: { name: '한소영' } } },
+        save: { player: { name: '금태양', job: '간호사' }, player_setup: { status: 'complete' }, opening_started: true }
+      }), { headers: { 'content-type': 'application/json' } });
+    }
+    if (requestUrl.includes('/rpc/get_image_catalog_for_characters')) {
+      return new Response(JSON.stringify([]), { headers: { 'content-type': 'application/json' } });
+    }
+    if (requestUrl.includes('api.deepseek.com')) {
+      return new Response(JSON.stringify({
+        choices: [{ message: { content: JSON.stringify({
+          character_id: 'narrator', npcs_present: [],
+          choices: ['박미영 간호사에게 인사한다', '한소영에게 인사한다', '자리를 정리한다', '병동을 둘러본다']
+        }) }, finish_reason: 'stop' }]
+      }), { headers: { 'content-type': 'application/json' } });
+    }
+    throw new Error(`unexpected fetch: ${requestUrl}`);
+  };
+  try {
+    const response = await worker.fetch(apiRequest('/api/extract', {
+      game_id: 'test-game', narrative_text: '박미영 간호사가 서류를 건넨다.', player_input: ''
+    }), { DEEPSEEK_API_KEY: 'test' });
+    assert.equal(response.status, 422);
+    const body = await response.json();
+    assert.equal(body.error_code, 'STORY_NPC_CONTRACT_FAILED');
+    assert.ok(Array.isArray(body.validation_errors) && body.validation_errors.length > 0);
+    assert.ok(body.request_id);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+// ─────────────────────────────────────────────
+// validateFinalChoices unified re-check (item 3)
+// ─────────────────────────────────────────────
+
+test('validateFinalChoices catches a hypnosis-capability violation that survives an unregistered-NPC-only repair, and vice versa', () => {
+  const capability = calculateHypnosisCapability({
+    player_progress: { level: 1 },
+    active_suggestions: { heroine1: [{ content: 'a', strength: '약함', active: true }] }
+  });
+  const characters = { heroine1: { name: '한소영' } };
+  // A "repair" that only fixed the unregistered-NPC problem but left a
+  // slot-full violation must still fail re-validation.
+  const stillHypnosisBroken = validateFinalChoices(
+    ['새 암시를 건다', '한소영에게 인사한다', '자리를 정리한다', '병동을 둘러본다'],
+    { capability, characters, worldState: {}, playerName: '' }
+  );
+  assert.equal(stillHypnosisBroken.ok, false);
+  assert.match(stillHypnosisBroken.errors.join('\n'), /hypnosis capability/);
+
+  // And the reverse: a "repair" that only fixed the hypnosis problem but
+  // left an unregistered target must still fail re-validation too.
+  const stillNpcBroken = validateFinalChoices(
+    ['이주연 대리에게 물어본다', '한소영에게 인사한다', '자리를 정리한다', '병동을 둘러본다'],
+    { capability: calculateHypnosisCapability({ player_progress: { level: 1 } }), characters, worldState: {}, playerName: '' }
+  );
+  assert.equal(stillNpcBroken.ok, false);
+  assert.match(stillNpcBroken.errors.join('\n'), /unregistered target/);
+});
+
+test('validateFinalChoices flags a location-ineligible registered NPC target and near-duplicate choices, and recomputes choice_named_targets from the final text', () => {
+  const characters = { heroine5: { name: '김지은' } };
+  const result = validateFinalChoices(
+    ['김지은에게 말을 건다', '김지은 에게 말을 건다', '자리를 정리한다', '병동을 둘러본다'],
+    { capability: null, characters, worldState: { ward: 'hospital_3ward' }, playerName: '' }
+  );
+  assert.equal(result.ok, false);
+  assert.match(result.errors.join('\n'), /location-ineligible target/);
+  assert.match(result.errors.join('\n'), /near-duplicate/);
+  assert.deepEqual(result.named_targets, [
+    { choice_index: 0, name: '김지은' },
+    { choice_index: 1, name: '김지은' }
+  ]);
+});
+
+test('buildSafeFallbackChoices returns exactly 4 generic, always-valid choices with no suggestion creation or named individuals', () => {
+  const fallback = buildSafeFallbackChoices();
+  const capability = calculateHypnosisCapability({
+    player_progress: { level: 1 },
+    active_suggestions: { heroine1: [{ content: 'a', strength: '약함', active: true }] }
+  });
+  const check = validateFinalChoices(fallback, { capability, characters: { heroine1: { name: '한소영' } }, worldState: {}, playerName: '' });
+  assert.equal(check.ok, true);
+});
+
 test('commit-turn re-sanitizes a manipulated unregistered character_id', async () => {
   const originalFetch = globalThis.fetch;
   let committedPatch;
@@ -794,13 +999,13 @@ test('story prompt uses the V1-style player status panel contract and excludes m
 });
 
 test('Story and Extract prompt lengths are logged and NPC delta rules stay Extract-only', () => {
-  const ctx = { master: { characters: {} }, save: { player: {} }, recent_memories: [] };
+  const ctx = { master: { characters: { heroine1: { name: '한소영' } } }, save: { player: {} }, recent_memories: [] };
   const story = buildStoryPrompt(ctx, '테스트 행동', 1);
   const extract = buildExtractPrompt('테스트 서사', '테스트 행동', ctx, [], 2);
   console.log(`[prompt-length] story=${story.messages[0].content.length} extract=${extract.length}`);
   assert.doesNotMatch(story.messages[0].content, /NPC STAT DELTA CONTRACT|npc_stat_changes/);
   assert.match(story.messages[0].content, /등록 상호작용 NPC/);
-  assert.match(story.messages[0].content, /3병동 상호작용/);
+  assert.match(story.messages[0].content, /\[ELIGIBLE NPC ROSTER — CURRENT SCENE\]/);
   assert.match(extract, /NPC STAT DELTA CONTRACT/);
   assert.equal(story.messages[0].content.length > 0, true);
   assert.equal(extract.length > 0, true);
@@ -1084,7 +1289,9 @@ test('Extract mind-monitor contract requires npc_emotion for any registered NPC 
 
 test('Extract suggestion_action contract only fires on completed app usage, never on ordinary persuasion', () => {
   const prompt = buildExtractPrompt('서사', '입력', { master: {}, save: {} }, [], 1);
-  assert.match(prompt, /플레이어가 최면 어플을 실제로 사용해 암시를 생성·변경·강화·삭제한 것이 명확히 완료됐을 때만/);
+  assert.match(prompt, /플레이어가 최면 어플을 실제로 조작해 암시를 만들거나 바꾸거나 끈 것이 명확히 완료됐을 때만 suggestion_action을 반환한다/);
+  assert.match(prompt, /action은 activate\(새 암시 생성\) \/ update\(기존 암시 내용·강도 수정\) \/ deactivate\(해제\) 중 하나다/);
+  assert.match(prompt, /strength는 반드시 "약함", "중간", "강함", "깊은 최면" 중 하나만 쓴다/);
   assert.match(prompt, /일반 대화·설득·반복 발언·분위기 조성만으로 암시를 활용하거나 암시 효과를 체감한 턴에는 suggestion_action을 반환하지 않는다/);
 });
 
@@ -1269,10 +1476,10 @@ test('extract.choices no longer leaks into active_suggestions', () => {
 });
 
 test('suggestion_action activates a new suggestion for the current NPC with a deterministic ID', () => {
-  const extract = { character_id: 'heroine9', suggestion_action: { action: 'activate', character_id: 'heroine9', content: '금태양의 도움 요청에 최선을 다해야 한다', strength: 'surface', reason: 'r' } };
+  const extract = { character_id: 'heroine9', suggestion_action: { action: 'activate', character_id: 'heroine9', content: '금태양의 도움 요청에 최선을 다해야 한다', strength: '약함', reason: 'r' } };
   const patch = buildSavePatch(extract, {}, null, {}, 32, '');
   assert.deepEqual(patch.active_suggestions, {
-    heroine9: [{ id: 'suggestion_32_1', content: '금태양의 도움 요청에 최선을 다해야 한다', strength: 'surface', created_turn: 32, active: true }]
+    heroine9: [{ id: 'suggestion_32_1', content: '금태양의 도움 요청에 최선을 다해야 한다', strength: '약함', created_turn: 32, active: true }]
   });
 });
 
@@ -1291,7 +1498,7 @@ test("activating a suggestion for one NPC never touches another NPC's suggestion
     player_progress: { level: 3 },
     active_suggestions: { heroine1: [{ id: 'suggestion_1_1', content: 'other npc suggestion', strength: 'surface', created_turn: 1, active: true }] }
   };
-  const extract = { character_id: 'heroine9', suggestion_action: { action: 'activate', content: 'new suggestion', strength: 'surface' } };
+  const extract = { character_id: 'heroine9', suggestion_action: { action: 'activate', content: 'new suggestion', strength: '약함' } };
   const patch = buildSavePatch(extract, {}, null, previousSave, 2, '');
   assert.deepEqual(Object.keys(patch.active_suggestions), ['heroine9']);
 });
@@ -1307,6 +1514,71 @@ test('deactivating a suggestion that cannot be found is ignored rather than fail
   const previousSave = { active_suggestions: { heroine9: [] } };
   const patch = buildSavePatch({ character_id: 'heroine9', suggestion_action: { action: 'deactivate', content: 'never activated' } }, {}, null, previousSave, 6, '');
   assert.equal('active_suggestions' in patch, false);
+});
+
+// ─────────────────────────────────────────────
+// suggestion_action strength ceiling + update (item 5)
+// ─────────────────────────────────────────────
+
+test('normalizeStrengthForStorage only accepts the four official tier names — legacy free-form values are rejected for new writes', () => {
+  assert.equal(normalizeStrengthForStorage('약함'), '약함');
+  assert.equal(normalizeStrengthForStorage('깊은 최면'), '깊은 최면');
+  assert.equal(normalizeStrengthForStorage('surface'), null);
+  assert.equal(normalizeStrengthForStorage('deep'), null);
+  assert.equal(normalizeStrengthForStorage(undefined), null);
+});
+
+test('activate rejects a strength above the level-gated ceiling instead of silently downgrading it (Lv.1 requests 강함)', () => {
+  const result = applySuggestionAction({ player_progress: { level: 1 } }, { action: 'activate', content: '암시', strength: '강함' }, 'heroine1', 1);
+  assert.equal(result, null);
+});
+
+test('activate rejects 깊은 최면 at Lv.3 and Lv.5 (ceiling is 중간/강함), but accepts it at Lv.8', () => {
+  const rejectedLv3 = applySuggestionAction({ player_progress: { level: 3 } }, { action: 'activate', content: '암시', strength: '깊은 최면' }, 'heroine1', 1);
+  assert.equal(rejectedLv3, null);
+  const rejectedLv5 = applySuggestionAction({ player_progress: { level: 5 } }, { action: 'activate', content: '암시', strength: '깊은 최면' }, 'heroine1', 1);
+  assert.equal(rejectedLv5, null);
+  const acceptedLv8 = applySuggestionAction({ player_progress: { level: 8 } }, { action: 'activate', content: '암시', strength: '깊은 최면' }, 'heroine1', 1);
+  assert.deepEqual(acceptedLv8.active_suggestions.heroine1[0].strength, '깊은 최면');
+});
+
+test('update changes content/strength on an existing suggestion without consuming a new slot', () => {
+  const previousSave = {
+    player_progress: { level: 3 },
+    active_suggestions: { heroine1: [{ id: 's1', content: '원래 암시', strength: '약함', created_turn: 1, active: true }] }
+  };
+  const result = applySuggestionAction(previousSave, { action: 'update', id: 's1', content: '수정된 암시', strength: '중간' }, 'heroine1', 2);
+  assert.deepEqual(result.active_suggestions.heroine1, [{ id: 's1', content: '수정된 암시', strength: '중간', created_turn: 1, active: true }]);
+});
+
+test('update by old_content (no id) locates the right entry, and a strength above the ceiling is rejected', () => {
+  const previousSave = {
+    player_progress: { level: 1 },
+    active_suggestions: { heroine1: [{ id: 's1', content: '원래 암시', strength: '약함', created_turn: 1, active: true }] }
+  };
+  const tooStrong = applySuggestionAction(previousSave, { action: 'update', old_content: '원래 암시', strength: '중간' }, 'heroine1', 2);
+  assert.equal(tooStrong, null);
+  const contentOnly = applySuggestionAction(previousSave, { action: 'update', old_content: '원래 암시', content: '수정된 내용' }, 'heroine1', 2);
+  assert.deepEqual(contentOnly.active_suggestions.heroine1[0].content, '수정된 내용');
+  assert.deepEqual(contentOnly.active_suggestions.heroine1[0].strength, '약함');
+});
+
+test('update is rejected outright when no matching active suggestion exists (wrong id and no matching old_content)', () => {
+  const previousSave = {
+    active_suggestions: { heroine1: [{ id: 's1', content: '원래 암시', strength: '약함', created_turn: 1, active: true }] }
+  };
+  assert.equal(applySuggestionAction(previousSave, { action: 'update', id: 'does_not_exist', content: 'x' }, 'heroine1', 2), null);
+  assert.equal(applySuggestionAction(previousSave, { action: 'update', old_content: '전혀 다른 내용', content: 'x' }, 'heroine1', 2), null);
+  assert.equal(applySuggestionAction({ active_suggestions: {} }, { action: 'update', old_content: '원래 암시', content: 'x' }, 'heroine1', 2), null);
+});
+
+test('update never consumes a new slot — still succeeds when the global slot pool is already full', () => {
+  const previousSave = {
+    player_progress: { level: 1 },
+    active_suggestions: { heroine1: [{ id: 's1', content: '원래 암시', strength: '약함', created_turn: 1, active: true }] }
+  };
+  const result = applySuggestionAction(previousSave, { action: 'update', id: 's1', content: '수정된 암시' }, 'heroine1', 2);
+  assert.deepEqual(result.active_suggestions.heroine1[0].content, '수정된 암시');
 });
 
 test('suggestion_action is blocked for narrator, an unregistered NPC, and a mismatched target NPC', () => {
@@ -1373,6 +1645,26 @@ test('world_state_patch normalizes known Korean place names to standard IDs', ()
   assert.deepEqual(buildWorldStatePatch({ ward: '6병동' }), { ward: 'hospital_6ward' });
 });
 
+test('world_state_patch recognizes 5층 as hospital_floor_5, and computeEffectiveWorldState preserves building+floor+ward+location_label together', () => {
+  assert.deepEqual(buildWorldStatePatch({ floor: '5층' }), { floor: 'hospital_floor_5' });
+  assert.deepEqual(buildWorldStatePatch({ floor: 'hospital_floor_5' }), { floor: 'hospital_floor_5' });
+  const merged = computeEffectiveWorldState(
+    { building: 'seoul_central_hospital', ward: 'hospital_3ward', location_label: '3병동 5층 수간호사실' },
+    { floor: '5층' }
+  );
+  assert.deepEqual(merged, {
+    building: 'seoul_central_hospital', ward: 'hospital_3ward', location_label: '3병동 5층 수간호사실', floor: 'hospital_floor_5'
+  });
+});
+
+test('a floor-scope CSA activates on hospital_floor_5 at Lv.4+', () => {
+  const worldState = { building: 'seoul_central_hospital', floor: 'hospital_floor_5', ward: 'hospital_3ward' };
+  const activation = applyCsaAction({ csa_active: [], csa_daily_used: 0 }, { action: 'activate', content: '5층 전용 상식', scope_type: 'floor' }, 4, 20, worldState);
+  assert.ok(activation);
+  assert.equal(activation.csa_active[0].scope_id, 'hospital_floor_5');
+  assert.equal(activation.csa_active[0].scope_label, '서울중앙병원 5층');
+});
+
 test('world_state_patch ignores unrecognized place names and never clears existing fields with empty strings', () => {
   assert.equal(buildWorldStatePatch({ building: '알 수 없는 건물', floor: '', ward: '', location_label: '' }), null);
   assert.equal(buildWorldStatePatch({}), null);
@@ -1437,7 +1729,7 @@ test('commit-turn persists first_encounter_stats, suggestion_action, and world_s
       extract: {
         character_id: 'heroine9', npcs_present: ['heroine9'],
         first_encounter_stats: { 호감도: 17, 신뢰도: 8, reason: '단정한 외형과 거친 말투' },
-        suggestion_action: { action: 'activate', character_id: 'heroine9', content: '금태양의 도움 요청에 최선을 다해야 한다', strength: 'surface' },
+        suggestion_action: { action: 'activate', character_id: 'heroine9', content: '금태양의 도움 요청에 최선을 다해야 한다', strength: '약함' },
         world_state_patch: { building: '서울중앙병원', floor: '3층', ward: '3병동', location_label: '서울중앙병원 3병동 면회실' },
         npc_emotion: {
           surface: '"괜찮은 척은 하지만 낯선 사람이라 마음이 놓이지 않는다."',
@@ -2659,7 +2951,11 @@ test('calculateHypnosisCapability: Lv.1 with an empty slot allows creating a sug
   assert.equal(capability.can_edit_same_strength, false);
   assert.equal(capability.can_disable_or_delete, false);
   assert.equal(capability.can_increase_strength, false);
-  assert.equal(capability.can_attempt_deeper_hypnosis, false);
+  assert.equal(capability.max_strength_rank, 0);
+  assert.equal(capability.can_use_weak, true);
+  assert.equal(capability.can_use_medium, false);
+  assert.equal(capability.can_use_strong, false);
+  assert.equal(capability.can_use_deep, false);
 });
 
 test('calculateHypnosisCapability: Lv.1 with a full slot (1/1) forbids new suggestions, but still allows editing/disabling/deleting the existing one', () => {
@@ -2675,7 +2971,8 @@ test('calculateHypnosisCapability: Lv.1 with a full slot (1/1) forbids new sugge
   assert.equal(capability.can_edit_same_strength, true);
   assert.equal(capability.can_disable_or_delete, true);
   assert.equal(capability.can_increase_strength, false);
-  assert.equal(capability.can_attempt_deeper_hypnosis, false);
+  assert.equal(capability.can_use_medium, false);
+  assert.equal(capability.can_use_deep, false);
 });
 
 test('calculateHypnosisCapability sums active_count across every NPC, not just the current on-screen one, and excludes inactive entries', () => {
@@ -2701,7 +2998,28 @@ test('calculateHypnosisCapability unlocks a higher strength tier and slot count 
   const capability = calculateHypnosisCapability({ player_progress: { level: 5 }, active_suggestions: { heroine1: [{ content: 'a', strength: '약함', active: true }] } });
   assert.equal(capability.available_strength, '강함');
   assert.equal(capability.can_increase_strength, true);
-  assert.equal(capability.can_attempt_deeper_hypnosis, true);
+  assert.equal(capability.max_strength_rank, 2);
+  assert.equal(capability.can_use_medium, true);
+  assert.equal(capability.can_use_strong, true);
+  assert.equal(capability.can_use_deep, false);
+});
+
+test('calculateHypnosisCapability: Lv.3 unlocks medium but not strong/deep — the exact case the old single "can go deeper" boolean could not distinguish', () => {
+  const capability = calculateHypnosisCapability({ player_progress: { level: 3 } });
+  assert.equal(capability.available_strength, '중간');
+  assert.equal(capability.max_strength_rank, 1);
+  assert.equal(capability.can_use_medium, true);
+  assert.equal(capability.can_use_strong, false);
+  assert.equal(capability.can_use_deep, false);
+});
+
+test('calculateHypnosisCapability: Lv.8 unlocks deep', () => {
+  const capability = calculateHypnosisCapability({ player_progress: { level: 8 } });
+  assert.equal(capability.available_strength, '깊은 최면');
+  assert.equal(capability.max_strength_rank, 3);
+  assert.equal(capability.can_use_medium, true);
+  assert.equal(capability.can_use_strong, true);
+  assert.equal(capability.can_use_deep, true);
 });
 
 test('calculateHypnosisCapability computes CSA active/max/daily numbers from save + level rules, same as getCsaLimits', () => {
@@ -2735,7 +3053,8 @@ test('buildCurrentHypnosisCapabilitySection bans new/overlapping-suggestion phra
   });
   const section = buildCurrentHypnosisCapabilitySection(capability);
   assert.match(section, /새 암시, 추가 암시, 중첩 암시, 또 다른 암시/);
-  assert.match(section, /강화, 더 깊게, 깊은 최면, 중간 최면, 강한 최면, 한 단계 올린다/);
+  assert.match(section, /중간 최면, 강한 최면, 깊은 최면, 더 깊게/);
+  assert.match(section, /"강화", "한 단계 올린다"/);
   assert.match(section, /슬롯이 가득 차 있어도 기존 암시를 같은 허용 강도 안에서 수정하거나 OFF\/삭제하는 선택지는 항상 만들 수 있다/);
   assert.match(section, /암시 강화나 최면 심화로 표현하지 마라/);
 });
@@ -2744,14 +3063,21 @@ test('buildCurrentHypnosisCapabilitySection allows a new weak suggestion when a 
   const capability = calculateHypnosisCapability({ player_progress: { level: 1 } });
   const section = buildCurrentHypnosisCapabilitySection(capability);
   assert.doesNotMatch(section, /새 암시, 추가 암시, 중첩 암시, 또 다른 암시/);
-  assert.match(section, /강화, 더 깊게, 깊은 최면, 중간 최면, 강한 최면, 한 단계 올린다/);
+  assert.match(section, /중간 최면, 강한 최면, 깊은 최면, 더 깊게/);
   assert.match(section, /새 암시 생성: 가능/);
 });
 
-test('buildCurrentHypnosisCapabilitySection drops the strength ban once the level unlocks a higher tier', () => {
-  const capability = calculateHypnosisCapability({ player_progress: { level: 5 } });
+test('buildCurrentHypnosisCapabilitySection at Lv.3 still bans 강한/깊은 최면 but not 중간 최면 — Lv.3 unlocks medium only', () => {
+  const capability = calculateHypnosisCapability({ player_progress: { level: 3 } });
   const section = buildCurrentHypnosisCapabilitySection(capability);
-  assert.doesNotMatch(section, /강화, 더 깊게, 깊은 최면, 중간 최면, 강한 최면, 한 단계 올린다/);
+  assert.doesNotMatch(section, /다음 표현이 들어간 선택지를 만들지 마라: [^\n]*중간 최면/);
+  assert.match(section, /강한 최면, 깊은 최면, 더 깊게/);
+});
+
+test('buildCurrentHypnosisCapabilitySection drops every tier ban once the level unlocks deep (Lv.8)', () => {
+  const capability = calculateHypnosisCapability({ player_progress: { level: 8 } });
+  const section = buildCurrentHypnosisCapabilitySection(capability);
+  assert.doesNotMatch(section, /다음 표현이 들어간 선택지를 만들지 마라: [^\n]*(중간 최면|강한 최면|깊은 최면)/);
 });
 
 test('findInfeasibleChoices flags a full-slot new-suggestion choice and a strength-ceiling choice, leaves ordinary choices alone', () => {
@@ -3035,6 +3361,53 @@ test('/api/extract still returns EXTRACT_JSON_PARSE_FAILED when even the repair 
   }
 });
 
+test('insertNarrativeAdditionBeforeStatus inserts right at the end of [1], before [2. 플레이어 상황판], never after [3. 선택지]', () => {
+  const narrative = '[1. 서사 및 행동]\n한소영이 웃는다.\n\n[2. 플레이어 상황판]\n상태\n\n[3. 선택지]\n1. 계속한다';
+  const result = insertNarrativeAdditionBeforeStatus(narrative, '그녀가 볼에 입을 맞춘다.');
+  const addIndex = result.indexOf('그녀가 볼에 입을 맞춘다.');
+  const statusIndex = result.indexOf('[2. 플레이어 상황판]');
+  const choicesIndex = result.indexOf('[3. 선택지]');
+  assert.ok(addIndex > -1 && addIndex < statusIndex);
+  assert.ok(statusIndex < choicesIndex);
+  assert.match(result, /한소영이 웃는다\./); // original [1] content preserved
+});
+
+test('insertNarrativeAdditionBeforeStatus also recognizes the "# 2. 플레이어 상황판" markdown-heading style, not only bracket form', () => {
+  const narrative = '# 1. 서사 및 행동\n한소영이 웃는다.\n\n# 2. 플레이어 상황판\n상태\n\n# 3. 선택지\n1. 계속한다';
+  const result = insertNarrativeAdditionBeforeStatus(narrative, '추가 문장.');
+  assert.ok(result.indexOf('추가 문장.') < result.indexOf('# 2. 플레이어 상황판'));
+});
+
+test('insertNarrativeAdditionBeforeStatus falls back to appending at the end when no [2] heading is found, and returns the original text unchanged when there is no addition', () => {
+  const narrative = '그냥 짧은 서사.';
+  assert.equal(insertNarrativeAdditionBeforeStatus(narrative, '추가.'), '그냥 짧은 서사.\n\n추가.');
+  assert.equal(insertNarrativeAdditionBeforeStatus(narrative, ''), narrative);
+  assert.equal(insertNarrativeAdditionBeforeStatus(narrative, null), narrative);
+});
+
+// ─────────────────────────────────────────────
+// Dialogue format switch away from ** markers (item 8)
+// ─────────────────────────────────────────────
+
+test('the Story prompt requires the new 이름 (연기지시): "대사" dialogue format, without ** markers', () => {
+  const prompt = buildStoryPrompt({ master: { characters: {} }, save: { player: {} }, recent_memories: [] }, '계속', 1);
+  const content = prompt.messages[0].content;
+  assert.match(content, /\[대사\] NPC 대사는 캐릭터명 \(연기지시\): "대사 내용" 형식으로만/);
+  assert.match(content, /캐릭터명을 마크다운 굵게\(\*\*\)로 감싸지 않는다/);
+});
+
+test('the NPC dialogue minimum contract also states the new (no **) dialogue format', () => {
+  const section = buildNpcDialogueMinimumSection();
+  assert.match(section, /형식은 기존과 동일하게 캐릭터명 \(연기지시\): "대사 내용"이다/);
+  assert.doesNotMatch(section, /\*\*캐릭터명\*\*/);
+});
+
+test('the Extract dialogue-extraction contract accepts both the new format and the legacy **이름** bold-marked one for backward compatibility', () => {
+  const prompt = buildExtractPrompt('서사', '입력', { master: {}, save: {} }, [], 1);
+  assert.match(prompt, /서사에서 캐릭터명 \(연기지시\): "대사 내용" 형식을 찾아 dialogue_lines에 담아라/);
+  assert.match(prompt, /\*\*캐릭터명\*\* \(연기지시\): "대사 내용"처럼 이름이 마크다운 굵게로 감싸진 옛 형식도 동일하게 인식/);
+});
+
 test('getApplicableCsaEntries / buildCsaApplicationCheckSection restrict to in-scope active CSAs and state the forced-rule framing', () => {
   const save = {
     world_state: { building: 'seoul_central_hospital', floor: 'hospital_floor_3', ward: 'hospital_3ward' },
@@ -3059,9 +3432,10 @@ test('getApplicableCsaEntries / buildCsaApplicationCheckSection restrict to in-s
   assert.match(promptSection, /조건을 충족하는 등록 NPC 전원에게 예외 없이 동일하게 적용/);
 });
 
-test('/api/extract triggers a CSA-omission repair that only appends a short continuation, never rewriting the narrative', async () => {
+test('/api/extract fixes a CSA omission by inserting the correction before [2. 플레이어 상황판] and re-running Extract once against the corrected narrative', async () => {
   const originalFetch = globalThis.fetch;
   const deepseekCalls = [];
+  const narrativeText = '[1. 서사 및 행동]\n김지은이 여러 문장을 말했다.\n\n[2. 플레이어 상황판]\n상태 정보\n\n[3. 선택지]\n1. 계속한다';
   globalThis.fetch = async (url, init = {}) => {
     const requestUrl = String(url);
     if (requestUrl.includes('/rpc/get_extract_context')) {
@@ -3072,8 +3446,8 @@ test('/api/extract triggers a CSA-omission repair that only appends a short cont
           player: { name: '금태양', job: '간호사' },
           player_setup: { status: 'complete' },
           opening_started: true,
-          world_state: { ward: 'hospital_3ward' },
-          csa_active: [{ id: 'csa_9', content: '1문장을 말할 때마다 볼뽀뽀', scope_type: 'ward', scope_id: 'hospital_3ward', active: true }]
+          world_state: { ward: 'hospital_6ward' },
+          csa_active: [{ id: 'csa_9', content: '1문장을 말할 때마다 볼뽀뽀', scope_type: 'ward', scope_id: 'hospital_6ward', active: true }]
         }
       }), { headers: { 'content-type': 'application/json' } });
     }
@@ -3084,6 +3458,7 @@ test('/api/extract triggers a CSA-omission repair that only appends a short cont
       const body = JSON.parse(init.body);
       deepseekCalls.push(body);
       if (deepseekCalls.length === 1) {
+        // First extraction pass: reports the missed forced CSA rule.
         return new Response(JSON.stringify({
           choices: [{ message: { content: JSON.stringify({
             character_id: 'heroine5', npcs_present: ['heroine5'],
@@ -3093,21 +3468,42 @@ test('/api/extract triggers a CSA-omission repair that only appends a short cont
           }) }, finish_reason: 'stop' }]
         }), { headers: { 'content-type': 'application/json' } });
       }
+      if (deepseekCalls.length === 2) {
+        // The CSA-omission repair call: produces only the short addition.
+        return new Response(JSON.stringify({
+          choices: [{ message: { content: JSON.stringify({ addition: '말을 마치자마자 그녀의 볼에 가볍게 입을 맞춘다.' }) }, finish_reason: 'stop' }]
+        }), { headers: { 'content-type': 'application/json' } });
+      }
+      // Third call: the single re-extraction against the corrected narrative.
+      // Reports no further omission, proving the repair loop doesn't recurse.
       return new Response(JSON.stringify({
-        choices: [{ message: { content: JSON.stringify({ addition: '말을 마치자마자 그녀의 볼에 가볍게 입을 맞춘다.' }) }, finish_reason: 'stop' }]
+        choices: [{ message: { content: JSON.stringify({
+          character_id: 'heroine5', npcs_present: ['heroine5'],
+          npc_emotion: VALID_NPC_EMOTION,
+          csa_omission: [],
+          choices: ['최종 선택지 1', '최종 선택지 2', '최종 선택지 3', '최종 선택지 4']
+        }) }, finish_reason: 'stop' }]
       }), { headers: { 'content-type': 'application/json' } });
     }
     throw new Error(`unexpected fetch: ${requestUrl}`);
   };
   try {
     const response = await worker.fetch(apiRequest('/api/extract', {
-      game_id: 'test-game', narrative_text: '김지은이 여러 문장을 말했다.', player_input: '계속 대화한다'
+      game_id: 'test-game', narrative_text: narrativeText, player_input: '계속 대화한다'
     }), { DEEPSEEK_API_KEY: 'test' });
     assert.equal(response.status, 200);
     const body = await response.json();
-    assert.equal(deepseekCalls.length, 2);
-    assert.equal(body.content_addition, '말을 마치자마자 그녀의 볼에 가볍게 입을 맞춘다.');
-    assert.deepEqual(body.extract.choices, ['김지은과 계속 대화한다', '다른 화제를 꺼낸다', '자리를 옮긴다', '병동을 둘러본다']);
+    assert.equal(deepseekCalls.length, 3);
+    assert.equal(body.content_addition, null);
+    assert.ok(body.narrative_replacement);
+    const addIndex = body.narrative_replacement.indexOf('말을 마치자마자');
+    const statusIndex = body.narrative_replacement.indexOf('[2. 플레이어 상황판]');
+    const choicesIndex = body.narrative_replacement.indexOf('[3. 선택지]');
+    assert.ok(addIndex > -1 && statusIndex > -1 && choicesIndex > -1);
+    assert.ok(addIndex < statusIndex, 'the addition must land before [2. 플레이어 상황판]');
+    assert.ok(statusIndex < choicesIndex, 'and therefore before [3. 선택지] too');
+    // The final extract reflects the corrected (third) pass, not the first.
+    assert.deepEqual(body.extract.choices, ['최종 선택지 1', '최종 선택지 2', '최종 선택지 3', '최종 선택지 4']);
   } finally {
     globalThis.fetch = originalFetch;
   }
@@ -3221,12 +3617,16 @@ test('/api/extract repairs choices that name an unregistered person as a direct 
   };
   try {
     const response = await worker.fetch(apiRequest('/api/extract', {
-      game_id: 'test-game', narrative_text: '이주연 대리가 다가온다.', player_input: ''
+      // Deliberately vague in the narrative itself (no name+role pattern) —
+      // only the model-hallucinated *choice* text names the unregistered
+      // "이주연 대리", so this exercises the choice-level repair path rather
+      // than the narrative-wide contract check (covered separately).
+      game_id: 'test-game', narrative_text: '낯선 방문객이 다가온다.', player_input: ''
     }), { DEEPSEEK_API_KEY: 'test' });
     assert.equal(response.status, 200);
     const body = await response.json();
     assert.equal(deepseekCalls.length, 2);
-    assert.equal(body.unregistered_npc_choices_repaired, true);
+    assert.equal(body.choices_repaired, true);
     assert.deepEqual(body.extract.choices, ['같은 과 동료에게 물어본다', '한소영에게 인사한다', '자리를 정리한다', '병동을 둘러본다']);
   } finally {
     globalThis.fetch = originalFetch;

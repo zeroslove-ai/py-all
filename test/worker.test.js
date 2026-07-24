@@ -645,6 +645,17 @@ test('validateNarrativeNpcContract never flags the player\'s own name as an unre
   assert.equal(result.ok, true);
 });
 
+test('validateNarrativeNpcContract never flags a fragment of the player\'s own established job title (e.g. "원무과 주임" inside "병원 행정직 / 원무과 주임")', () => {
+  // Caught live on the deployed test game: the status panel's own confirmed
+  // job text tripped the name+role heuristic before this fix.
+  const characters = { heroine1: { name: '한소영' } };
+  const result = validateNarrativeNpcContract({
+    narrativeText: '🧑 정우진 · 29세 · 남성 · 원무과 주임',
+    characters, worldState: {}, playerName: '정우진', playerJob: '병원 행정직 / 원무과 주임'
+  });
+  assert.equal(result.ok, true);
+});
+
 test('validateNarrativeNpcContract flags a registered NPC named in the narrative while in the wrong ward', () => {
   const characters = { heroine5: { name: '김지은' } };
   const result = validateNarrativeNpcContract({

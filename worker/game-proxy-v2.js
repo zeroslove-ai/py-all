@@ -587,6 +587,11 @@ async function handleExtract(req, env) {
   let { extract, jsonRepaired, mindMonitorRepaired, validation, rawText, effectiveWorldState } = firstPass;
   const characters = compatCtx?.master?.characters || {};
   const playerName = typeof compatCtx?.save?.player?.name === 'string' ? compatCtx.save.player.name.trim() : '';
+  // Guards the name+role heuristics below against matching a fragment of
+  // the player's own established job/rank text (e.g. "원무과 주임" inside
+  // "병원 행정직 / 원무과 주임"), which Story is expected to keep echoing
+  // back every turn and which is not an unregistered NPC.
+  const playerJob = typeof compatCtx?.save?.player?.job === 'string' ? compatCtx.save.player.job.trim() : '';
 
   // A registered-but-wrong-location NPC, an unregistered named individual,
   // or an unregistered independent dialogue speaker all mean the Story turn
@@ -596,7 +601,7 @@ async function handleExtract(req, env) {
   // complete: the player_setup candidate cards aren't NPC scenes and
   // shouldn't be checked against the registered-NPC roster at all.
   const narrativeContract = isSetupComplete(compatCtx.save)
-    ? validateNarrativeNpcContract({ narrativeText: narrative_text, characters, worldState: effectiveWorldState, playerName })
+    ? validateNarrativeNpcContract({ narrativeText: narrative_text, characters, worldState: effectiveWorldState, playerName, playerJob })
     : { ok: true, errors: [] };
   if (!narrativeContract.ok) {
     console.error('Story NPC contract failed:', { request_id: requestId, errors: narrativeContract.errors });
@@ -659,7 +664,7 @@ async function handleExtract(req, env) {
   if (isSetupComplete(compatCtx.save)) {
     const tChoices = Date.now();
     const hypnosisCapability = calculateHypnosisCapability(compatCtx.save, compatCtx.master);
-    const validateOptions = { capability: hypnosisCapability, characters, worldState: effectiveWorldState, playerName };
+    const validateOptions = { capability: hypnosisCapability, characters, worldState: effectiveWorldState, playerName, playerJob };
     let check = validateFinalChoices(extract.choices, validateOptions);
     if (!check.ok) {
       try {
@@ -2486,9 +2491,15 @@ const GENERIC_NPC_DESCRIPTORS = new Set([
 ]);
 const NAMED_INDIVIDUAL_ROLE_SUFFIXES = ['수간호사', '간호사', '의사', '과장', '환자', '보호자', '직원', '실장', '주임', '대리', '부장'];
 
-function isGenericOrKnownName(candidate, characters, playerName) {
+// playerJob guards against the player's own established job/rank text
+// ("병원 행정직 / 원무과 주임") tripping the same name+role pattern this
+// exists to catch — "원무과" isn't a person's name, it's a fragment of the
+// player's own confirmed title that Story is expected to keep echoing back
+// in the status panel every turn.
+function isGenericOrKnownName(candidate, characters, playerName, playerJob = '') {
   if (GENERIC_NPC_DESCRIPTORS.has(candidate)) return true;
   if (playerName && candidate === playerName) return true;
+  if (playerJob && playerJob.includes(candidate)) return true;
   const registeredNames = new Set(
     Object.values(isPlainObject(characters) ? characters : {}).map(c => c?.name || c?.['이름']).filter(Boolean)
   );
@@ -2498,7 +2509,7 @@ function isGenericOrKnownName(candidate, characters, playerName) {
 // "박미영 간호사", "이민호 의사" — a 2-4 char Hangul name directly followed
 // by a role/title. Deliberately narrow (role-suffix required) since a bare
 // 2-4 char Hangul token alone is far too ambiguous to safely flag as a name.
-function findUnregisteredNamedIndividualsInNarrative(text, characters = {}, playerName = '') {
+function findUnregisteredNamedIndividualsInNarrative(text, characters = {}, playerName = '', playerJob = '') {
   if (typeof text !== 'string' || !text) return [];
   const pattern = new RegExp(`([가-힣]{2,4})\\s?(?:${NAMED_INDIVIDUAL_ROLE_SUFFIXES.join('|')})`, 'g');
   const found = [];
@@ -2506,7 +2517,7 @@ function findUnregisteredNamedIndividualsInNarrative(text, characters = {}, play
   let match;
   while ((match = pattern.exec(text))) {
     const candidate = match[1];
-    if (isGenericOrKnownName(candidate, characters, playerName) || seen.has(match[0])) continue;
+    if (isGenericOrKnownName(candidate, characters, playerName, playerJob) || seen.has(match[0])) continue;
     seen.add(match[0]);
     found.push(match[0]);
   }
@@ -2518,7 +2529,7 @@ function findUnregisteredNamedIndividualsInNarrative(text, characters = {}, play
 // replayed/regenerated turn) is still checked correctly.
 const DIALOGUE_SPEAKER_LINE_PATTERN = /^\s*(?:\*\*)?([가-힣]{2,6})(?:\*\*)?\s*\([^)\n]{0,40}\)\s*:\s*[“"]/gm;
 
-function findUnregisteredDialogueSpeakers(text, characters = {}, playerName = '') {
+function findUnregisteredDialogueSpeakers(text, characters = {}, playerName = '', playerJob = '') {
   if (typeof text !== 'string' || !text) return [];
   const found = [];
   const seen = new Set();
@@ -2526,7 +2537,7 @@ function findUnregisteredDialogueSpeakers(text, characters = {}, playerName = ''
   let match;
   while ((match = DIALOGUE_SPEAKER_LINE_PATTERN.exec(text))) {
     const speaker = match[1];
-    if (isGenericOrKnownName(speaker, characters, playerName) || seen.has(speaker)) continue;
+    if (isGenericOrKnownName(speaker, characters, playerName, playerJob) || seen.has(speaker)) continue;
     seen.add(speaker);
     found.push(speaker);
   }
@@ -2537,7 +2548,7 @@ function findUnregisteredDialogueSpeakers(text, characters = {}, playerName = ''
 // a direct interaction target, from the choice text itself — used to
 // re-validate choices after a repair (which doesn't re-report
 // choice_named_targets) as well as for the narrative-wide contract check.
-function deriveChoiceNamedTargets(choices, characters = {}) {
+function deriveChoiceNamedTargets(choices, characters = {}, playerName = '', playerJob = '') {
   if (!Array.isArray(choices)) return [];
   const targets = [];
   choices.forEach((choice, index) => {
@@ -2549,7 +2560,7 @@ function deriveChoiceNamedTargets(choices, characters = {}) {
     }
     const pattern = new RegExp(`([가-힣]{2,4})\\s?(?:${NAMED_INDIVIDUAL_ROLE_SUFFIXES.join('|')})`);
     const match = pattern.exec(choice);
-    if (match && !isGenericOrKnownName(match[1], characters, '')) {
+    if (match && !isGenericOrKnownName(match[1], characters, playerName, playerJob)) {
       targets.push({ choice_index: index, name: match[1] });
     }
   });
@@ -2580,7 +2591,7 @@ function findLocationIneligibleChoiceTargets(choices, namedTargets, worldState =
   return problems;
 }
 
-function validateNarrativeNpcContract({ narrativeText, characters = {}, worldState = {}, playerName = '' } = {}) {
+function validateNarrativeNpcContract({ narrativeText, characters = {}, worldState = {}, playerName = '', playerJob = '' } = {}) {
   const errors = [];
 
   const mentions = detectExplicitRegisteredNpcMentions(narrativeText, characters);
@@ -2591,11 +2602,11 @@ function validateNarrativeNpcContract({ narrativeText, characters = {}, worldSta
     errors.push(`registered NPC "${mention.name}"(${mention.character_id}) named but not eligible for the current scene location`);
   }
 
-  for (const label of findUnregisteredNamedIndividualsInNarrative(narrativeText, characters, playerName)) {
+  for (const label of findUnregisteredNamedIndividualsInNarrative(narrativeText, characters, playerName, playerJob)) {
     errors.push(`unregistered named individual "${label}" mentioned`);
   }
 
-  for (const speaker of findUnregisteredDialogueSpeakers(narrativeText, characters, playerName)) {
+  for (const speaker of findUnregisteredDialogueSpeakers(narrativeText, characters, playerName, playerJob)) {
     errors.push(`unregistered dialogue speaker "${speaker}"`);
   }
 
@@ -2670,7 +2681,7 @@ function buildSafeFallbackChoices() {
 // `problems` list of {choice, reason} (repair-prompt use) — every check
 // contributes to both so a single repair call can be told everything wrong
 // at once instead of chasing one rule at a time.
-function validateFinalChoices(choices, { capability, characters = {}, worldState = {}, playerName = '' } = {}) {
+function validateFinalChoices(choices, { capability, characters = {}, worldState = {}, playerName = '', playerJob = '' } = {}) {
   if (!Array.isArray(choices) || choices.length !== 4) {
     return { ok: false, errors: ['choices must be exactly 4 entries'], problems: [], named_targets: [] };
   }
@@ -2688,7 +2699,7 @@ function validateFinalChoices(choices, { capability, characters = {}, worldState
   });
 
   if (capability) record(findInfeasibleChoices(choices, capability), 'hypnosis capability');
-  const namedTargets = deriveChoiceNamedTargets(choices, characters);
+  const namedTargets = deriveChoiceNamedTargets(choices, characters, playerName, playerJob);
   record(findUnregisteredChoiceTargets(choices, namedTargets, characters), 'unregistered target');
   record(findLocationIneligibleChoiceTargets(choices, namedTargets, worldState, characters), 'location-ineligible target');
   record(findNearDuplicateChoices(choices), 'near-duplicate');

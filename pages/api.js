@@ -99,6 +99,20 @@ const api = {
     return readApiResponse(res, 'commit-turn');
   },
 
+  // ─── 8-2. 플레이 기록 조회 ───
+  async history(gameId, { limit = 20, beforeTurn = null } = {}) {
+    const res = await fetch(`${API_BASE}/api/history`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        game_id: gameId,
+        limit,
+        before_turn: beforeTurn
+      })
+    });
+    return readApiResponse(res, 'history');
+  },
+
   // ─── 9. 진행 초기화 ───
   async reset(gameId) {
     const res = await fetch(`${API_BASE}/api/reset`, {

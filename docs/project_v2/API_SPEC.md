@@ -154,6 +154,8 @@ data: [DONE]
 
 한 턴의 서사 저장, 상태 병합, `turn_count` 증가를 Supabase `commit_turn` RPC 한 번으로 처리한다. 브라우저는 `/api/save-turn`과 `/api/set-save`를 따로 호출하지 않는다.
 
+요청에는 선택적으로 `player_input`과 `player_action`(선택지 버튼 클릭 메타데이터: `source`, `choice_index`, `choice_text`)이 포함된다. Worker는 이를 바탕으로 이번 턴의 구조화 기록(`player_action`/`mind_monitor`/`turn_summary`/`narrative_text`/`player_status_text`/`next_choices`)을 만들어 `p_patch`의 예약 키 `_turn_record`로 `commit_turn`에 전달하고, RPC가 같은 트랜잭션에서 `game_memories`에 저장한다. `_turn_record`는 `game_save.data`에 병합되지 않으며, replay(동일 턴 재전송) 시 기존 기록을 덮어쓰지 않는다.
+
 ```json
 {
   "game_id": "uuid-or-supported-game-id",
@@ -197,6 +199,43 @@ data: [DONE]
   "reason": "same_turn_different_content"
 }
 ```
+
+## 6-2. `POST /api/history`
+
+구조화된 플레이 기록을 최신 턴부터 페이지 단위로 조회한다. Supabase `get_play_history` RPC를 호출한다.
+
+```json
+{"game_id": "uuid-or-supported-game-id", "limit": 20, "before_turn": null}
+```
+
+- `limit`: 1~100 (기본 20)
+- `before_turn`: null 또는 양의 정수. 지정하면 그보다 이전 턴만 조회 (페이지네이션)
+
+응답의 `records`는 화면 표시를 위해 `turn_number` 오름차순이다.
+
+```json
+{
+  "records": [
+    {
+      "turn_number": 17,
+      "content": "턴 원문",
+      "player_action": {"source": "choice_button", "raw_input": "...", "resolved_input": "...", "choice_index": 1, "choice_text": "..."},
+      "mind_monitor": {"character_id": "heroine2", "character_name": "강세라", "surface": "...", "inner": "...", "physical_reaction": "...", "source": "generated"},
+      "turn_summary": "...",
+      "character_id": "heroine2",
+      "narrative_text": "...",
+      "player_status_text": "...",
+      "next_choices": ["...", "..."],
+      "created_at": "..."
+    }
+  ],
+  "has_more": true,
+  "next_before_turn": 1,
+  "request_id": "..."
+}
+```
+
+구조화 이전 기록은 추측해 채우지 않는다: `narrative_text`가 비어 있으면 `content`를 그대로 반환하고, `player_action`/`mind_monitor`는 null이 허용된다.
 
 ## 7. `POST /api/reset`
 

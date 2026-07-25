@@ -33,6 +33,7 @@ export default {
         case '/api/set-save':
           return jsonResponse({ error: 'This legacy API is gone. Use /api/commit-turn.' }, 410);
         case '/api/commit-turn': return await handleCommitTurn(req, env);
+        case '/api/history':  return await handleHistory(req, env);
         case '/api/version': return handleVersion(env);
         case '/api/reset':      return await handleReset(req, env);
         default:
@@ -495,6 +496,9 @@ async function performExtractionPass(env, { narrativeText, playerInput, compatCt
   const npcRejected = extract._npc_registration_rejected || extract._npc_location_rejected;
   let validation = validateNpcEmotion(extract.npc_emotion, npcRejected ? 'narrator' : extract.character_id);
   timing.mind_validation_ms = Date.now() - t5;
+  // 턴 기록용 마인드 모니터 출처 — _turn_record에만 쓰이고 game_save.data에는
+  // 영구 저장되지 않는다. 정상 첫 생성이면 generated.
+  if (validation.ok) extract.mind_monitor_source = 'generated';
 
   // H2 item 9: don't let a mind-monitor repair spend the turn's one
   // auxiliary-recovery slot when this turn might also need it for a
@@ -530,6 +534,8 @@ async function performExtractionPass(env, { narrativeText, playerInput, compatCt
           validation.errors = [...validation.fieldErrors.surface, ...validation.fieldErrors.inner, ...validation.fieldErrors.physical_reaction];
           validation.ok = validation.errors.length === 0;
           mindMonitorRepaired = true;
+          // 마인드 보정 호출의 결과를 사용한 턴은 repaired로 기록한다.
+          if (validation.ok) extract.mind_monitor_source = 'repaired';
         }
       } catch (error) {
         console.error('Mind monitor repair failed:', { request_id: requestId, error: error.message });
@@ -543,11 +549,16 @@ async function performExtractionPass(env, { narrativeText, playerInput, compatCt
     const fallbackAvailable = Boolean(characterId) && characterId !== 'narrator' && isPlainObject(existing);
     // Only the field(s) that actually failed fall back — a valid surface
     // must survive even when inner (or vice versa) still fails.
+    let mindFallbackUsed = false;
     for (const field of ['surface', 'inner', 'physical_reaction']) {
       if (validation.fieldErrors[field].length) {
-        extract.npc_emotion[field] = fallbackAvailable && typeof existing[field] === 'string' ? existing[field] : '';
+        const replacement = fallbackAvailable && typeof existing[field] === 'string' ? existing[field] : '';
+        if (replacement) mindFallbackUsed = true;
+        extract.npc_emotion[field] = replacement;
       }
     }
+    // 검증 실패 필드가 기존 저장값으로 대체된 턴은 fallback_previous로 기록한다.
+    if (mindFallbackUsed) extract.mind_monitor_source = 'fallback_previous';
     extract.mind_monitor_error = validation.errors;
     console.error('Mind monitor validation failed after repair:', { request_id: requestId, characterId, errors: validation.errors });
   }
@@ -1028,11 +1039,200 @@ function resolveMarkerChoiceInput(playerInput, lastChoices) {
   return stripChoiceMarker(target);
 }
 
+
+// ─────────────────────────────────────────────
+// 턴 기록 구조화 (structured turn history)
+// ─────────────────────────────────────────────
+// 매 턴 Commit 시 game_memories에 구조화된 기록을 함께 남기기 위한 순수 함수들.
+// 어떤 파싱 실패도 Commit을 막지 않는다 — 전부 fail-open.
+
+const HISTORY_SECTION_TITLES = { 1: '서사 및 행동', 2: '플레이어 상황판', 3: '선택지' };
+
+// "[1. 서사 및 행동]", "# 1. 서사 및 행동", "## 1. 서사 및 행동" 형태의
+// 헤더 "한 줄 전체"만 인식한다 — "[1. 서사 및 행동] (계속)"처럼 뒤에 다른
+// 문자가 붙은 줄은 헤더가 아니라 본문으로 남긴다.
+function findHistorySectionHeader(content, sectionNumber) {
+  const title = HISTORY_SECTION_TITLES[sectionNumber];
+  const re = new RegExp(`^[ \\t]{0,3}(?:#{1,6}[ \\t]*)?\\[?${sectionNumber}\\.[ \\t]*${title}\\]?[ \\t]*$`, 'gm');
+  const match = re.exec(content);
+  if (!match) return null;
+  return { start: match.index, end: match.index + match[0].length };
+}
+
+function splitTurnContentSections(content) {
+  const text = typeof content === 'string' ? content : '';
+  const h2 = findHistorySectionHeader(text, 2);
+  // [2]가 없는 legacy content는 통째로 서사로 취급 (fail-open).
+  if (!h2) return { narrative_text: text, player_status_text: '' };
+  const h1 = findHistorySectionHeader(text, 1);
+  const h3 = findHistorySectionHeader(text, 3);
+  const narrativeStart = h1 && h1.end <= h2.start ? h1.end : 0;
+  const statusEnd = h3 && h3.start >= h2.end ? h3.start : text.length;
+  return {
+    narrative_text: text.slice(narrativeStart, h2.start).trim(),
+    player_status_text: text.slice(h2.end, statusEnd).trim()
+  };
+}
+
+// choice_button 검증용 텍스트 정규화: bold/선택지 마커를 제거하고 trim.
+function normalizeActionCompareText(value) {
+  return stripChoiceMarker(stripBoldMarkers(String(value ?? ''))).trim();
+}
+
+const DIRECT_MARKER_RE = /^(?:([1-4])|([A-Da-d])|([\u2460\u2461\u2462\u2463]))$/;
+const CIRCLED_DIGITS = '\u2460\u2461\u2462\u2463';
+
+// 플레이어 행동 기록 정규화. 프론트가 보낸 source/index/text를 그대로 믿지
+// 않고, choice_button은 서버의 last_choices와 다시 대조해 확정한다. 어떤
+// 이상 입력도 예외 없이 안전한 기록(또는 null)으로 강등한다.
+function normalizePlayerActionRecord(rawPlayerAction, playerInput, lastChoices) {
+  try {
+    const input = typeof playerInput === 'string' ? playerInput : '';
+    if (!input.trim()) return null;
+    // 내부 시작 입력은 기록 대상이 아니다.
+    if (input.trim() === '__START_PLAYER_SETUP__') return null;
+
+    const choices = Array.isArray(lastChoices) ? lastChoices : [];
+    const raw = isPlainObject(rawPlayerAction) ? rawPlayerAction : {};
+    const source = typeof raw.source === 'string' ? raw.source : '';
+    if (source === 'system') return null;
+
+    // 1) choice_button — last_choices[index]와 실제 player_input이
+    //    (bold/마커 제거 후) 정확히 일치할 때만 확정. 불일치 시 강등.
+    if (source === 'choice_button'
+      && Number.isInteger(raw.choice_index)
+      && raw.choice_index >= 0 && raw.choice_index <= 3) {
+      const index = raw.choice_index;
+      const target = choices[index];
+      const normalizedTarget = normalizeActionCompareText(target);
+      if (normalizedTarget && normalizedTarget === normalizeActionCompareText(input)) {
+        return {
+          source: 'choice_button',
+          raw_input: input,
+          resolved_input: normalizedTarget,
+          choice_index: index,
+          choice_text: normalizedTarget
+        };
+      }
+    }
+
+    // 2) 숫자/알파벳/원형 숫자 단독 입력 — resolveMarkerChoiceInput과 같은
+    //    규칙으로 실제 선택지 문장에 해석한다.
+    const trimmed = input.trim();
+    const markerMatch = trimmed.match(DIRECT_MARKER_RE);
+    if (markerMatch) {
+      let index;
+      if (markerMatch[1]) index = Number(markerMatch[1]) - 1;
+      else if (markerMatch[2]) index = markerMatch[2].toUpperCase().charCodeAt(0) - 'A'.charCodeAt(0);
+      else index = CIRCLED_DIGITS.indexOf(markerMatch[3]);
+      const resolved = resolveMarkerChoiceInput(input, choices);
+      const didResolve = typeof resolved === 'string' && resolved !== input;
+      return {
+        source: 'direct_marker',
+        raw_input: input,
+        resolved_input: didResolve ? resolved : input,
+        choice_index: didResolve ? index : null,
+        choice_text: didResolve ? resolved : null
+      };
+    }
+
+    // 3) 그 외 전부 직접 입력.
+    return {
+      source: 'direct_text',
+      raw_input: input,
+      resolved_input: input,
+      choice_index: null,
+      choice_text: null
+    };
+  } catch {
+    return null;
+  }
+}
+
+const MIND_MONITOR_SOURCES = ['generated', 'repaired', 'fallback_previous', 'degraded'];
+
+// 마인드 모니터 이력. narrator/미등록 NPC/전 필드 공백/degraded 턴은 null.
+// source는 Worker Extract 흐름에서 확정된 extract.mind_monitor_source를 사용한다.
+function buildMindMonitorRecord(extract, characters) {
+  try {
+    const characterId = typeof extract?.character_id === 'string' ? extract.character_id : '';
+    if (!characterId || characterId === 'narrator') return null;
+    if (extract?.extract_degraded === true) return null;
+    const roster = isPlainObject(characters) ? characters : {};
+    const character = roster[characterId];
+    if (!isPlainObject(character)) return null;
+    const emotion = isPlainObject(extract?.npc_emotion) ? extract.npc_emotion : {};
+    const surface = typeof emotion.surface === 'string' ? emotion.surface : '';
+    const inner = typeof emotion.inner === 'string' ? emotion.inner : '';
+    const physical = typeof emotion.physical_reaction === 'string' ? emotion.physical_reaction : '';
+    if (!surface.trim() && !inner.trim() && !physical.trim()) return null;
+    const source = MIND_MONITOR_SOURCES.includes(extract?.mind_monitor_source)
+      ? extract.mind_monitor_source
+      : 'generated';
+    return {
+      character_id: characterId,
+      character_name: character.name || character['이름'] || characterId,
+      surface,
+      inner,
+      physical_reaction: physical,
+      source
+    };
+  } catch {
+    return null;
+  }
+}
+
+// turn_summary는 Extract가 확정한 문자열 그대로 — 500자 초과만 서버에서 자른다.
+function clipTurnSummary(value) {
+  const text = typeof value === 'string' ? value : '';
+  return text.length > 500 ? text.slice(0, 500) : text;
+}
+
+// last_choices와 같은 최종 정규화: 문자열만, bold 제거, 빈 문자열 제거, 최대 4개.
+function normalizeTurnRecordChoices(choices) {
+  if (!Array.isArray(choices)) return [];
+  return choices
+    .filter(choice => typeof choice === 'string')
+    .map(choice => stripBoldMarkers(choice).trim())
+    .filter(choice => choice.length > 0)
+    .slice(0, 4);
+}
+
+// ─── 플레이 기록 조회 (/api/history) ───
+async function handleHistory(req, env) {
+  const requestId = crypto.randomUUID();
+  const { game_id, limit = 20, before_turn = null } = await readJson(req);
+  if (!game_id) {
+    return jsonResponse({ error: 'game_id required', request_id: requestId }, 400);
+  }
+  if (!Number.isInteger(limit) || limit < 1 || limit > 100) {
+    return jsonResponse({ error: 'limit must be an integer between 1 and 100', request_id: requestId }, 400);
+  }
+  if (before_turn !== null && (!Number.isInteger(before_turn) || before_turn < 1)) {
+    return jsonResponse({ error: 'before_turn must be null or a positive integer', request_id: requestId }, 400);
+  }
+  try {
+    const result = await supabaseRpc(env, 'get_play_history', {
+      p_game_id: game_id,
+      p_limit: limit,
+      p_before_turn: before_turn
+    });
+    return jsonResponse({
+      records: Array.isArray(result?.records) ? result.records : [],
+      has_more: result?.has_more === true,
+      next_before_turn: Number.isInteger(result?.next_before_turn) ? result.next_before_turn : null,
+      request_id: requestId
+    });
+  } catch (error) {
+    return jsonResponse({ error: error.message, error_code: 'SUPABASE_ERROR', request_id: requestId }, 502);
+  }
+}
+
 async function handleCommitTurn(req, env) {
   const requestId = crypto.randomUUID();
   const timing = {};
   const totalStart = Date.now();
-  const { game_id, turn_number, content: rawContent, extract, engine_patch, player_input = '' } = await readJson(req);
+  const { game_id, turn_number, content: rawContent, extract, engine_patch, player_input = '', player_action: rawPlayerAction } = await readJson(req);
   if (!game_id || !Number.isInteger(turn_number) || !rawContent) {
     return jsonResponse({
       error: 'game_id, integer turn_number, content and extract required',
@@ -1128,6 +1328,41 @@ async function handleCommitTurn(req, env) {
     });
     patch.last_image_id = safeExtract.image_id ?? null;
   }
+
+  // 턴 기록 구조화 — patch 안의 예약 키(_turn_record)로만 전달하고, commit_turn
+  // RPC가 같은 트랜잭션에서 game_memories에 저장한 뒤 game_save 병합 전에
+  // 분리한다. 기록 생성 자체의 오류가 Commit을 막지 않도록 fail-open.
+  let turnRecord;
+  try {
+    const sections = splitTurnContentSections(content);
+    turnRecord = {
+      player_action: normalizePlayerActionRecord(rawPlayerAction, player_input, ctx?.save?.last_choices),
+      mind_monitor: buildMindMonitorRecord(safeExtract, ctx?.master?.characters),
+      turn_summary: clipTurnSummary(safeExtract.turn_summary),
+      character_id:
+        safeExtract.character_id && safeExtract.character_id !== 'narrator'
+          ? safeExtract.character_id
+          : null,
+      narrative_text: sections.narrative_text,
+      player_status_text: sections.player_status_text,
+      next_choices: normalizeTurnRecordChoices(safeExtract.choices)
+    };
+  } catch (error) {
+    console.warn(JSON.stringify({ event: 'turn_record_fail_open', endpoint: '/api/commit-turn', request_id: requestId, error: error.message }));
+    turnRecord = {
+      player_action: null,
+      mind_monitor: null,
+      turn_summary: clipTurnSummary(safeExtract.turn_summary),
+      character_id:
+        safeExtract.character_id && safeExtract.character_id !== 'narrator'
+          ? safeExtract.character_id
+          : null,
+      narrative_text: content,
+      player_status_text: '',
+      next_choices: normalizeTurnRecordChoices(safeExtract.choices)
+    };
+  }
+  patch._turn_record = turnRecord;
 
   const t2 = Date.now();
   const result = await supabaseRpc(env, 'commit_turn', {
@@ -4458,6 +4693,11 @@ export {
   stripBoldMarkers,
   stripChoiceMarker,
   resolveMarkerChoiceInput,
+  splitTurnContentSections,
+  normalizePlayerActionRecord,
+  buildMindMonitorRecord,
+  clipTurnSummary,
+  normalizeTurnRecordChoices,
   findUnregisteredChoiceTargets,
   repairUnregisteredNpcChoices,
   insertNarrativeAdditionBeforeStatus,

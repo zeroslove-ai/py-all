@@ -134,7 +134,12 @@ import {
   buildChoicesFromNarrativeOrFallback,
   clipChoiceText,
   buildCapabilitySafeChoice,
-  normalizeFinalChoicesDeterministically
+  normalizeFinalChoicesDeterministically,
+  splitTurnContentSections,
+  normalizePlayerActionRecord,
+  buildMindMonitorRecord,
+  clipTurnSummary,
+  normalizeTurnRecordChoices
 } from '../worker/game-proxy-v2.js';
 import worker from '../worker/game-proxy-v2.js';
 
@@ -6357,4 +6362,411 @@ test('[H3-B #43] the corrected [1] section still lands as narrative_replacement,
   } finally {
     globalThis.fetch = originalFetch;
   }
+});
+
+// ─────────────────────────────────────────────
+// HISTORY-A: 턴 기록 구조화
+// ─────────────────────────────────────────────
+
+const HISTORY_CHARACTERS = {
+  heroine2: { name: '강세라', '말투': '차가운 말투' }
+};
+const HISTORY_EMOTION = {
+  surface: '“겉으로는 아무렇지 않은 척하고 있지만 사실은 조금 신경 쓰이기 시작했다.”',
+  inner: '“인정하기 싫지만 이 사람의 말에 조금씩 흔들리고 있는 나 자신이 싫다.”',
+  physical_reaction: '시선을 피하며 손끝으로 책상을 두드린다. 잠시 후 시선을 다시 마주친다.'
+};
+
+test('HISTORY-A 1: splitTurnContentSections splits bracket headers', () => {
+  const content = '[1. 서사 및 행동]\n서사 내용\n\n[2. 플레이어 상황판]\n상황판 내용\n\n[3. 선택지]\n① 가\n② 나';
+  const sections = splitTurnContentSections(content);
+  assert.equal(sections.narrative_text, '서사 내용');
+  assert.equal(sections.player_status_text, '상황판 내용');
+});
+
+test('HISTORY-A 2: splitTurnContentSections supports markdown # headers', () => {
+  for (const content of [
+    '# 1. 서사 및 행동\n서사A\n# 2. 플레이어 상황판\n상태A\n# 3. 선택지\n① 가',
+    '## 1. 서사 및 행동\n서사B\n## 2. 플레이어 상황판\n상태B\n## 3. 선택지\n① 가'
+  ]) {
+    const sections = splitTurnContentSections(content);
+    assert.match(sections.narrative_text, /^서사[AB]$/);
+    assert.match(sections.player_status_text, /^상태[AB]$/);
+  }
+});
+
+test('HISTORY-A 3: a "(계속)" section-1 header inside the body stays as body text', () => {
+  const content = '[1. 서사 및 행동]\n앞부분\n\n[1. 서사 및 행동] (계속)\n뒷부분\n\n[2. 플레이어 상황판]\n상태';
+  const sections = splitTurnContentSections(content);
+  assert.match(sections.narrative_text, /\[1\. 서사 및 행동\] \(계속\)/);
+  assert.match(sections.narrative_text, /뒷부분/);
+});
+
+test('HISTORY-A 4: legacy content without [2] fails open to whole-content narrative', () => {
+  const content = '구조화 이전의 날것 서사 원문\n아무 헤더도 없다';
+  const sections = splitTurnContentSections(content);
+  assert.equal(sections.narrative_text, content);
+  assert.equal(sections.player_status_text, '');
+});
+
+test('HISTORY-A 5: without [3] everything after [2] is player_status_text', () => {
+  const content = '[1. 서사 및 행동]\n서사\n\n[2. 플레이어 상황판]\n상태 1줄\n상태 2줄';
+  const sections = splitTurnContentSections(content);
+  assert.equal(sections.narrative_text, '서사');
+  assert.equal(sections.player_status_text, '상태 1줄\n상태 2줄');
+});
+
+test('HISTORY-A 6: plain user text records a direct_text player_action', () => {
+  const record = normalizePlayerActionRecord({ source: 'direct_text' }, '강세라에게 고민을 물어본다', ['엉뚱한 선택지']);
+  assert.deepEqual(record, {
+    source: 'direct_text',
+    raw_input: '강세라에게 고민을 물어본다',
+    resolved_input: '강세라에게 고민을 물어본다',
+    choice_index: null,
+    choice_text: null
+  });
+});
+
+test('HISTORY-A 7: digit markers 1/2/3/4 resolve via the last choice list', () => {
+  const choices = ['첫 번째 행동', '두 번째 행동', '세 번째 행동', '네 번째 행동'];
+  for (const [input, index] of [['1', 0], ['2', 1], ['3', 2], ['4', 3]]) {
+    const record = normalizePlayerActionRecord({ source: 'direct_marker' }, input, choices);
+    assert.equal(record.source, 'direct_marker');
+    assert.equal(record.raw_input, input);
+    assert.equal(record.resolved_input, choices[index]);
+    assert.equal(record.choice_index, index);
+    assert.equal(record.choice_text, choices[index]);
+  }
+});
+
+test('HISTORY-A 8: letter markers A/B/C/D resolve like digits', () => {
+  const choices = ['가 행동', '나 행동', '다 행동', '라 행동'];
+  for (const [input, index] of [['A', 0], ['b', 1], ['C', 2], ['d', 3]]) {
+    const record = normalizePlayerActionRecord(null, input, choices);
+    assert.equal(record.source, 'direct_marker');
+    assert.equal(record.choice_index, index);
+    assert.equal(record.choice_text, choices[index]);
+  }
+});
+
+test('HISTORY-A 9: circled number markers ①②③④ resolve like digits', () => {
+  const choices = ['① 첫째', '② 둘째', '③ 셋째', '④ 넷째'];
+  const record = normalizePlayerActionRecord(null, '②', choices);
+  assert.equal(record.source, 'direct_marker');
+  assert.equal(record.choice_index, 1);
+  // last_choices에 남아 있던 ② 장식은 resolved 문장에서 벗겨낸다
+  assert.equal(record.choice_text, '둘째');
+});
+
+test('HISTORY-A 10: choice_button is confirmed only when last_choices[index] matches the input', () => {
+  const choices = ['강세라와 대화한다', '자리를 뜬다'];
+  const record = normalizePlayerActionRecord(
+    { source: 'choice_button', choice_index: 0, choice_text: '강세라와 대화한다' },
+    '강세라와 대화한다',
+    choices
+  );
+  assert.deepEqual(record, {
+    source: 'choice_button',
+    raw_input: '강세라와 대화한다',
+    resolved_input: '강세라와 대화한다',
+    choice_index: 0,
+    choice_text: '강세라와 대화한다'
+  });
+});
+
+test('HISTORY-A 11: choice_button with a mismatched index is downgraded to direct_text', () => {
+  const choices = ['강세라와 대화한다', '자리를 뜬다'];
+  const record = normalizePlayerActionRecord(
+    { source: 'choice_button', choice_index: 1, choice_text: '강세라와 대화한다' },
+    '강세라와 대화한다',
+    choices
+  );
+  assert.equal(record.source, 'direct_text');
+  assert.equal(record.choice_index, null);
+});
+
+test('HISTORY-A 12: choice_button with forged text is downgraded to direct_text', () => {
+  const choices = ['강세라와 대화한다', '자리를 뜬다'];
+  const record = normalizePlayerActionRecord(
+    { source: 'choice_button', choice_index: 0, choice_text: '조작된 문장' },
+    '강세라와 대화한다 아닌 다른 입력',
+    choices
+  );
+  assert.equal(record.source, 'direct_text');
+  assert.equal(record.raw_input, '강세라와 대화한다 아닌 다른 입력');
+});
+
+test('HISTORY-A 13: the internal setup start and empty input record no player_action', () => {
+  assert.equal(normalizePlayerActionRecord(null, '__START_PLAYER_SETUP__', []), null);
+  assert.equal(normalizePlayerActionRecord({ source: 'system' }, 'system turn', []), null);
+  assert.equal(normalizePlayerActionRecord(null, '', ['가']), null);
+  assert.equal(normalizePlayerActionRecord(null, '   ', ['가']), null);
+});
+
+test('HISTORY-A 14: narrator turns record no mind monitor', () => {
+  assert.equal(buildMindMonitorRecord({ character_id: 'narrator', npc_emotion: HISTORY_EMOTION }, HISTORY_CHARACTERS), null);
+  assert.equal(buildMindMonitorRecord({ character_id: null, npc_emotion: HISTORY_EMOTION }, HISTORY_CHARACTERS), null);
+  assert.equal(buildMindMonitorRecord({ character_id: 'unregistered', npc_emotion: HISTORY_EMOTION }, HISTORY_CHARACTERS), null);
+});
+
+test('HISTORY-A 15: a registered NPC mind monitor is preserved with its fields', () => {
+  const record = buildMindMonitorRecord({ character_id: 'heroine2', npc_emotion: HISTORY_EMOTION, mind_monitor_source: 'generated' }, HISTORY_CHARACTERS);
+  assert.equal(record.character_id, 'heroine2');
+  assert.equal(record.character_name, '강세라');
+  assert.equal(record.surface, HISTORY_EMOTION.surface);
+  assert.equal(record.inner, HISTORY_EMOTION.inner);
+  assert.equal(record.physical_reaction, HISTORY_EMOTION.physical_reaction);
+});
+
+test('HISTORY-A 16: a clean first generation records source=generated', () => {
+  const record = buildMindMonitorRecord({ character_id: 'heroine2', npc_emotion: HISTORY_EMOTION, mind_monitor_source: 'generated' }, HISTORY_CHARACTERS);
+  assert.equal(record.source, 'generated');
+  // 메타 필드가 빠진 구형 extract도 generated로 간주한다
+  const legacy = buildMindMonitorRecord({ character_id: 'heroine2', npc_emotion: HISTORY_EMOTION }, HISTORY_CHARACTERS);
+  assert.equal(legacy.source, 'generated');
+});
+
+test('HISTORY-A 17: a repaired mind monitor records source=repaired', () => {
+  const record = buildMindMonitorRecord({ character_id: 'heroine2', npc_emotion: HISTORY_EMOTION, mind_monitor_source: 'repaired' }, HISTORY_CHARACTERS);
+  assert.equal(record.source, 'repaired');
+});
+
+test('HISTORY-A 18: a field fallback to the previous save records source=fallback_previous', () => {
+  const record = buildMindMonitorRecord({ character_id: 'heroine2', npc_emotion: HISTORY_EMOTION, mind_monitor_source: 'fallback_previous' }, HISTORY_CHARACTERS);
+  assert.equal(record.source, 'fallback_previous');
+});
+
+test('HISTORY-A 19: a degraded turn stores no new mind monitor', () => {
+  const record = buildMindMonitorRecord({ character_id: 'heroine2', npc_emotion: HISTORY_EMOTION, extract_degraded: true, mind_monitor_source: 'degraded' }, HISTORY_CHARACTERS);
+  assert.equal(record, null);
+  // 세 필드가 모두 비어 있어도 기록하지 않는다
+  assert.equal(buildMindMonitorRecord({ character_id: 'heroine2', npc_emotion: { surface: '', inner: '', physical_reaction: '' } }, HISTORY_CHARACTERS), null);
+});
+
+test('HISTORY-A 20: turn_summary is clipped to 500 characters server-side', () => {
+  const long = '가'.repeat(600);
+  assert.equal(clipTurnSummary(long).length, 500);
+  assert.equal(clipTurnSummary('짧은 요약'), '짧은 요약');
+  assert.equal(clipTurnSummary(null), '');
+  assert.equal(clipTurnSummary(undefined), '');
+});
+
+test('HISTORY-A 21: next_choices keeps at most 4 cleaned non-empty strings', () => {
+  const choices = normalizeTurnRecordChoices(['**굵은** 선택', '  ', '둘', '셋', '넷', '다섯', 42, null]);
+  assert.deepEqual(choices, ['굵은 선택', '둘', '셋', '넷']);
+  assert.deepEqual(normalizeTurnRecordChoices(null), []);
+  assert.deepEqual(normalizeTurnRecordChoices('문자열'), []);
+});
+
+// commit_turn 통합 — mock fetch로 _turn_record 전달·응답 비노출·replay/conflict 유지 검증
+function mockCommitTurnFetch({ commitResponse, save = {}, master = {} }) {
+  let committedPatch;
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (url, init = {}) => {
+    const requestUrl = String(url);
+    if (requestUrl.includes('/rpc/get_commit_context')) {
+      return new Response(JSON.stringify({
+        turn_count: 2,
+        master,
+        save
+      }), { headers: { 'content-type': 'application/json' } });
+    }
+    if (requestUrl.includes('/rpc/get_image_catalog_for_characters')) {
+      return new Response(JSON.stringify([]), { headers: { 'content-type': 'application/json' } });
+    }
+    if (requestUrl.includes('/rpc/commit_turn')) {
+      committedPatch = JSON.parse(init.body).p_patch;
+      return new Response(JSON.stringify(commitResponse), { headers: { 'content-type': 'application/json' } });
+    }
+    throw new Error(`unexpected fetch: ${requestUrl}`);
+  };
+  return {
+    getCommittedPatch: () => committedPatch,
+    restore: () => { globalThis.fetch = originalFetch; }
+  };
+}
+
+const HISTORY_COMMIT_EXTRACT = {
+  character_id: 'heroine2',
+  npc_emotion: HISTORY_EMOTION,
+  mind_monitor_source: 'generated',
+  turn_summary: '세라와 대화를 나눴다',
+  choices: ['대화를 이어간다', '자리를 뜬다', '조용히 지켜본다', '차를 권한다']
+};
+const HISTORY_COMMIT_CONTENT = '[1. 서사 및 행동]\n세라와 대화했다.\n\n[2. 플레이어 상황판]\n레벨 1\n\n[3. 선택지]\n① 대화를 이어간다';
+
+test('HISTORY-A 22: commit-turn passes _turn_record inside the commit_turn patch', async () => {
+  const mock = mockCommitTurnFetch({
+    commitResponse: { status: 'committed', turn_count: 3 },
+    save: { last_character_id: 'heroine2', last_choices: ['강세라와 대화한다', '자리를 뜬다'] },
+    master: { characters: HISTORY_CHARACTERS }
+  });
+  try {
+    const response = await worker.fetch(apiRequest('/api/commit-turn', {
+      game_id: 'test-game', turn_number: 3, content: HISTORY_COMMIT_CONTENT,
+      extract: HISTORY_COMMIT_EXTRACT,
+      player_input: '강세라와 대화한다',
+      player_action: { source: 'choice_button', choice_index: 0, choice_text: '강세라와 대화한다' }
+    }), { SUPABASE_SECRET_KEY: 'test' });
+    assert.equal(response.status, 200);
+    const record = mock.getCommittedPatch()._turn_record;
+    assert.ok(record, '_turn_record must be inside p_patch');
+    assert.equal(record.player_action.source, 'choice_button');
+    assert.equal(record.player_action.choice_index, 0);
+    assert.equal(record.mind_monitor.character_name, '강세라');
+    assert.equal(record.mind_monitor.source, 'generated');
+    assert.equal(record.turn_summary, '세라와 대화를 나눴다');
+    assert.equal(record.character_id, 'heroine2');
+    assert.equal(record.narrative_text, '세라와 대화했다.');
+    assert.equal(record.player_status_text, '레벨 1');
+    assert.deepEqual(record.next_choices, HISTORY_COMMIT_EXTRACT.choices);
+  } finally {
+    mock.restore();
+  }
+});
+
+test('HISTORY-A 23: _turn_record never leaks into the commit response state_patch', async () => {
+  const mock = mockCommitTurnFetch({
+    commitResponse: { status: 'committed', turn_count: 3 },
+    save: { last_character_id: 'heroine2' },
+    master: { characters: HISTORY_CHARACTERS }
+  });
+  try {
+    const response = await worker.fetch(apiRequest('/api/commit-turn', {
+      game_id: 'test-game', turn_number: 3, content: HISTORY_COMMIT_CONTENT,
+      extract: HISTORY_COMMIT_EXTRACT, player_input: '직접 입력 행동'
+    }), { SUPABASE_SECRET_KEY: 'test' });
+    assert.equal(response.status, 200);
+    const body = await response.json();
+    assert.equal(body.ok, true);
+    assert.equal(body.state_patch._turn_record, undefined);
+    assert.equal(JSON.stringify(body.state_patch).includes('_turn_record'), false);
+  } finally {
+    mock.restore();
+  }
+});
+
+test('HISTORY-A 24: buildSavePatch keeps existing game-state behavior and never emits _turn_record', () => {
+  const patch = buildSavePatch({
+    character_id: 'heroine2', npc_emotion: HISTORY_EMOTION,
+    turn_summary: '요약', choices: ['가', '나'], mind_monitor_source: 'generated'
+  }, {}, null, { last_character_id: 'heroine2' }, 3, '입력');
+  assert.equal(patch._turn_record, undefined);
+  assert.equal(patch.last_character_id, 'heroine2');
+  assert.deepEqual(patch.last_choices, ['가', '나']);
+  assert.deepEqual(patch.npc_emotion, { heroine2: HISTORY_EMOTION });
+});
+
+test('HISTORY-A 25: /api/history validates game_id, limit and before_turn', async () => {
+  const env = { SUPABASE_SECRET_KEY: 'test' };
+  let response = await worker.fetch(apiRequest('/api/history', { limit: 20 }), env);
+  assert.equal(response.status, 400);
+  for (const bad of [{ game_id: 'g', limit: 0 }, { game_id: 'g', limit: 101 }, { game_id: 'g', limit: 1.5 }, { game_id: 'g', before_turn: 0 }, { game_id: 'g', before_turn: -3 }]) {
+    response = await worker.fetch(apiRequest('/api/history', bad), env);
+    assert.equal(response.status, 400, JSON.stringify(bad));
+  }
+});
+
+test('HISTORY-A 26: /api/history forwards the RPC result with request_id', async () => {
+  const originalFetch = globalThis.fetch;
+  let rpcParams;
+  globalThis.fetch = async (url, init = {}) => {
+    const requestUrl = String(url);
+    if (requestUrl.includes('/rpc/get_play_history')) {
+      rpcParams = JSON.parse(init.body);
+      return new Response(JSON.stringify({
+        records: [{ turn_number: 2, content: 'b' }, { turn_number: 1, content: 'a' }],
+        has_more: true, next_before_turn: 1
+      }), { headers: { 'content-type': 'application/json' } });
+    }
+    throw new Error(`unexpected fetch: ${requestUrl}`);
+  };
+  try {
+    const response = await worker.fetch(apiRequest('/api/history', { game_id: 'g', limit: 20, before_turn: 5 }), { SUPABASE_SECRET_KEY: 'test' });
+    assert.equal(response.status, 200);
+    const body = await response.json();
+    assert.equal(rpcParams.p_game_id, 'g');
+    assert.equal(rpcParams.p_limit, 20);
+    assert.equal(rpcParams.p_before_turn, 5);
+    assert.equal(body.records.length, 2);
+    assert.equal(body.has_more, true);
+    assert.equal(body.next_before_turn, 1);
+    assert.ok(body.request_id);
+    // 게임 상태 전체나 룰북은 절대 응답에 포함되지 않는다
+    assert.equal(body.save, undefined);
+    assert.equal(body.master, undefined);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('HISTORY-A 27: /api/history surfaces DB errors in the standard API error shape', async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async () => { throw new Error('db connection lost'); };
+  try {
+    const response = await worker.fetch(apiRequest('/api/history', { game_id: 'g' }), { SUPABASE_SECRET_KEY: 'test' });
+    assert.equal(response.status, 502);
+    const body = await response.json();
+    assert.match(body.error, /db connection lost/);
+    assert.equal(body.error_code, 'SUPABASE_ERROR');
+    assert.ok(body.request_id);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('HISTORY-A 28: a replayed commit keeps replay semantics and does not rebuild history', async () => {
+  const mock = mockCommitTurnFetch({
+    commitResponse: { status: 'replay', turn_count: 3 },
+    save: { last_character_id: 'heroine2' },
+    master: { characters: HISTORY_CHARACTERS }
+  });
+  try {
+    const response = await worker.fetch(apiRequest('/api/commit-turn', {
+      game_id: 'test-game', turn_number: 3, content: HISTORY_COMMIT_CONTENT,
+      extract: HISTORY_COMMIT_EXTRACT, player_input: '입력'
+    }), { SUPABASE_SECRET_KEY: 'test' });
+    assert.equal(response.status, 200);
+    const body = await response.json();
+    assert.equal(body.replay, true);
+    assert.equal(body.turn_count, 3);
+  } finally {
+    mock.restore();
+  }
+});
+
+test('HISTORY-A 29: a commit conflict still returns 409 with the standard payload', async () => {
+  const mock = mockCommitTurnFetch({
+    commitResponse: { status: 'conflict', reason: 'same_turn_different_content', expected_turn: 4 },
+    save: { last_character_id: 'heroine2' },
+    master: { characters: HISTORY_CHARACTERS }
+  });
+  try {
+    const response = await worker.fetch(apiRequest('/api/commit-turn', {
+      game_id: 'test-game', turn_number: 3, content: HISTORY_COMMIT_CONTENT,
+      extract: HISTORY_COMMIT_EXTRACT, player_input: '입력'
+    }), { SUPABASE_SECRET_KEY: 'test' });
+    assert.equal(response.status, 409);
+    const body = await response.json();
+    assert.equal(body.error, 'turn conflict');
+    assert.equal(body.expected_turn, 4);
+    assert.equal(body.received_turn, 3);
+  } finally {
+    mock.restore();
+  }
+});
+
+test('HISTORY-A 30: malformed record inputs never throw and normalize safely', () => {
+  // 어떤 쓰레기 입력이 와도 예외 없이 null/안전값으로 수렴해야 한다
+  assert.equal(normalizePlayerActionRecord('쓰레기', 42, 'not-an-array'), null);
+  // 범위 밖 index로 위장한 choice_button도 예외 없이 direct_text로 강등된다
+  const outOfRange = normalizePlayerActionRecord({ source: 'choice_button', choice_index: 99 }, '입력', []);
+  assert.equal(outOfRange.source, 'direct_text');
+  const downgraded = normalizePlayerActionRecord({ source: 'choice_button', choice_index: -1 }, '실제 입력', ['가']);
+  assert.equal(downgraded.source, 'direct_text');
+  assert.equal(buildMindMonitorRecord(null, null), null);
+  assert.equal(buildMindMonitorRecord({ character_id: 'heroine2', npc_emotion: 'garbage' }, HISTORY_CHARACTERS), null);
+  assert.equal(buildMindMonitorRecord({ character_id: 'heroine2' }, { heroine2: null }), null);
+  assert.deepEqual(splitTurnContentSections(null), { narrative_text: '', player_status_text: '' });
+  assert.deepEqual(normalizeTurnRecordChoices(undefined), []);
 });

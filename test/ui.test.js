@@ -8,6 +8,10 @@ const uiSource = await readFile(new URL('../pages/ui.js', import.meta.url), 'utf
 const apiSource = await readFile(new URL('../pages/api.js', import.meta.url), 'utf8');
 const streamSource = await readFile(new URL('../pages/stream.js', import.meta.url), 'utf8');
 const ttsSource = await readFile(new URL('../pages/tts.js', import.meta.url), 'utf8');
+const historySource = await readFile(new URL('../pages/history.js', import.meta.url), 'utf8');
+
+// history.js를 격리 평가해 순수 함수(MD/TXT 생성)를 직접 검증한다.
+const playHistory = new Function(`${historySource}; return playHistory;`)();
 
 test('NPC status is rendered as one inline status sentence, not five rows', () => {
   const renderStats = sidebarSource.match(/renderStats\(stats[\s\S]*?\n  signal\(/)?.[0] || '';
@@ -357,13 +361,15 @@ test('input lock is re-synchronized at the top of retryExtract/retryCommit, so a
 test('renderChoices/renderGameplayChoices pass the full normalized choice sentence to onClick, never the loop index or a bare marker', () => {
   const renderChoicesFn = uiSource.match(/renderChoices\(choices, onClick\)[\s\S]*?\n  \},/)?.[0] || '';
   assert.match(renderChoicesFn, /const text = this\.normalizeChoice\(/);
-  assert.match(renderChoicesFn, /onClick\(text\)/);
+  // 첫 인자는 항상 정규화된 선택지 전체 문장 — 인덱스/마커 단독 전달 금지.
+  // 두 번째 메타 인자(choice_index/choice_text)는 기록용 부가 정보다.
+  assert.match(renderChoicesFn, /onClick\(text, \{ source: 'choice_button', choice_index: index, choice_text: text \}\)/);
   assert.doesNotMatch(renderChoicesFn, /onClick\(index\)/);
   assert.doesNotMatch(renderChoicesFn, /onClick\(marker\)/);
 
   const renderGameplayFn = uiSource.match(/renderGameplayChoices\(choices, onClick, \{ setup = false \} = \{\}\)[\s\S]*?\n  \},/)?.[0] || '';
   assert.match(renderGameplayFn, /const all = \(choices \|\| \[\]\)\.map\(choice => this\.normalizeChoice\(/);
-  assert.match(renderGameplayFn, /onClick\(text\)/);
+  assert.match(renderGameplayFn, /onClick\(text, \{ source: 'choice_button', choice_index: index, choice_text: text \}\)/);
   assert.doesNotMatch(renderGameplayFn, /onClick\(index\)/);
 
   // Every button in the group is disabled synchronously, before onClick
@@ -376,11 +382,11 @@ test('renderChoices/renderGameplayChoices pass the full normalized choice senten
 });
 
 test('submitChoice forwards the full choice text into the same input path as free-typed text, and the user-facing message echoes that full text, not a number', () => {
-  const submitChoiceFn = pageSource.match(/function submitChoice\(choiceText\)[\s\S]*?\n    }/)?.[0] || '';
+  const submitChoiceFn = pageSource.match(/function submitChoice\(choiceText, meta = \{\}\)[\s\S]*?\n    }/)?.[0] || '';
   assert.match(submitChoiceFn, /document\.getElementById\('chat-input'\)\.value = choiceText/);
-  assert.match(submitChoiceFn, /handleTurnInput\(\)/);
+  assert.match(submitChoiceFn, /handleTurnInput\(\{/);
 
-  const handleTurnInputFn = pageSource.match(/async function handleTurnInput\(\)[\s\S]*?\n    }/)?.[0] || '';
+  const handleTurnInputFn = pageSource.match(/async function handleTurnInput\(actionMeta = \{ source: 'direct_text' \}\)[\s\S]*?\n    }/)?.[0] || '';
   // Reads the input box verbatim and sends it on, unmodified — no
   // marker/index substitution happens (or is needed) on the client, since
   // submitChoice already placed the full sentence there.
@@ -714,4 +720,237 @@ test('[H3-A #30] the existing duplicate-playback-prevention keying (pendingKeys/
   assert.match(ttsSource, /key\(turn, line\) \{\s*\n\s*return `\$\{turn\}:\$\{line\.speaker\}:\$\{line\.text\}`;/);
   assert.match(ttsSource, /if \(!force && \(this\.pendingKeys\.has\(key\) \|\| this\.completedKeys\.has\(key\)\)\) continue;/);
   assert.match(ttsSource, /sessionStorage\.setItem\('playedTtsKeys', JSON\.stringify\(\[\.\.\.this\.completedKeys\]\)\)/);
+});
+
+// ─────────────────────────────────────────────
+// HISTORY-B: 입력 경로·플레이 기록 UI·보내기
+// ─────────────────────────────────────────────
+
+const HISTORY_SAMPLE_RECORD = {
+  turn_number: 17,
+  content: '원문 전체',
+  player_action: { source: 'choice_button', raw_input: '고민을 물어본다', resolved_input: '고민을 물어본다', choice_index: 1, choice_text: '고민을 물어본다' },
+  mind_monitor: { character_id: 'heroine2', character_name: '강세라', surface: '“표면”', inner: '“잠재”', physical_reaction: '손을 떤다. 시선을 피한다.', source: 'generated' },
+  turn_summary: '세라와 대화했다',
+  character_id: 'heroine2',
+  narrative_text: '세라와 대화를 나눴다.',
+  player_status_text: '레벨 1',
+  next_choices: ['가', '나', '다', '라'],
+  created_at: '2026-07-25T00:00:00Z'
+};
+const HISTORY_META = { title: '테스트 게임', gameId: 'abcd1234-0000', exportedAt: '2026-07-25T01:00:00Z' };
+
+test('HISTORY-B 1: choice button click passes choice_index to the callback', () => {
+  const matches = uiSource.match(/onClick\(text, \{ source: 'choice_button', choice_index: index, choice_text: text \}\);/g) || [];
+  assert.ok(matches.length >= 2, 'renderGameplayChoices와 renderChoices 모두 index를 전달해야 한다');
+});
+
+test('HISTORY-B 2: choice button submit marks source=choice_button', () => {
+  const submit = pageSource.match(/function submitChoice\(choiceText, meta = \{\}\)[\s\S]*?\n    \}/)?.[0] || '';
+  assert.match(submit, /source: 'choice_button'/);
+  assert.match(submit, /choice_index: meta\.choice_index/);
+});
+
+test('HISTORY-B 3: direct input defaults to source=direct_text', () => {
+  const handler = pageSource.match(/async function handleTurnInput\(actionMeta = \{ source: 'direct_text' \}\)[\s\S]*?await retryStory\(/)?.[0] || '';
+  assert.match(handler, /actionMeta = \{ source: 'direct_text' \}/);
+  assert.match(handler, /: \(DIRECT_MARKER_INPUT_RE\.test\(input\) \? 'direct_marker' : 'direct_text'\)/);
+});
+
+test('HISTORY-B 4: a bare digit/letter/circled input is marked direct_marker', () => {
+  assert.match(pageSource, /DIRECT_MARKER_INPUT_RE = \/\^\(\?:\[1-4\]\|\[A-Da-d\]\|\[①②③④\]\)\$\//);
+});
+
+test('HISTORY-B 5: retryStory keeps the same pending.playerAction across retries', () => {
+  const retry = pageSource.match(/async function retryStory\(pending\)[\s\S]*?\n    \}/)?.[0] || '';
+  assert.match(retry, /retryStory\(pending\)/);
+  assert.doesNotMatch(retry, /pending\.playerAction\s*=/);
+});
+
+test('HISTORY-B 6: retryExtract keeps the same pending.playerAction across retries', () => {
+  const retry = pageSource.match(/async function retryExtract\(pending\)[\s\S]*?\n    \}/)?.[0] || '';
+  assert.match(retry, /retryExtract\(pending\)/);
+  assert.doesNotMatch(retry, /pending\.playerAction\s*=/);
+});
+
+test('HISTORY-B 7: retryCommit sends player_action in the API body', () => {
+  assert.match(pageSource, /api\.commitTurn\([\s\S]*?pending\.input, pending\.playerAction\)/);
+  assert.match(apiSource, /player_action: playerAction/);
+  // 기존 player_input도 그대로 유지된다
+  assert.match(apiSource, /player_input: playerInput/);
+});
+
+test('HISTORY-B 8: the legacy/reentry choice path also forwards metadata', () => {
+  const renderChoices = uiSource.match(/renderChoices\(choices, onClick\) \{[\s\S]*?\n  \},\n\n  \/\/ ─── 스크롤/)?.[0] || '';
+  assert.match(renderChoices, /onClick\(text, \{ source: 'choice_button', choice_index: index, choice_text: text \}\)/);
+});
+
+test('HISTORY-B 9: the play history button exists in header controls', () => {
+  assert.match(pageSource, /<button class="history-toggle" id="history-toggle" type="button">📖 플레이 기록<\/button>/);
+  assert.match(pageSource, /getElementById\('history-toggle'\)\.addEventListener\('click'/);
+});
+
+test('HISTORY-B 10: the history modal opens and closes', () => {
+  assert.match(historySource, /open\(\) \{/);
+  assert.match(historySource, /close\(\) \{/);
+  assert.match(historySource, /toggle\(\) \{/);
+  assert.match(historySource, /role="dialog"/);
+  assert.match(historySource, /aria-modal="true"/);
+});
+
+test('HISTORY-B 11: Escape closes the modal', () => {
+  assert.match(historySource, /event\.key === 'Escape'/);
+  assert.match(historySource, /if \(event\.target === overlay\) close\(\)/);
+  assert.match(historySource, /document\.body\.style\.overflow = 'hidden'/);
+});
+
+test('HISTORY-B 12: opening requests the latest 20 turns', () => {
+  const loadPage = historySource.match(/async loadPage\(gameId, beforeTurn = null\) \{[\s\S]*?\n  \},/)?.[0] || '';
+  assert.match(loadPage, /api\.history\(gameId, \{ limit: 20, beforeTurn \}\)/);
+});
+
+test('HISTORY-B 13: load-more paginates with next_before_turn', () => {
+  const loadMore = historySource.match(/async loadMore\(\) \{[\s\S]*?\n  \},/)?.[0] || '';
+  assert.match(loadMore, /this\.loadPage\(gameId, this\.cache\.nextBeforeTurn\)/);
+});
+
+test('HISTORY-B 14: duplicate turn numbers are deduplicated', () => {
+  assert.match(historySource, /this\.cache\.records\.set\(record\.turn_number, record\)/);
+  playHistory.clearCache();
+  playHistory._ingest([{ turn_number: 3, content: 'old' }, { turn_number: 3, content: 'new' }]);
+  assert.equal(playHistory.cache.records.size, 1);
+});
+
+test('HISTORY-B 15: records render in ascending turn order', () => {
+  playHistory.clearCache();
+  playHistory._ingest([{ turn_number: 5 }, { turn_number: 1 }, { turn_number: 3 }]);
+  assert.deepEqual(playHistory.sortedRecords().map(r => r.turn_number), [1, 3, 5]);
+});
+
+test('HISTORY-B 16: missing data shows 기록 없음', () => {
+  assert.match(historySource, /기록 없음/);
+  assert.match(historySource, /저장된 플레이 기록이 없습니다/);
+});
+
+test('HISTORY-B 17: a structured record renders all fields in the markdown', () => {
+  const md = playHistory.buildHistoryMarkdown([HISTORY_SAMPLE_RECORD], HISTORY_META);
+  assert.match(md, /# 턴 17/);
+  assert.match(md, /선택지 2:\n고민을 물어본다/);
+  assert.match(md, /세라와 대화했다/);
+  assert.match(md, /## 마인드 모니터 — 강세라/);
+  assert.match(md, /### 표면의식\n\n“표면”/);
+  assert.match(md, /레벨 1/);
+});
+
+test('HISTORY-B 18: a legacy record falls back to 원문 display only', () => {
+  assert.match(historySource, /this\._section\('원문', record\.content\)/);
+  assert.match(historySource, /구조화 이전 기록/);
+  // 클라이언트 split으로 플레이어 행동/마인드 모니터를 만들어내는 코드는 없다
+  assert.doesNotMatch(historySource, /player_action\s*=\s*\{|mind_monitor\s*=\s*\{/);
+});
+
+test('HISTORY-B 19: a null mind monitor shows 기록 없음', () => {
+  const md = playHistory.buildHistoryMarkdown([{ ...HISTORY_SAMPLE_RECORD, mind_monitor: null }], HISTORY_META);
+  assert.match(md, /## 마인드 모니터\n\n> 기록 없음/);
+  const txt = playHistory.buildHistoryText([{ ...HISTORY_SAMPLE_RECORD, mind_monitor: null }], HISTORY_META);
+  assert.match(txt, /\[마인드 모니터\]\n\(기록 없음\)/);
+});
+
+test('HISTORY-B 20: a null player action shows 기록 없음', () => {
+  const md = playHistory.buildHistoryMarkdown([{ ...HISTORY_SAMPLE_RECORD, player_action: null }], HISTORY_META);
+  assert.match(md, /## 플레이어 행동\n\n> 기록 없음/);
+});
+
+test('HISTORY-B 21: markdown sections follow the required order', () => {
+  const md = playHistory.buildHistoryMarkdown([HISTORY_SAMPLE_RECORD], HISTORY_META);
+  const order = ['## 플레이어 행동', '## 턴 요약', '## 서사', '## 마인드 모니터', '## 플레이어 상황판', '## 다음 선택지'];
+  const positions = order.map(section => md.indexOf(section));
+  assert.ok(positions.every(pos => pos > -1));
+  assert.deepEqual([...positions].sort((a, b) => a - b), positions);
+  assert.match(md, /# 게임빌더 v2 플레이 기록/);
+  assert.match(md, /- 게임 ID: abcd1234-0000/);
+  assert.match(md, /- 총 턴 수: 1/);
+});
+
+test('HISTORY-B 22: text export keeps the same order without markdown symbols', () => {
+  const txt = playHistory.buildHistoryText([HISTORY_SAMPLE_RECORD], HISTORY_META);
+  const order = ['[플레이어 행동]', '[턴 요약]', '[서사]', '[마인드 모니터 - 강세라]', '[플레이어 상황판]', '[다음 선택지]'];
+  const positions = order.map(section => txt.indexOf(section));
+  assert.ok(positions.every(pos => pos > -1));
+  assert.deepEqual([...positions].sort((a, b) => a - b), positions);
+  assert.match(txt, /={10,}\n턴 17\n={10,}/);
+  assert.doesNotMatch(txt, /##/);
+});
+
+test('HISTORY-B 23: choices print as a numbered 1-4 list', () => {
+  const md = playHistory.buildHistoryMarkdown([HISTORY_SAMPLE_RECORD], HISTORY_META);
+  assert.match(md, /## 다음 선택지\n\n1\. 가\n2\. 나\n3\. 다\n4\. 라/);
+  const txt = playHistory.buildHistoryText([HISTORY_SAMPLE_RECORD], HISTORY_META);
+  assert.match(txt, /\[다음 선택지\]\n1\. 가\n2\. 나\n3\. 다\n4\. 라/);
+});
+
+test('HISTORY-B 24: markdown never guesses missing fields', () => {
+  const bare = { turn_number: 3, content: '원문', player_action: null, mind_monitor: null, turn_summary: '', narrative_text: '', player_status_text: '', next_choices: [] };
+  const md = playHistory.buildHistoryMarkdown([bare], HISTORY_META);
+  assert.equal((md.match(/> 기록 없음/g) || []).length, 6);
+  assert.doesNotMatch(md, /마인드 모니터 —/);
+});
+
+test('HISTORY-B 25: text export never guesses missing fields', () => {
+  const bare = { turn_number: 3, content: '원문', player_action: null, mind_monitor: null, turn_summary: '', narrative_text: '', player_status_text: '', next_choices: [] };
+  const txt = playHistory.buildHistoryText([bare], HISTORY_META);
+  assert.equal((txt.match(/\(기록 없음\)/g) || []).length, 6);
+  assert.doesNotMatch(txt, /마인드 모니터 -/);
+});
+
+test('HISTORY-B 26: download filenames follow the gamebuilder_<id8>_turns_<first>-<last> pattern', () => {
+  assert.match(historySource, /gamebuilder_\$\{String\(gameId\)\.slice\(0, 8\)\}_turns_\$\{first\}-\$\{last\}\.\$\{format\}/);
+  const expected = `gamebuilder_${'abcd1234-0000'.slice(0, 8)}_turns_1-30.md`;
+  assert.equal(expected, 'gamebuilder_abcd1234_turns_1-30.md');
+});
+
+test('HISTORY-B 27: object URLs are revoked after download', () => {
+  assert.match(historySource, /URL\.createObjectURL\(blob\)/);
+  assert.match(historySource, /URL\.revokeObjectURL\(url\)/);
+});
+
+test('HISTORY-B 28: a zero-record game blocks the download', () => {
+  assert.match(historySource, /if \(!records\.length\)/);
+  assert.match(historySource, /저장된 플레이 기록이 없습니다\./);
+});
+
+test('HISTORY-B 29: history failures never block gameplay', () => {
+  const download = historySource.match(/async downloadAll\(format\) \{[\s\S]*?\n  \}\n\};/)?.[0] || historySource;
+  // 다운로드/로딩 오류는 catch → showError로만 처리된다
+  assert.match(historySource, /catch \(error\) \{\n      \/\/ 다운로드 오류가 게임 입력\/플레이를 막으면 안 된다[\s\S]*?this\.showError\(error\)/);
+  assert.match(historySource, /this\.loadInitial\(\)\.catch\(error => this\.showError\(error\)\)/);
+  assert.ok(download.includes('catch'));
+});
+
+test('HISTORY-B 30: reset clears the history cache', () => {
+  const resetFn = pageSource.match(/async function resetAndStartNewGame\(\)[\s\S]*?await loadGameContext\(\);/)?.[0] || '';
+  assert.match(resetFn, /playHistory\.onGameReset\(\)/);
+  assert.match(historySource, /clearCache\(\)/);
+  playHistory._ingest([{ turn_number: 1, content: 'x' }]);
+  playHistory.clearCache();
+  assert.equal(playHistory.cache.records.size, 0);
+});
+
+test('HISTORY-B 31: existing TTS/choice/input UI stays intact', () => {
+  assert.match(pageSource, /id="tts-toggle"/);
+  assert.match(pageSource, /id="chat-input"/);
+  const submit = pageSource.match(/function submitChoice\(choiceText, meta = \{\}\)[\s\S]*?\n    \}/)?.[0] || '';
+  assert.match(submit, /tts\.unlockAudio\(\)/);
+  const handler = pageSource.match(/async function handleTurnInput[\s\S]*?await retryStory\(/)?.[0] || '';
+  assert.match(handler, /ui\.addUserMessage\(input\)/);
+  assert.match(handler, /if \(input\.startsWith\('\/'\)\) \{ await handleCommand\(input\); return; \}/);
+});
+
+test('HISTORY-B 32: the mobile history layout has no horizontal overflow', () => {
+  assert.match(pageSource, /@media \(max-width: 480px\) \{[\s\S]*?\.history-modal \{ width: 100%/);
+  assert.match(pageSource, /overflow-wrap: anywhere/);
+  // 고정 px 폭은 min() 안에만 있어 뷰포트를 넘지 않는다
+  const historyCss = pageSource.match(/\/\* 플레이 기록 모달 \*\/[\s\S]*?@media \(max-width: 480px\)[\s\S]*?\n    \}\n/)?.[0] || '';
+  const fixedWidths = historyCss.match(/(?<![\w-])width: \d+px/g) || [];
+  assert.deepEqual(fixedWidths, []);
 });

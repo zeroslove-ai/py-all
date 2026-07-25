@@ -377,7 +377,7 @@ const ui = {
       btn.addEventListener('click', () => {
         this.els.choiceButtons.querySelectorAll('button').forEach(button => { button.disabled = true; button.classList.remove('selected'); });
         btn.classList.add('selected');
-        onClick(text);
+        onClick(text, { source: 'choice_button', choice_index: index, choice_text: text });
       }, { once: true });
       this.els.choiceButtons.appendChild(btn);
     }
@@ -398,7 +398,7 @@ const ui = {
       button.addEventListener('click', () => {
         this.els.choiceButtons.querySelectorAll('button').forEach(item => { item.disabled = true; item.classList.remove('selected'); });
         button.classList.add('selected');
-        onClick(text);
+        onClick(text, { source: 'choice_button', choice_index: index, choice_text: text });
       }, { once: true });
       this.els.choiceButtons.appendChild(button);
     });

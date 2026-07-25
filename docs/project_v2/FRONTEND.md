@@ -132,3 +132,12 @@ const state = {
 - 새로고침 후 턴 수와 저장 내용이 유지된다.
 - 이미지·TTS 실패가 턴 저장을 막지 않는다.
 - `409` 발생 시 최신 컨텍스트가 다시 로드된다.
+
+## 플레이 기록 (history.js)
+
+- 헤더의 `📖 플레이 기록` 버튼(`#history-toggle`)으로 모달을 연다. 모달은 `role="dialog"`, Escape/바깥 클릭 닫기, 배경 스크롤 잠금을 지원한다.
+- `api.history(gameId, { limit, beforeTurn })`로 최신 20턴씩 조회하고, `이전 기록 더 보기`로 페이지네이션한다. `turn_number` 중복은 제거하고 오름차순으로 표시한다.
+- 각 턴은 플레이어 행동·턴 요약을 기본 표시하고, 서사/마인드 모니터/플레이어 상황판/다음 선택지/원문은 `details`로 접는다. 구조화 이전 기록은 추측 없이 원문만 표시한다.
+- Markdown/TXT 다운로드는 `playHistory.buildHistoryMarkdown`/`buildHistoryText` 순수 함수가 생성하며, 100턴 단위로 전체 기록을 수집해 Blob으로 저장한다(파일명 `gamebuilder_<id8>_turns_<first>-<last>.md|txt`).
+- 선택지 버튼 클릭은 `submitChoice(text, { source, choice_index, choice_text })`를 통해 `pending.playerAction`으로 Commit까지 유지되고, `api.commitTurn`이 `player_action`으로 Worker에 전달한다. 최종 source 판정·검증은 Worker가 한다.
+- 게임 초기화(reset) 성공 시 `playHistory.onGameReset()`이 기록 캐시를 비운다.

@@ -77,6 +77,28 @@
     }
 
     .story-stream .narrative { margin-bottom: 16px; }
+    /* 플레이 기록 모달 */
+    .history-modal-overlay { position: fixed; inset: 0; background: rgba(0,0,0,0.55); display: flex; align-items: center; justify-content: center; z-index: 60; }
+    .history-modal { background: var(--panel, #1b1f27); color: inherit; width: min(640px, 100%); max-height: 85vh; overflow-y: auto; border-radius: 12px; padding: 16px; display: flex; flex-direction: column; gap: 12px; }
+    .history-modal-header { display: flex; align-items: center; justify-content: space-between; }
+    .history-modal-header h2 { margin: 0; font-size: 1.1rem; }
+    .history-modal-actions { display: flex; gap: 8px; }
+    .history-modal-actions button, .history-close, .history-more { padding: 8px 12px; border-radius: 8px; border: 1px solid var(--border, #333); background: transparent; color: inherit; cursor: pointer; }
+    .history-list { display: flex; flex-direction: column; gap: 12px; overflow-y: auto; }
+    .history-turn { border: 1px solid var(--border, #333); border-radius: 8px; padding: 10px; }
+    .history-turn-title { font-weight: 700; margin-bottom: 6px; }
+    .history-turn-action, .history-turn-summary { white-space: pre-wrap; overflow-wrap: anywhere; font-size: 0.9rem; margin-bottom: 4px; }
+    .history-turn details { margin-top: 6px; }
+    .history-turn summary { cursor: pointer; color: var(--muted, #999); }
+    .history-section-body { white-space: pre-wrap; overflow-wrap: anywhere; font-size: 0.85rem; margin-top: 6px; }
+    .history-mind-meta { font-size: 0.7rem; color: var(--muted, #777); margin-top: 4px; }
+    .history-error { color: #ff8080; font-size: 0.85rem; }
+    .history-empty { color: var(--muted, #999); text-align: center; padding: 24px 0; }
+    .history-more { align-self: center; }
+    @media (max-width: 480px) {
+      .history-modal { width: 100%; max-height: 92vh; border-radius: 0; }
+      .history-modal-overlay { align-items: flex-end; }
+    }
     .story-stream .pending-turn-action-notice { margin-bottom: 16px; white-space: pre-wrap; word-break: keep-all; }
     .pending-turn-action-details { margin-top: 8px; font-size: 0.85rem; color: var(--muted); }
     .pending-turn-action-details summary { cursor: pointer; }
@@ -385,6 +407,7 @@
     <div class="header-controls">
       <button class="tts-toggle" id="tts-toggle" type="button" aria-pressed="true">🔊 음성 ON</button>
       <button class="tts-replay" id="tts-replay" type="button" hidden>▶ 재생</button>
+      <button class="history-toggle" id="history-toggle" type="button">📖 플레이 기록</button>
       <button class="command-toggle" id="command-toggle" type="button">/ 안내</button>
       <span class="tts-status" id="tts-status" role="status" hidden></span>
     </div>
@@ -438,6 +461,7 @@
   <script src="ui.js"></script>
   <script src="sidebar.js"></script>
   <script src="tts.js"></script>
+  <script src="history.js"></script>
   <script>
     // ─── Entry Point ───
     const GAME_ID = new URLSearchParams(location.search).get('game') || localStorage.getItem('gameId');
@@ -540,6 +564,8 @@
       state.isStreaming = false;
       state.turnCount = 0;
       state.context = null;
+      // 새 게임 초기화 후 이전 플레이 기록이 다시 나타나면 안 된다.
+      playHistory.onGameReset();
 
       try {
         // Removes the previous game's narrative/dividers (and, nested
@@ -565,6 +591,7 @@
     });
     tts.init();
     document.getElementById('command-toggle').addEventListener('click', () => handleCommand('/안내'));
+    document.getElementById('history-toggle').addEventListener('click', () => { playHistory.cache.gameId = state.gameId; playHistory.toggle(); });
 
     function restoreLastTurn() {
       const memories = state.context?.recent_memories || [];
@@ -629,13 +656,27 @@
       document.body.appendChild(overlay); overlay.querySelector('.cancel').focus();
     }
 
-    async function handleTurnInput() {
+    // 선택지 번호 단독 입력(1~4/A~D/①~④)은 direct_marker로 표시한다 —
+    // 최종 검증과 resolved_input 결정은 Worker가 한다.
+    const DIRECT_MARKER_INPUT_RE = /^(?:[1-4]|[A-Da-d]|[①②③④])$/;
+
+    async function handleTurnInput(actionMeta = { source: 'direct_text' }) {
       const input = document.getElementById('chat-input').value.trim();
       if (!input || !state.gameId || state.isStreaming) return;
       document.getElementById('chat-input').value = '';
       if (input.startsWith('/')) { await handleCommand(input); return; }
       ui.addUserMessage(input);
-      await retryStory({ input, nextTurn: state.turnCount + 1, narrative: null, extract: null, mode: null, narrativeElement: null });
+      const meta = actionMeta && typeof actionMeta === 'object' ? actionMeta : { source: 'direct_text' };
+      const source = meta.source === 'choice_button'
+        ? 'choice_button'
+        : (DIRECT_MARKER_INPUT_RE.test(input) ? 'direct_marker' : 'direct_text');
+      const playerAction = {
+        source,
+        raw_input: input,
+        choice_index: Number.isInteger(meta.choice_index) ? meta.choice_index : null,
+        choice_text: typeof meta.choice_text === 'string' ? meta.choice_text : null
+      };
+      await retryStory({ input, nextTurn: state.turnCount + 1, narrative: null, extract: null, mode: null, narrativeElement: null, playerAction });
     }
 
     async function retryStory(pending) {
@@ -743,7 +784,7 @@
       ui.setLoading(true, '턴 저장 중');
       ui.clearPendingTurnActions();
       try {
-        const saved = await api.commitTurn(state.gameId, pending.nextTurn, pending.narrative, pending.extract, pending.mode === 'opening' ? { opening_started: true } : {}, pending.input);
+        const saved = await api.commitTurn(state.gameId, pending.nextTurn, pending.narrative, pending.extract, pending.mode === 'opening' ? { opening_started: true } : {}, pending.input, pending.playerAction);
         state.turnCount = saved.turn_count; ui.updateMeta(null, state.turnCount);
         pending.timing = { ...(pending.timing || {}), commit: saved.timing };
         if (saved.npc_stats) pending.extract.npc_stats = saved.npc_stats;
@@ -828,10 +869,14 @@
       ui.showSystemMessage(`📱 어플 정보\n레벨 ${progress.level || 1} · 경험치 ${progress.exp || 0}/${progress.next_level_exp || 10}\n기능: 개인 대상 일반 최면·암시 / 마인드 모니터 / 공간 범위 상식 개변\n활성 암시: ${suggestionLines.length ? suggestionLines.join(' · ') : '없음'}\n상식 개변: ${csa.length ? csa.map(item => `${item.content} (${item.scope_label || item.scope_id})`).join(', ') : '없음'}`);
     }
 
-    function submitChoice(choiceText) {
+    function submitChoice(choiceText, meta = {}) {
       tts.unlockAudio();
       document.getElementById('chat-input').value = choiceText;
-      handleTurnInput();
+      handleTurnInput({
+        source: 'choice_button',
+        choice_index: meta.choice_index,
+        choice_text: choiceText
+      });
     }
 
     // Reloads the server's last-committed state and re-renders it — since

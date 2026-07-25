@@ -379,6 +379,16 @@ ${errors.join('; ')}
 {"npc_emotion": {"surface": "따옴표로 감싼 1인칭 내면 독백, 실질 길이 최소 40자", "inner": "따옴표로 감싼 1인칭 내면 독백, 실질 길이 최소 40자", "physical_reaction": "관찰 가능한 신체적·행동적 반응, 최소 2문장"}}`;
 }
 
+// Deterministic, LLM-free — used only when mind-monitor generation/repair
+// still fails validation. Deliberately generic (no plot-specific facts) so
+// it can never contradict the current narrative; never the previous turn's
+// saved surface/inner/physical_reaction.
+const MIND_MONITOR_DEGRADED_FALLBACK = {
+  surface: '“현재 상황을 정리하려 하지만 감정이 쉽게 가라앉지 않는다.”',
+  inner: '“방금 일어난 일을 아직 제대로 받아들이지 못하고 있다.”',
+  physical_reaction: '호흡을 고르며 자세를 바로잡으려 한다. 시선과 손끝에 긴장이 남아 있다.'
+};
+
 async function repairMindMonitor(env, characterName, characterStyle, narrativeText, badEmotion, errors) {
   const prompt = buildMindRepairPrompt(characterName, characterStyle, narrativeText, badEmotion, errors);
   const result = await requestDeepSeekJsonWithRetry(env, {
@@ -544,23 +554,19 @@ async function performExtractionPass(env, { narrativeText, playerInput, compatCt
     }
   }
   if (!validation.ok) {
-    const characterId = extract.character_id;
-    const existing = compatCtx?.save?.npc_emotion?.[characterId];
-    const fallbackAvailable = Boolean(characterId) && characterId !== 'narrator' && isPlainObject(existing);
-    // Only the field(s) that actually failed fall back — a valid surface
-    // must survive even when inner (or vice versa) still fails.
-    let mindFallbackUsed = false;
+    // 이전 턴 npc_emotion을 그대로 복사하지 않는다 — 실패한 필드만 간결한
+    // 현재 턴 degraded 문구로 대체하고, 이미 검증을 통과한 형제 필드는
+    // 그대로 유지한다. 새 저장값은 절대 fallback_previous로 기록하지 않는다.
+    let mindDegradedUsed = false;
     for (const field of ['surface', 'inner', 'physical_reaction']) {
       if (validation.fieldErrors[field].length) {
-        const replacement = fallbackAvailable && typeof existing[field] === 'string' ? existing[field] : '';
-        if (replacement) mindFallbackUsed = true;
-        extract.npc_emotion[field] = replacement;
+        extract.npc_emotion[field] = MIND_MONITOR_DEGRADED_FALLBACK[field];
+        mindDegradedUsed = true;
       }
     }
-    // 검증 실패 필드가 기존 저장값으로 대체된 턴은 fallback_previous로 기록한다.
-    if (mindFallbackUsed) extract.mind_monitor_source = 'fallback_previous';
+    if (mindDegradedUsed) extract.mind_monitor_source = 'degraded';
     extract.mind_monitor_error = validation.errors;
-    console.error('Mind monitor validation failed after repair:', { request_id: requestId, characterId, errors: validation.errors });
+    console.error('Mind monitor validation failed after repair:', { request_id: requestId, characterId: extract.character_id, errors: validation.errors });
   }
   extract.dialogue_lines = filterMainNpcDialogue(extract, compatCtx?.master?.characters || {});
 
@@ -977,23 +983,40 @@ async function handleImage(req, env) {
   return jsonResponse({ image_url: result });
 }
 
+// TTS Worker(fancy-dust-7f8c) 호출: 두 Worker 모두 workers.dev 서브도메인에
+// 있으므로 일반 fetch(url)는 Cloudflare가 "Worker→Worker on the same zone"
+// 요청을 차단해 항상 404(error code: 1042)를 반환한다 — 주소 문제가 아니라
+// 플랫폼 제약이며, Service Binding(env.TTS_WORKER)만 이 제약을 우회한다.
+// TTS_WORKER_URL은 실제 라우팅에 쓰이지 않고 요청 URL 표기·로그용으로만 분리한다.
 async function handleTts(req, env) {
   const { text, voice_id, direction = '' } = await readJson(req);
   if (typeof text !== 'string' || !text.trim() || typeof voice_id !== 'string' || !voice_id.trim()) {
     return jsonResponse({ error: 'text and voice_id required' }, 400);
   }
   if (typeof direction !== 'string') return jsonResponse({ error: 'direction must be a string' }, 400);
-  const res = await fetch('https://fancy-dust-7f8c.zeroslove.workers.dev/', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ text: text.trim(), voice_id: voice_id.trim(), direction: direction.trim(), emotion: mapDirection(direction) })
-  });
+  if (!env.TTS_WORKER) {
+    console.error('TTS Worker service binding missing', { binding: 'TTS_WORKER' });
+    return jsonResponse({ error: 'TTS Worker not configured' }, 500);
+  }
+  const ttsUrl = env.TTS_WORKER_URL || 'https://fancy-dust-7f8c.zeroslove.workers.dev/';
+  let res;
+  try {
+    res = await env.TTS_WORKER.fetch(ttsUrl, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ text: text.trim(), voice_id: voice_id.trim(), direction: direction.trim(), emotion: mapDirection(direction) })
+    });
+  } catch (error) {
+    console.error('TTS Worker request failed', { url: ttsUrl, error: error.message });
+    return jsonResponse({ error: 'TTS Worker request failed' }, 502);
+  }
   if (!res.ok) {
-    const detail = (await res.text()).slice(0, 300);
-    return jsonResponse({ error: `TTS Worker error: ${res.status}`, detail }, 502);
+    console.error('TTS Worker error response', { url: ttsUrl, status: res.status });
+    return jsonResponse({ error: `TTS Worker error: ${res.status}` }, 502);
   }
   const data = await res.json();
   if (typeof data?.url !== 'string' || !/^https?:\/\//i.test(data.url)) {
+    console.error('TTS Worker returned no valid audio URL', { url: ttsUrl });
     return jsonResponse({ error: 'TTS Worker returned no valid audio URL' }, 502);
   }
   return jsonResponse({ url: data.url });
@@ -1857,7 +1880,7 @@ function buildStoryPrompt(ctx, playerInput, currentTurn, feedback = []) {
 
 [금지] 이미지(![), 오디오(<audio), URL(http), HTML 태그를 절대 쓰지 마라. 이건 렌더러가 처리한다.
 [순서] 출력 순서: [1. 서사 및 행동] [2. 플레이어 상황판] [3. 선택지]. 마인드 모니터는 본문에 절대 출력하지 않는다. 선택지는 항상 맨 마지막.
-[대사 — AUTHORITATIVE DIALOGUE CONTRACT] [1. 서사 및 행동] 안의 모든 직접 대사는 반드시 '화자명 (짧은 연기지시): “대사”' 이 한 가지 형식으로만 쓴다. NPC는 캐릭터명, 플레이어는 플레이어 이름을 화자명으로 쓰고, 괄호 안 연기지시는 짧고 구체적으로 반드시 포함한다. 이름 없는 따옴표 대사는 금지한다 — 신음, 숨소리, 짧은 감탄도 직접 발화라면 같은 형식을 적용한다. 서술문 속 인용이나 문서 문구의 인용만 예외다. 화자명을 마크다운 굵게(**)로 감싸지 않는다(Extract/TTS 파서와 동일 계약). 자연스러운 소설체보다 이 화자 형식이 우선한다.
+[대사 — AUTHORITATIVE DIALOGUE CONTRACT] [1. 서사 및 행동] 안의 모든 직접 대사는 반드시 '화자명 (짧은 연기지시): “대사”' 이 한 가지 형식으로만 쓴다. NPC는 캐릭터명, 플레이어는 플레이어 이름을 화자명으로 쓰고, 괄호 안 연기지시는 짧고 구체적으로 반드시 포함한다. 이름 없는 따옴표 대사는 금지한다 — 신음, 숨소리, 짧은 감탄도 직접 발화라면 같은 형식을 적용한다. 서술문 속 인용이나 문서 문구의 인용만 예외다. 화자명을 마크다운 굵게(**)로 감싸지 않는다(Extract/TTS 파서와 동일 계약). 자연스러운 소설체보다 이 화자 형식이 우선한다. [최근 기억]에 화자명 없이 따옴표만 있는 옛 대사가 남아 있어도 그 형식을 절대 모방하지 말고, 이번 턴의 모든 대사는 항상 위 형식만 따른다.
 예: 강세라 (숨을 얕게 몰아쉬며): “……감사관님……”
 예: 박도훈 (차분하게 압박하며): “계속 보고하세요.”
 [사용자 정정 우선] 사용자가 직전 장면의 상태·복장·위치·행동 결과를 직접 정정하면, 그 입력을 현재 장면의 최우선 사실로 취급한다. 직전 서사·요약·저장 기억이 사용자 정정과 충돌하면 사용자 정정을 우선하고, "실제로는 그렇지 않았다"거나 "사용자가 착각했다"고 임의로 반박하지 않는다. 정정은 현재 장면에 자연스럽게 반영하고 과거 전체를 다시 서술하지 않는다.

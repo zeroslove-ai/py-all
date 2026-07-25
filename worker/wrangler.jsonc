@@ -9,5 +9,11 @@
   },
   "observability": {
     "enabled": true
-  }
+  },
+  "vars": {
+    "TTS_WORKER_URL": "https://fancy-dust-7f8c.zeroslove.workers.dev/"
+  },
+  "services": [
+    { "binding": "TTS_WORKER", "service": "fancy-dust-7f8c" }
+  ]
 }

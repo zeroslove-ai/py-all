@@ -3,7 +3,8 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "test": "node --test",
+    "test": "node --test test/worker.test.js test/ui.test.js",
+    "test:e2e": "playwright test",
     "deploy:worker": "node scripts/deploy-worker.mjs",
     "deploy:frontend": "node scripts/deploy-frontend.mjs"
   }

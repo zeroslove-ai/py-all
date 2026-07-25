@@ -363,13 +363,13 @@ test('renderChoices/renderGameplayChoices pass the full normalized choice senten
   assert.match(renderChoicesFn, /const text = this\.normalizeChoice\(/);
   // 첫 인자는 항상 정규화된 선택지 전체 문장 — 인덱스/마커 단독 전달 금지.
   // 두 번째 메타 인자(choice_index/choice_text)는 기록용 부가 정보다.
-  assert.match(renderChoicesFn, /onClick\(text, \{ source: 'choice_button', choice_index: index, choice_text: text \}\)/);
+  assert.match(renderChoicesFn, /onClick\(fullText, \{ source: 'choice_button', choice_index: index, choice_text: fullText \}\)/);
   assert.doesNotMatch(renderChoicesFn, /onClick\(index\)/);
   assert.doesNotMatch(renderChoicesFn, /onClick\(marker\)/);
 
   const renderGameplayFn = uiSource.match(/renderGameplayChoices\(choices, onClick, \{ setup = false \} = \{\}\)[\s\S]*?\n  \},/)?.[0] || '';
   assert.match(renderGameplayFn, /const all = \(choices \|\| \[\]\)\.map\(choice => this\.normalizeChoice\(/);
-  assert.match(renderGameplayFn, /onClick\(text, \{ source: 'choice_button', choice_index: index, choice_text: text \}\)/);
+  assert.match(renderGameplayFn, /onClick\(fullText, \{ source: 'choice_button', choice_index: index, choice_text: fullText \}\)/);
   assert.doesNotMatch(renderGameplayFn, /onClick\(index\)/);
 
   // Every button in the group is disabled synchronously, before onClick
@@ -741,7 +741,7 @@ const HISTORY_SAMPLE_RECORD = {
 const HISTORY_META = { title: '테스트 게임', gameId: 'abcd1234-0000', exportedAt: '2026-07-25T01:00:00Z' };
 
 test('HISTORY-B 1: choice button click passes choice_index to the callback', () => {
-  const matches = uiSource.match(/onClick\(text, \{ source: 'choice_button', choice_index: index, choice_text: text \}\);/g) || [];
+  const matches = uiSource.match(/onClick\(fullText, \{ source: 'choice_button', choice_index: index, choice_text: fullText \}\);/g) || [];
   assert.ok(matches.length >= 2, 'renderGameplayChoices와 renderChoices 모두 index를 전달해야 한다');
 });
 
@@ -782,7 +782,7 @@ test('HISTORY-B 7: retryCommit sends player_action in the API body', () => {
 
 test('HISTORY-B 8: the legacy/reentry choice path also forwards metadata', () => {
   const renderChoices = uiSource.match(/renderChoices\(choices, onClick\) \{[\s\S]*?\n  \},\n\n  \/\/ ─── 스크롤/)?.[0] || '';
-  assert.match(renderChoices, /onClick\(text, \{ source: 'choice_button', choice_index: index, choice_text: text \}\)/);
+  assert.match(renderChoices, /onClick\(fullText, \{ source: 'choice_button', choice_index: index, choice_text: fullText \}\)/);
 });
 
 test('HISTORY-B 9: the play history button exists in header controls', () => {

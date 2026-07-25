@@ -283,6 +283,12 @@
       word-break: keep-all;
       overflow-wrap: anywhere;
     }
+    .choice-btn .choice-label {
+      min-width: 0;
+      overflow: hidden;
+      white-space: nowrap;
+      text-overflow: ellipsis;
+    }
     .choice-btn:hover {
       border-color: var(--accent);
       background: var(--bg-primary);
@@ -733,7 +739,7 @@
         pending.extract.extract_degraded_reason = result.extract_degraded_reason || null;
         pending.extractDegraded = result.extract_degraded === true;
         pending.timing = { ...(pending.timing || {}), extract: result.timing };
-        ui.removeTrailingChoiceBlock(pending.extract.choices);
+        // Story가 생성한 [3. 선택지] 블록은 본문에 그대로 표시한다 (제거 호출 삭제).
         if (result.narrative_replacement) {
           // A CSA-omission fix: the Worker already inserted the correction
           // before [2. 플레이어 상황판] server-side — replace pending.narrative

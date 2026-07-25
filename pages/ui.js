@@ -153,6 +153,15 @@ const ui = {
     return this.stripBoldMarkers(String(value || '')).replace(/^\s*(?:[①②③④⑤⑥⑦⑧⑨⑩]|\d+[.)]|[-*•])\s*/, '').trim();
   },
 
+  // 버튼 표시 전용 축약 — normalizeChoice 결과를 받아 30자 이내로 자른다.
+  // 원문 의미를 새로 만들거나 바꾸지 않고, 실제 전달값은 항상 원문 전체다.
+  summarizeChoiceLabel(text, maxLength = 30) {
+    const cleaned = String(text ?? '').replace(/\s+/g, ' ').trim();
+    if (!cleaned) return '';
+    if (cleaned.length <= maxLength) return cleaned;
+    return cleaned.slice(0, maxLength - 1) + '…';
+  },
+
   removeTrailingChoiceBlock(choices) {
     const normalized = (Array.isArray(choices) ? choices : []).map(choice => this.normalizeChoice(choice)).filter(Boolean);
     if (!normalized.length) return false;
@@ -370,14 +379,21 @@ const ui = {
       const text = this.normalizeChoice(typeof rawChoice === 'string' ? rawChoice : rawChoice?.text);
       if (!text) continue;
       const isExplicit = text.startsWith('❗');
+      // 표시문(30자 축약)과 전달 원문을 분리한다 — 콜백/기록에는 항상 원문 전체.
+      const fullText = text;
+      const displayText = this.summarizeChoiceLabel(isExplicit ? fullText.slice(1).trim() : fullText, 30);
       const btn = document.createElement('button');
       btn.className = `choice-btn ${isExplicit ? 'explicit' : ''}`;
       const marker = document.createElement('span'); marker.className = 'marker'; marker.textContent = markers[index] || `${index + 1}.`;
-      btn.append(marker, document.createTextNode(isExplicit ? ` ❗ ${text.slice(1).trim()}` : ` ${text}`));
+      const label = document.createElement('span'); label.className = 'choice-label';
+      label.textContent = isExplicit ? `❗ ${displayText}` : displayText;
+      btn.append(marker, label);
+      btn.title = fullText;
+      btn.setAttribute('aria-label', `${index + 1}. ${fullText}`);
       btn.addEventListener('click', () => {
         this.els.choiceButtons.querySelectorAll('button').forEach(button => { button.disabled = true; button.classList.remove('selected'); });
         btn.classList.add('selected');
-        onClick(text, { source: 'choice_button', choice_index: index, choice_text: text });
+        onClick(fullText, { source: 'choice_button', choice_index: index, choice_text: fullText });
       }, { once: true });
       this.els.choiceButtons.appendChild(btn);
     }
@@ -391,14 +407,21 @@ const ui = {
     const actions = setup ? all : all.filter(text => !/(?:어플|앱)\s*정보|📱/i.test(text)).slice(0, 4);
     actions.forEach((text, index) => {
       const explicit = text.startsWith('❗');
+      // 표시문(30자 축약)과 전달 원문을 분리한다 — 콜백/기록에는 항상 원문 전체.
+      const fullText = text;
+      const displayText = this.summarizeChoiceLabel(explicit ? fullText.slice(1).trim() : fullText, 30);
       const button = document.createElement('button');
       button.className = `choice-btn ${explicit ? 'explicit' : ''}`;
       const marker = document.createElement('span'); marker.className = 'marker'; marker.textContent = markers[index] || `${index + 1}.`;
-      button.append(marker, document.createTextNode(explicit ? ` ❗ ${text.slice(1).trim()}` : ` ${text}`));
+      const label = document.createElement('span'); label.className = 'choice-label';
+      label.textContent = explicit ? `❗ ${displayText}` : displayText;
+      button.append(marker, label);
+      button.title = fullText;
+      button.setAttribute('aria-label', `${index + 1}. ${fullText}`);
       button.addEventListener('click', () => {
         this.els.choiceButtons.querySelectorAll('button').forEach(item => { item.disabled = true; item.classList.remove('selected'); });
         button.classList.add('selected');
-        onClick(text, { source: 'choice_button', choice_index: index, choice_text: text });
+        onClick(fullText, { source: 'choice_button', choice_index: index, choice_text: fullText });
       }, { once: true });
       this.els.choiceButtons.appendChild(button);
     });

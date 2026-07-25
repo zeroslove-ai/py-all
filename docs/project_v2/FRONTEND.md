@@ -141,3 +141,10 @@ const state = {
 - Markdown/TXT 다운로드는 `playHistory.buildHistoryMarkdown`/`buildHistoryText` 순수 함수가 생성하며, 100턴 단위로 전체 기록을 수집해 Blob으로 저장한다(파일명 `gamebuilder_<id8>_turns_<first>-<last>.md|txt`).
 - 선택지 버튼 클릭은 `submitChoice(text, { source, choice_index, choice_text })`를 통해 `pending.playerAction`으로 Commit까지 유지되고, `api.commitTurn`이 `player_action`으로 Worker에 전달한다. 최종 source 판정·검증은 Worker가 한다.
 - 게임 초기화(reset) 성공 시 `playHistory.onGameReset()`이 기록 캐시를 비운다.
+
+## 선택지 표시/전달 분리 (2026-07-25 핫픽스)
+
+- Story 본문이 생성한 `[3. 선택지]` 블록은 화면에서 제거하지 않고 그대로 표시한다 (`removeTrailingChoiceBlock` 호출 삭제).
+- 하단 선택지 버튼에는 `summarizeChoiceLabel(text, 30)` 축약문만 표시한다(줄바꿈→공백, 연속 공백 정리, 30자 초과 시 앞 29자+`…`, `❗`는 글자 수 계산 전 분리).
+- 클릭 콜백·`player_action`·DB/플레이 기록/MD·TXT에는 항상 선택지 원문 전체(`fullText`)가 전달·저장된다. 버튼 `title`/`aria-label`에도 원문 전체.
+- 모바일은 `span.choice-label`(nowrap + ellipsis)로 한 줄 표시.

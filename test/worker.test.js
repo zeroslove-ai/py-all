@@ -108,6 +108,9 @@ import {
   detectRegisteredCharacterIds,
   parseJsonContent,
   buildStoryStateSnapshot,
+  buildStoryMasterSnapshot,
+  shouldDeduplicateStorySummaries,
+  isAppUsageInfoRequest,
   clipHeadTail,
   buildCurrentSceneSection,
   buildCurrentNpcProfileSection,
@@ -1192,10 +1195,11 @@ test('save patch preserves player data and does not let extract control recent10
   assert.equal(patch.recent100_start_turn, 0);
 });
 
-test('first generated turn receives rulebook while normal turn omits it', () => {
+test('first generated turn receives only the periodic address rulebook while normal turn omits it', () => {
   const ctx = {
     master: {
-      rulebook_game_system: '규칙 본문',
+      rulebook_address: '병원 호칭 규칙 본문',
+      rulebook_game_system: '대량 예시 규칙 본문',
       characters: {}
     },
     save: { player: {} },
@@ -1204,11 +1208,12 @@ test('first generated turn receives rulebook while normal turn omits it', () => 
   const first = buildStoryPrompt(ctx, '시작', 0);
   const normal = buildStoryPrompt({
     ...ctx,
-    save: { player: { name: '플레이어' }, opening_started: true }
+    save: { player_setup: { status: 'complete' }, player: { name: '플레이어' }, opening_started: true }
   }, '행동', 1);
 
-  assert.match(first.messages[0].content, /규칙 본문/);
-  assert.doesNotMatch(normal.messages[0].content, /규칙 본문/);
+  assert.match(first.messages[0].content, /병원 호칭 규칙 본문/);
+  assert.doesNotMatch(first.messages[0].content, /대량 예시 규칙 본문/);
+  assert.doesNotMatch(normal.messages[0].content, /병원 호칭 규칙 본문|대량 예시 규칙 본문/);
 });
 
 test('story prompt uses the V1-style player status panel contract and excludes monitor details', () => {
@@ -2323,14 +2328,21 @@ test('buildStrengthPreJudgmentSection states the exact blocked-message markers f
   assert.match(section, /새 예시를 스스로 만들어내지 않는다/);
 });
 
-test('the Story prompt injects the strength pre-judgment, suggestion-boundary, and CSA-nature sections only for normal/opening turns', () => {
+test('the Story prompt injects detailed app guidance only for app-related normal/opening turns', () => {
   const save = { player: { name: '금태양', job: '간호사' }, player_setup: { status: 'complete' }, opening_started: true };
   const normal = buildStoryPrompt({ master: { characters: {} }, save, recent_memories: [] }, '계속', 5);
   const normalText = normal.messages.map(m => m.content).join('\n');
-  assert.match(normalText, /암시·상식개변 사전 판정/);
-  assert.match(normalText, /일반 암시 강도별 허용 범위/);
-  assert.match(normalText, /상식개변의 기본 성격/);
-  assert.match(normalText, /NPC의 상식개변 인식 방식/);
+  assert.doesNotMatch(normalText, /암시·상식개변 사전 판정/);
+  assert.doesNotMatch(normalText, /일반 암시 강도별 허용 범위/);
+  assert.doesNotMatch(normalText, /상식개변의 기본 성격/);
+  assert.doesNotMatch(normalText, /NPC의 상식개변 인식 방식/);
+
+  const appTurn = buildStoryPrompt({ master: { characters: {} }, save, recent_memories: [] }, '한소영에게 암시를 건다', 5);
+  const appText = appTurn.messages.map(m => m.content).join('\n');
+  assert.match(appText, /암시·상식개변 사전 판정/);
+  assert.match(appText, /일반 암시 강도별 허용 범위/);
+  assert.match(appText, /상식개변의 기본 성격/);
+  assert.match(appText, /NPC의 상식개변 인식 방식/);
 
   const setup = buildStoryPrompt({ master: {}, save: { player: {} }, recent_memories: [] }, 'start', 0);
   const setupText = setup.messages.map(m => m.content).join('\n');
@@ -2400,12 +2412,17 @@ test('buildCsaExampleSection reads csa_examples independently from suggestion_ex
   assert.doesNotMatch(suggestionSection, /상식개변 전용 문장/);
 });
 
-test('the Story prompt injects both example sections only for normal/opening turns, gated the same way as the pre-judgment section', () => {
+test('the Story prompt injects bulk example sections only for app-related normal/opening turns', () => {
   const save = { player: { name: '금태양', job: '간호사' }, player_setup: { status: 'complete' }, opening_started: true };
   const normal = buildStoryPrompt({ master: { characters: {} }, save, recent_memories: [] }, '계속', 5);
   const normalText = normal.messages.map(m => m.content).join('\n');
-  assert.match(normalText, /\[일반 암시 예시 — rulebook_game_system 제공\]/);
-  assert.match(normalText, /\[상식개변 예시 — rulebook_game_system 제공\]/);
+  assert.doesNotMatch(normalText, /\[일반 암시 예시 — rulebook_game_system 제공\]/);
+  assert.doesNotMatch(normalText, /\[상식개변 예시 — rulebook_game_system 제공\]/);
+
+  const appTurn = buildStoryPrompt({ master: { characters: {} }, save, recent_memories: [] }, '한소영에게 암시를 건다', 5);
+  const appText = appTurn.messages.map(m => m.content).join('\n');
+  assert.match(appText, /\[일반 암시 예시 — rulebook_game_system 제공\]/);
+  assert.match(appText, /\[상식개변 예시 — rulebook_game_system 제공\]/);
 
   const setup = buildStoryPrompt({ master: {}, save: { player: {} }, recent_memories: [] }, 'start', 0);
   const setupText = setup.messages.map(m => m.content).join('\n');
@@ -6852,4 +6869,135 @@ test('STORY-RULES 8: a bare quoted line without a speaker is a contract violatio
   assert.equal(dialogueLineMatches('“계속하세요.”'), false);
   // 서술문 속 인용은 대사 라인이 아니므로 위반 대상이 아니다
   assert.equal(dialogueLineMatches('그녀는 “그만두라”는 쪽지를 읽었다.'), false);
+});
+
+// ─────────────────────────────────────────────
+// PROMPT-DIET: Story 주입 다이어트 계약
+// ─────────────────────────────────────────────
+
+const PROMPT_DIET_CHARACTERS = {
+  heroine1: { name: '한소영', '소속': '3병동 수간호사', '성격': '차분하고 책임감이 강하다' },
+  heroine2: { name: '강세라', '소속': '3병동 간호사', '성격': '냉철하고 경쟁심이 있다' }
+};
+const PROMPT_DIET_MASTER = {
+  app_usage: 'APP_USAGE_BLOCK — 어플 사용법 전체 설명',
+  opening_scenario: 'OPENING_SCENARIO_BLOCK — 이름/직업을 아직 확정하지 말라. 병원 본편을 시작하지 말라. 추천 캐릭터를 보여줘라.',
+  mind_monitor_format: 'MIND_MONITOR_FORMAT_BLOCK',
+  npc_stat_inference_policy: 'NPC_STAT_INFERENCE_POLICY_BLOCK',
+  stat_definitions: 'STAT_DEFINITIONS_BLOCK',
+  registered_character_policy: '등록되지 않은 의사·간호사·환자·보호자·직원은 이름 없는 배경 인물로만 묘사하며, 플레이어에게 먼저 말을 걸거나 선택지 대상·현재 타겟이 될 수 없다.',
+  npc_stats: { 기본: { 호감도: 0, 신뢰도: 0 } },
+  rulebook_address: 'RULEBOOK_ADDRESS_BLOCK',
+  rulebook_display_format: 'RULEBOOK_DISPLAY_FORMAT_BLOCK',
+  rulebook_narrative: 'RULEBOOK_NARRATIVE_BLOCK',
+  rulebook_verification: 'RULEBOOK_VERIFICATION_BLOCK',
+  rulebook_level_growth: 'RULEBOOK_LEVEL_GROWTH_BLOCK',
+  rulebook_game_system: {
+    suggestion_examples: { weak: ['약한 암시 예시 블록'], medium: ['중간 암시 예시 블록'], strong: ['강한 암시 예시 블록'] },
+    csa_examples: { weak: ['약한 상식 예시 블록'], medium: ['중간 상식 예시 블록'], strong: ['강한 상식 예시 블록'] }
+  },
+  characters: PROMPT_DIET_CHARACTERS,
+  npc_relationships: { rival_1: '한소영과 강세라는 KPI 경쟁 라이벌이다.' },
+  world: '서울중앙병원',
+  genre: '인터랙티브 게임'
+};
+const PROMPT_DIET_SAVE = {
+  player_setup: { status: 'complete', selected_id: 'preset_1' },
+  player: { name: '박도훈', age: 31, gender: '남성', job: '감사관' },
+  player_progress: { level: 1, exp: 0 },
+  opening_started: true,
+  world_state: { building: 'seoul_central_hospital', floor: 'hospital_floor_3', ward: 'hospital_3ward', location_label: '3병동 복도' },
+  last_character_id: 'heroine1',
+  npc_stats: { heroine1: { 호감도: 10, 신뢰도: 8, 최면깊이: 0, 순응도: 0, 최면저항력: 50 } },
+  npc_emotion: { heroine1: { surface: '“아직은 지켜보는 편이 안전하겠다고 생각한다.”', inner: '“하지만 왜인지 조금 더 알고 싶다.”', physical_reaction: '시선을 잠시 피한다. 차트를 다시 정리한다.' } },
+  active_suggestions: {},
+  csa_active: [],
+  csa_daily_used: 0,
+  story_summary_overall: '같은 요약 내용',
+  story_summary_recent100: '같은 요약 내용'
+};
+const promptDietText = (overrides = {}, input = '주변을 살핀다', turn = 5) => buildStoryPrompt({
+  master: { ...PROMPT_DIET_MASTER, ...(overrides.master || {}) },
+  save: { ...PROMPT_DIET_SAVE, ...(overrides.save || {}) },
+  recent_memories: overrides.recent_memories || []
+}, input, turn).messages.map(m => m.content).join('\n');
+
+test('PROMPT-DIET A: protected dialogue and user-correction contracts survive the diet', () => {
+  const prompt = promptDietText();
+  assert.match(prompt, /AUTHORITATIVE DIALOGUE CONTRACT/);
+  assert.match(prompt, /화자명 \(짧은 연기지시\): “대사”/);
+  assert.match(prompt, /이름 없는 따옴표 대사는 금지한다/);
+  assert.match(prompt, /사용자 정정 우선/);
+  assert.match(prompt, /1\) 사용자의 최신 입력과 정정/);
+  const workerSource = readFileSync(new URL('../worker/game-proxy-v2.js', import.meta.url), 'utf8');
+  assert.doesNotMatch(workerSource, /validatePlayStrength|action_strength|strength_gate/i);
+});
+
+test('PROMPT-DIET B: normal play excludes non-Story rulebooks, bulk examples, stat/monitor policies, and keeps current capability', () => {
+  const prompt = promptDietText({}, '주변을 살핀다', 9);
+  assert.doesNotMatch(prompt, /APP_USAGE_BLOCK|OPENING_SCENARIO_BLOCK|MIND_MONITOR_FORMAT_BLOCK|NPC_STAT_INFERENCE_POLICY_BLOCK|STAT_DEFINITIONS_BLOCK|RULEBOOK_VERIFICATION_BLOCK|RULEBOOK_LEVEL_GROWTH_BLOCK|RULEBOOK_DISPLAY_FORMAT_BLOCK|RULEBOOK_NARRATIVE_BLOCK/);
+  assert.doesNotMatch(prompt, /\[일반 암시 예시 — rulebook_game_system 제공\]|\[상식개변 예시 — rulebook_game_system 제공\]/);
+  assert.doesNotMatch(prompt, /약한 암시 예시 블록|강한 상식 예시 블록/);
+  assert.match(prompt, /\[CURRENT HYPNOSIS APP CAPABILITY — HARD CONSTRAINT\]/);
+  assert.match(prompt, /현재 레벨: Lv\.1/);
+  assert.match(prompt, /사용 가능한 최면 강도: 약함/);
+  assert.match(prompt, /출력 직전 최소 확인/);
+  assert.match(prompt, /RULEBOOK_ADDRESS_BLOCK/);
+});
+
+test('PROMPT-DIET B2: opening_scenario and app_usage are conditional, and app-related turns get detailed app guidance', () => {
+  const setupIncomplete = promptDietText({ save: { player_setup: { status: 'draft' }, opening_started: false } }, 'start', 0);
+  assert.match(setupIncomplete, /OPENING_SCENARIO_BLOCK/);
+  assert.match(setupIncomplete, /APP_USAGE_BLOCK/);
+
+  const setupCompleteOpening = promptDietText({ save: { opening_started: false } }, '계속', 0);
+  assert.equal(buildStoryPrompt({ master: PROMPT_DIET_MASTER, save: { ...PROMPT_DIET_SAVE, opening_started: false }, recent_memories: [] }, '계속', 0).mode, 'opening');
+  assert.doesNotMatch(setupCompleteOpening, /OPENING_SCENARIO_BLOCK|이름\/직업을 아직 확정하지 말라|병원 본편을 시작하지 말라|추천 캐릭터를 보여줘라/);
+
+  const appInfo = promptDietText({}, '어플 정보와 사용법을 알려줘', 5);
+  assert.match(appInfo, /APP_USAGE_BLOCK/);
+  assert.match(appInfo, /\[일반 암시 예시 — rulebook_game_system 제공\]/);
+
+  const appMutation = promptDietText({}, '한소영에게 암시를 건다', 5);
+  assert.match(appMutation, /암시·상식개변 사전 판정/);
+  assert.match(appMutation, /약한 암시 예시 블록/);
+  assert.equal(isAppUsageInfoRequest('어플 정보와 사용법을 알려줘'), true);
+  assert.equal(isAppUsageInfoRequest('한소영과 대화한다'), false);
+});
+
+test('PROMPT-DIET C: the minor-NPC policy is unified and output contracts are not duplicated', () => {
+  const prompt = promptDietText({}, '한소영에게 묻는다', 5);
+  assert.match(prompt, /미등록 의사·간호사·환자·보호자·직원 같은 단역 NPC도 이름과 대사를 자유롭게 가질 수 있고/);
+  assert.doesNotMatch(prompt, /이름 없는 배경 인물로만 묘사하며, 플레이어에게 먼저 말을 걸거나 선택지 대상·현재 타겟이 될 수 없다/);
+  assert.doesNotMatch(prompt, /등록되지 않은 새 고유 NPC를 만들지 않는다/);
+  assert.equal((prompt.match(/\[FINAL OUTPUT CONTRACT/g) || []).length, 1);
+  assert.match(prompt, /형식은 \[대사 — AUTHORITATIVE DIALOGUE CONTRACT\]과 동일하다/);
+});
+
+test('PROMPT-DIET D: identical or pre-100 summaries are injected once, while different post-100 summaries stay separate', () => {
+  const same = promptDietText({}, '계속', 5);
+  assert.equal((same.match(/같은 요약 내용/g) || []).length, 1);
+  assert.match(same, /"story_summary_overall": ""/);
+
+  const pre100Different = promptDietText({ save: { story_summary_overall: '오래된 전체 요약', story_summary_recent100: '최근 100턴 요약' } }, '계속', 50);
+  assert.doesNotMatch(pre100Different, /오래된 전체 요약/);
+  assert.match(pre100Different, /최근 100턴 요약/);
+
+  const post100Different = promptDietText({ save: { story_summary_overall: '오래된 전체 요약', story_summary_recent100: '최근 100턴 요약' } }, '계속', 120);
+  assert.match(post100Different, /오래된 전체 요약/);
+  assert.match(post100Different, /최근 100턴 요약/);
+  assert.equal(shouldDeduplicateStorySummaries({ story_summary_overall: 'a', story_summary_recent100: 'a' }, 120), true);
+});
+
+test('PROMPT-DIET E: representative normal play is at least 20% shorter than its legacy-equivalent detailed-app prompt', () => {
+  const capability = calculateHypnosisCapability(PROMPT_DIET_SAVE, PROMPT_DIET_MASTER);
+  const normalLength = promptDietText({}, '주변을 살핀다', 5).length;
+  const legacyEquivalentLength = normalLength
+    + buildStrengthPreJudgmentSection(capability).length
+    + buildSuggestionStrengthBoundarySection().length
+    + buildCsaNatureSection().length
+    + buildSuggestionExampleSection(capability, PROMPT_DIET_MASTER).length
+    + buildCsaExampleSection(capability, PROMPT_DIET_MASTER).length;
+  const reduction = legacyEquivalentLength - normalLength;
+  assert.equal(reduction / legacyEquivalentLength >= 0.2, true);
 });

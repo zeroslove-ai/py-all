@@ -1793,6 +1793,35 @@ function buildAddressAbbreviationSection() {
   return `\n\n[호칭 규칙 — 요약]\n\n- 간호사끼리: 이름+쌤\n- 일반 간호사 → 수간호사: 수간호사님\n- 의료진 → 일반 의사: 선생님\n- 과장급 의사: 과장님 또는 교수님\n- 환자·보호자 → 간호사: 간호사님 또는 선생님\n- 저장된 직종·직급·부서를 임의 변경하지 않는다.\n\n우선순위: 1) [CURRENT NPC PROFILE]에 그 NPC의 공식 호칭/동료 간 호칭/상급자 호칭이 있으면 그것을 우선한다. 2) 없으면 위 병원 공통 규칙을 따른다. 3) 그래도 애매하면 자연스러운 존칭으로 판단한다. 모든 어색한 호칭까지 강제로 통일할 필요는 없다.`;
 }
 
+const STORY_MASTER_ALWAYS_OMIT_KEYS = new Set([
+  'characters',
+  'mind_monitor_format',
+  'npc_stat_inference_policy',
+  'registered_character_policy',
+  'stat_definitions',
+  'npc_stats'
+]);
+
+function isAppUsageInfoRequest(playerInput) {
+  const input = typeof playerInput === 'string' ? playerInput.trim() : '';
+  if (!input) return false;
+  return /(?:어플|앱|최면 어플).*(?:정보|사용법|설명|기능|예시)|(?:정보|사용법|설명|기능|예시).*(?:어플|앱|최면 어플)/.test(input);
+}
+
+function buildStoryMasterSnapshot(master = {}, { includeAppUsage = false, includeOpeningScenario = false } = {}) {
+  const omitKeys = new Set(STORY_MASTER_ALWAYS_OMIT_KEYS);
+  if (!includeAppUsage) omitKeys.add('app_usage');
+  if (!includeOpeningScenario) omitKeys.add('opening_scenario');
+  return cleanForLlm(master, { omitRulebook: true, omitKeys });
+}
+
+function shouldDeduplicateStorySummaries(save = {}, currentTurn = 0) {
+  const overall = typeof save?.story_summary_overall === 'string' ? save.story_summary_overall.trim() : '';
+  const recent = typeof save?.story_summary_recent100 === 'string' ? save.story_summary_recent100.trim() : '';
+  if (!overall || !recent) return false;
+  return currentTurn < 100 || overall === recent;
+}
+
 function buildNarrativeLengthSection() {
   return `\n\n[NARRATIVE LENGTH AND PACING CONTRACT — HIGH PRIORITY]\n\n- 먼저 이번 턴을 A/B/C 중 하나로 내부 판단하되 분류명을 출력하지 않는다.\n  A: 확인, 짧은 질문, 가벼운 반응처럼 위치·관계·상태 전환이 거의 없는 턴\n  B: 의미 있는 부탁, 대화, 신뢰 형성, 갈등 조정, 조사, 신체 행동이 진행되는 일반 턴\n  C: 이동, 새 NPC 합류, 최면/암시/상식 개변, 관계의 결정적 변화, 중요한 성공·실패·폭로가 있는 턴\n- [1. 서사 및 행동]만 다음 목표 길이로 작성한다. [1] 헤더, [2. 플레이어 상황판], [3. 선택지]는 이 글자 수에 포함하지 않는다.\n  A: 800~1,000자\n  B: 1,000~1,500자\n  C: 1,200~2,000자\n- [1]이 목표 하한을 채우기 전에는 [2. 플레이어 상황판]을 시작하지 않는다. 출력하기 전에 내부적으로 [1]이 목표 하한을 충족했는지 스스로 확인한다.\n- 분량이 부족하면 반복 묘사가 아니라 새 행동, 질문, 답변, 정보, 결정, 공간 변화 또는 갈등을 추가해서 채운다. 같은 의미의 문장을 늘이거나 장황한 요약, 과거 회상 재복사로 채우지 않는다.\n- 서사는 다음 진행 단위를 확실히 포함한다:\n  1. 입력에 대한 즉각적인 반응\n  2. 첫 번째 대화·행동 전개\n  3. 추가 질문·정보·행동 전개\n  4. 장면의 구체적인 결과\n  5. 다음 턴으로 이어지는 결정·갈등 또는 새 목표\n- 매 턴 최소 하나의 구체적인 변화가 있어야 한다. 이는 위치, 행동 완료, 새 정보, 결정, 관계의 분위기, 새 장애물 중 하나일 수 있다.\n- 구체적인 변화가 반드시 NPC 수치 delta를 의미하지는 않는다. 수치를 억지로 올리거나 내리지 않는다.\n- 플레이어의 행동을 무효화한 채 이전 상태로 되돌아가거나, 같은 거절과 망설임만 반복해서 제자리걸음하지 않는다.`;
 }
@@ -1854,16 +1883,22 @@ function buildStoryPrompt(ctx, playerInput, currentTurn, feedback = []) {
   }
 
   // ─── 섹션 4: rulebook 주입 (10털마다) ───
+  // Story에는 출력 검증표·레벨표·대량 예시표를 통째로 싣지 않는다. 현재
+  // capability와 조걶부 어플 규칙이 그 역할을 대신하고, 주기 주입은 병원 호칭표만 유지한다.
   let rulebookSection = '';
-  if (needsRulebook) {
-    const rulebook = Object.fromEntries(
-      Object.entries(master).filter(([key]) => key.startsWith('rulebook_'))
-    );
+  if (needsRulebook && master.rulebook_address) {
     rulebookSection = `
 
 [rulebook 주입 — ${nextTurn}턴]
-${JSON.stringify(rulebook, null, 2).slice(0, 8000)}`;
+${JSON.stringify({ rulebook_address: master.rulebook_address }, null, 2)}`;
   }
+  const openingScenarioSection = !setupComplete && master.opening_scenario
+    ? `\n\n[opening_scenario]\n${typeof master.opening_scenario === 'string' ? master.opening_scenario : JSON.stringify(master.opening_scenario, null, 2)}`
+    : '';
+  const appUsageRequested = isAppUsageInfoRequest(playerInput);
+  const appUsageSection = (!setupComplete || appUsageRequested) && master.app_usage
+    ? `\n\n[app_usage]\n${typeof master.app_usage === 'string' ? master.app_usage : JSON.stringify(master.app_usage, null, 2)}`
+    : '';
 
   const suggestionPanelData = buildActiveSuggestionPanelText(save, master.characters || {});
   const csaPanelData = buildCsaPanelText(save);
@@ -1897,13 +1932,21 @@ ${csaPanelData.count ? csaPanelData.lines : '없음'}`;
   // ─── 섹션 5: 컨텍스트 ───
   // 최근 기억: 가장 최근 1개는 최대 5000자, 그 이전 항목은 최대 2500자로 앞·뒤를 모두 보존해 절단한다.
   const recentMemorySlice = recentMemories.slice(-3);
+  const storyMasterSnapshot = buildStoryMasterSnapshot(master, {
+    includeAppUsage: !setupComplete || appUsageRequested,
+    includeOpeningScenario: !setupComplete
+  });
+  const storyStateSnapshot = buildStoryStateSnapshot(save, master);
+  if (shouldDeduplicateStorySummaries(save, currentTurn)) {
+    storyStateSnapshot.story_summary_overall = '';
+  }
   const contextSection = `
 
 [게임 설정]
-${JSON.stringify(cleanForLlm(master, { omitRulebook: true }), null, 2).slice(0, 2000)}
+${JSON.stringify(storyMasterSnapshot, null, 2).slice(0, 2000)}
 
 [이전 저장값]
-${JSON.stringify(buildStoryStateSnapshot(save, master), null, 2)}
+${JSON.stringify(storyStateSnapshot, null, 2)}
 
 [최근 기억]
 ${recentMemorySlice.map((m, index) => clipHeadTail(m.content || '', index === recentMemorySlice.length - 1 ? 5000 : 2500)).join('\n---\n')}`;
@@ -1921,7 +1964,7 @@ ${recentMemorySlice.map((m, index) => clipHeadTail(m.content || '', index === re
     ? `\n\n[USER FEEDBACK — APPLY TO THIS NEXT RESPONSE ONLY]\n${feedback.map(item => `- ${typeof item === 'string' ? item : item?.text || ''}`).filter(Boolean).join('\n')}\nThis is not an in-world action. Never narrate it as dialogue or an event; use it only to improve output quality.`
     : '';
   const continuitySection = `\n\n[TURN CONTINUITY CONTRACT]\n- 직전 턴에서 완료된 행동을 다시 실행하지 않는다.\n- 이미 성공한 암시를 다시 시도하지 않는다.\n- NPC가 확정 암시를 매 턴 이유 없이 의심하거나 거부하지 않는다.\n- 현재 장면을 한 단계 앞으로 진행한다.\n- 저장된 확정 사실과 충돌하는 쪽지, 과거 사건, 시간, 인물 관계를 새로 만들지 않는다.`;
-  const finalFormatRules = `\n\n[FINAL OUTPUT CONTRACT — HIGHEST PRIORITY]\nThe response body contains exactly three sections: [1. 서사 및 행동], [2. 플레이어 상황판], [3. 선택지]. Never include a mind monitor, NPC stat table, character body information, or turn number in the body. Mind monitor belongs only to npc_emotion extraction and the sidebar UI. The Player Status Panel Contract overrides any legacy display-format text, including whatever [2] format appears inside [최근 기억] from earlier turns — past turns may still show 🎯 접근 대상 or 📌 현재 목표 from an older contract; never copy that old layout, only follow the current Player Status Panel Contract's fields. In normal play, [3] contains exactly four in-world action choices; never include an app-information choice.\nDo not use formulaic first-impression or hypnosis-success calculations.\n지침이 서로 충돌하면 다음 우선순위를 따른다: 1) 사용자의 최신 입력과 정정 2) 직전 장면의 연속성 3) 등록 캐릭터 설정과 현재 관계 상태 4) 자연스러운 반응과 플레이어 유도 5) 모든 직접 대사의 화자명·연기지시 형식 6) [1] 서사 / [2] 상황판 / [3] 선택지 출력. 길이를 채우기 위해 확정 사실을 깨거나 플레이어 행동을 임의로 추가하지 않는다.\n`;
+  const finalFormatRules = `\n\n[FINAL OUTPUT CONTRACT — HIGHEST PRIORITY]\nThe response body contains exactly three sections: [1. 서사 및 행동], [2. 플레이어 상황판], [3. 선택지]. Never include a mind monitor, NPC stat table, character body information, or turn number in the body. Mind monitor belongs only to npc_emotion extraction and the sidebar UI. The Player Status Panel Contract overrides any legacy display-format text, including whatever [2] format appears inside [최근 기억] from earlier turns — past turns may still show 🎯 접근 대상 or 📌 현재 목표 from an older contract; never copy that old layout, only follow the current Player Status Panel Contract's fields. In normal play, [3] contains exactly four in-world action choices; never include an app-information choice.\nDo not use formulaic first-impression or hypnosis-success calculations.\n출력 직전 최소 확인: [1]은 현재 장면을 실제로 진행하고 모든 직접 대사는 [대사 — AUTHORITATIVE DIALOGUE CONTRACT]을 지킨다. [2]는 Player Status Panel Contract만 따른다. [3]은 일반 플레이에서 정확히 4개의 서로 다른 실제 행동이다. 사용자가 요청하지 않은 영구 암시·상식개변은 새로 만들지 않는다.\n지침이 서로 충돌하면 다음 우선순위를 따른다: 1) 사용자의 최신 입력과 정정 2) 직전 장면의 연속성 3) 등록 캐릭터 설정과 현재 관계 상태 4) 자연스러운 반응과 플레이어 유도 5) 모든 직접 대사의 화자명·연기지시 형식 6) [1] 서사 / [2] 상황판 / [3] 선택지 출력. 길이를 채우기 위해 확정 사실을 깨거나 플레이어 행동을 임의로 추가하지 않는다.\n`;
   const openingFlow = mode === 'opening'
     ? `\n\n[OPENING PHASE — AFTER PLAYER SETUP]\nThe player setup is confirmed. Generate only the first hospital scene and first NPC encounter now. Do not repeat the app discovery, app feature explanation, player questions, or character recommendation. Never claim that the player has already used the app to change the hospital in the past.\n`
     : '';
@@ -1944,25 +1987,27 @@ ${recentMemorySlice.map((m, index) => clipHeadTail(m.content || '', index === re
   // suggestion behavior boundaries, and the CSA nature/NPC-perception rules
   // — same gating as hypnosisCapabilitySection since none of this applies
   // outside actual gameplay turns.
-  const strengthPreJudgmentSection = mode === 'normal' || mode === 'opening'
+  const appMutationTurn = isPotentialAppMutationTurn(playerInput);
+  const includeDetailedAppGuidance = (mode === 'normal' || mode === 'opening') && (appMutationTurn || appUsageRequested);
+  const strengthPreJudgmentSection = includeDetailedAppGuidance
     ? buildStrengthPreJudgmentSection(hypnosisCapability)
     : '';
-  const suggestionStrengthBoundarySection = mode === 'normal' || mode === 'opening'
+  const suggestionStrengthBoundarySection = includeDetailedAppGuidance
     ? buildSuggestionStrengthBoundarySection()
     : '';
-  const csaNatureSection = mode === 'normal' || mode === 'opening'
+  const csaNatureSection = includeDetailedAppGuidance
     ? buildCsaNatureSection()
     : '';
-  const suggestionExampleSection = mode === 'normal' || mode === 'opening'
+  const suggestionExampleSection = includeDetailedAppGuidance
     ? buildSuggestionExampleSection(hypnosisCapability, master)
     : '';
-  const csaExampleSection = mode === 'normal' || mode === 'opening'
+  const csaExampleSection = includeDetailedAppGuidance
     ? buildCsaExampleSection(hypnosisCapability, master)
     : '';
   // H3-B item 2: gives the model the id it needs to target an update/
   // deactivate csa_action against the right entry — internal app-operation
   // data only, never to be echoed into the narrative or status panel.
-  const activeCsaOperationSection = mode === 'normal' || mode === 'opening'
+  const activeCsaOperationSection = includeDetailedAppGuidance
     ? buildActiveCsaOperationSection(save)
     : '';
   // H1 item 4: unregistered-target/location-ineligible-target are no longer
@@ -1982,7 +2027,7 @@ ${recentMemorySlice.map((m, index) => clipHeadTail(m.content || '', index === re
     ? `\n\n[REMINDER — CHOICE LENGTH]\n[3. 선택지]의 각 문장은 35~80자를 목표로 하고 120자를 넘기지 않는다. 화면 버튼에 그대로 표시되므로 지나치게 길게 쓰지 않는다.\n`
     : '';
   const eligibleNpcRosterSection = buildEligibleNpcRosterSection(save.world_state, master.characters || {});
-  const systemPrompt = coreRules + playerGate + modeSection + rulebookSection + eligibleNpcRosterSection + buildAppSystemRulesSection() + currentSceneSection + npcProfileSection + explicitMentionSection + csaSection + csaNatureSection + suggestionSection + suggestionStrengthBoundarySection + narrativeLengthSection + npcDialogueSection + antiRepetitionSection + playerStatusPanel + contextSection + feedbackSection + continuitySection + finalFormatRules + openingFlow + playerSetupReminder + hypnosisCapabilitySection + strengthPreJudgmentSection + suggestionExampleSection + csaExampleSection + activeCsaOperationSection + registeredNpcChoiceReminder + choiceLengthReminder + buildAddressAbbreviationSection();
+  const systemPrompt = coreRules + playerGate + modeSection + rulebookSection + openingScenarioSection + appUsageSection + eligibleNpcRosterSection + buildAppSystemRulesSection() + currentSceneSection + npcProfileSection + explicitMentionSection + csaSection + csaNatureSection + suggestionSection + suggestionStrengthBoundarySection + narrativeLengthSection + npcDialogueSection + antiRepetitionSection + playerStatusPanel + contextSection + feedbackSection + continuitySection + finalFormatRules + openingFlow + playerSetupReminder + hypnosisCapabilitySection + strengthPreJudgmentSection + suggestionExampleSection + csaExampleSection + activeCsaOperationSection + registeredNpcChoiceReminder + choiceLengthReminder + buildAddressAbbreviationSection();
 
   return {
     mode,
@@ -2165,11 +2210,13 @@ ${JSON.stringify(imageCatalog)}
 function cleanForLlm(obj, options = {}) {
   if (!obj || typeof obj !== 'object') return obj;
   if (Array.isArray(obj)) return obj.map(value => cleanForLlm(value, options));
+  const omitKeys = options.omitKeys instanceof Set ? options.omitKeys : new Set(options.omitKeys || []);
 
   const cleaned = {};
   for (const [k, v] of Object.entries(obj)) {
     if (k.startsWith('debug_')) continue;
     if (k === 'image_catalog') continue;
+    if (omitKeys.has(k)) continue;
     if (options.omitRulebook && k.startsWith('rulebook_')) continue;
     cleaned[k] = cleanForLlm(v, options);
   }
@@ -4212,7 +4259,7 @@ function buildExplicitNpcMentionSection(playerInput, characters = {}) {
   const mentions = detectExplicitRegisteredNpcMentions(playerInput, characters);
   if (!mentions.length) return '';
   const lines = mentions.map(m => `- ${m.name}(${m.character_id})`).join('\n');
-  return `\n\n[EXPLICIT REGISTERED NPC MENTIONS IN PLAYER INPUT]\n\n사용자가 이번 입력에서 정확한 실명으로 언급한 등록 NPC:\n${lines}\n\n판정 규칙:\n- 이것은 문맥 판단을 돕는 후보 정보이며, Worker가 응답 대상을 강제한 것이 아니다.\n- 사용자가 해당 NPC에게 직접 말하거나 행동했다면 그 NPC가 이번 턴의 우선 응답자가 된다.\n- 단순히 제3자에 관해 질문한 것이라면 현재 대화 상대가 답할 수 있으며, 언급된 NPC로 자동 전환하지 않는다.\n- 언급된 NPC가 현재 장면에 없다면 순간이동시키지 말고 호출·연락·이동·위치 안내 등 자연스러운 과정을 쓴다.\n- 기존 장면의 다른 NPC를 이유 없이 삭제하거나 사라지게 하지 않는다.\n- 여러 명을 직접 부른 경우 모두 반응할 수 있지만, 서사를 주도하는 메인 NPC는 한 명으로 명확하게 만든다.\n- 등록되지 않은 새 고유 NPC를 만들지 않는다.`;
+  return `\n\n[EXPLICIT REGISTERED NPC MENTIONS IN PLAYER INPUT]\n\n사용자가 이번 입력에서 정확한 실명으로 언급한 등록 NPC:\n${lines}\n\n판정 규칙:\n- 이것은 문맥 판단을 돕는 후보 정보이며, Worker가 응답 대상을 강제한 것이 아니다.\n- 사용자가 해당 NPC에게 직접 말하거나 행동했다면 그 NPC가 이번 턴의 우선 응답자가 된다.\n- 단순히 제3자에 관해 질문한 것이라면 현재 대화 상대가 답할 수 있으며, 언급된 NPC로 자동 전환하지 않는다.\n- 언급된 NPC가 현재 장면에 없다면 순간이동시키지 말고 호출·연락·이동·위치 안내 등 자연스러운 과정을 쓴다.\n- 기존 장면의 다른 NPC를 이유 없이 삭제하거나 사라지게 하지 않는다.\n- 여러 명을 직접 부른 경우 모두 반응할 수 있지만, 서사를 주도하는 메인 NPC는 한 명으로 명확하게 만든다.\n- 미등록 단역은 자유롭게 등장할 수 있지만, characters에 없는 새 등록 NPC ID나 영구 프로필은 만들지 않는다.`;
 }
 
 // Only the fields the Story LLM actually needs — never a full save dump —
@@ -4753,6 +4800,9 @@ export {
   detectRegisteredCharacterIds,
   parseJsonContent,
   buildStoryStateSnapshot,
+  buildStoryMasterSnapshot,
+  shouldDeduplicateStorySummaries,
+  isAppUsageInfoRequest,
   clipHeadTail,
   buildCurrentSceneSection,
   buildCurrentNpcProfileSection,

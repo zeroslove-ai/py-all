@@ -1,5 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 
 import {
   buildSavePatch,
@@ -71,6 +72,7 @@ import {
   hasRoleWordNearName,
   buildAddressAbbreviationSection,
   findUnregisteredNamedIndividualsInNarrative,
+  DIALOGUE_SPEAKER_LINE_PATTERN,
   findUnregisteredDialogueSpeakers,
   deriveChoiceNamedTargets,
   findLocationIneligibleChoiceTargets,
@@ -4411,13 +4413,16 @@ test('insertNarrativeAdditionBeforeStatus falls back to appending at the end whe
 test('the Story prompt requires the new 이름 (연기지시): "대사" dialogue format, without ** markers', () => {
   const prompt = buildStoryPrompt({ master: { characters: {} }, save: { player: {} }, recent_memories: [] }, '계속', 1);
   const content = prompt.messages[0].content;
-  assert.match(content, /\[대사\] NPC 대사는 캐릭터명 \(연기지시\): "대사 내용" 형식으로만/);
-  assert.match(content, /캐릭터명을 마크다운 굵게\(\*\*\)로 감싸지 않는다/);
+  // authoritative 계약으로 통합된 뒤에도 "굵게 금지" 계약은 유지된다
+  assert.match(content, /\[대사 — AUTHORITATIVE DIALOGUE CONTRACT\]/);
+  assert.match(content, /화자명 \(짧은 연기지시\): “대사”/);
+  assert.match(content, /화자명을 마크다운 굵게\(\*\*\)로 감싸지 않는다/);
 });
 
 test('the NPC dialogue minimum contract also states the new (no **) dialogue format', () => {
   const section = buildNpcDialogueMinimumSection();
-  assert.match(section, /형식은 기존과 동일하게 캐릭터명 \(연기지시\): "대사 내용"이다/);
+  // 형식 규칙은 authoritative 계약 참조로 통합됐다
+  assert.match(section, /형식은 \[대사 — AUTHORITATIVE DIALOGUE CONTRACT\]과 동일하다/);
   assert.doesNotMatch(section, /\*\*캐릭터명\*\*/);
 });
 
@@ -6769,4 +6774,82 @@ test('HISTORY-A 30: malformed record inputs never throw and normalize safely', (
   assert.equal(buildMindMonitorRecord({ character_id: 'heroine2' }, { heroine2: null }), null);
   assert.deepEqual(splitTurnContentSections(null), { narrative_text: '', player_status_text: '' });
   assert.deepEqual(normalizeTurnRecordChoices(undefined), []);
+});
+
+// ─────────────────────────────────────────────
+// STORY-RULES: 화자명/연기지시 계약 + 사용자 정정 우선
+// ─────────────────────────────────────────────
+
+const STORY_PROMPT_CTX = {
+  master: { title: '테스트', premise: '', characters: {}, player: { name: '박도훈', job: '의사' } },
+  save: { turn_count: 10, data: {}, player_setup: { status: 'complete' }, player: { name: '박도훈', job: '의사' }, opening_started: true },
+  recent_memories: [],
+  turn_count: 10
+};
+const STORY_PROMPT = buildStoryPrompt(STORY_PROMPT_CTX, '주변을 살핀다', 10).messages.map(m => m.content).join('\n');
+// /g 플래그 정규식의 lastIndex 상태 오염을 막는 안전 테스트 헬퍼
+const dialogueLineMatches = (line) => {
+  DIALOGUE_SPEAKER_LINE_PATTERN.lastIndex = 0;
+  return DIALOGUE_SPEAKER_LINE_PATTERN.test(line);
+};
+
+test('STORY-RULES 1: story prompt carries the authoritative speaker/acting-direction dialogue rule', () => {
+  assert.match(STORY_PROMPT, /AUTHORITATIVE DIALOGUE CONTRACT/);
+  assert.match(STORY_PROMPT, /화자명 \(짧은 연기지시\): “대사”/);
+  assert.match(STORY_PROMPT, /플레이어는 플레이어 이름을 화자명으로/);
+  assert.match(STORY_PROMPT, /자연스러운 소설체보다 이 화자 형식이 우선한다/);
+});
+
+test('STORY-RULES 2: story prompt forbids nameless quoted dialogue', () => {
+  assert.match(STORY_PROMPT, /이름 없는 따옴표 대사는 금지한다/);
+  assert.match(STORY_PROMPT, /신음, 숨소리, 짧은 감탄도 직접 발화라면 같은 형식/);
+  assert.match(STORY_PROMPT, /서술문 속 인용이나 문서 문구의 인용만 예외/);
+});
+
+test('STORY-RULES 3: story prompt makes user corrections the top-priority fact', () => {
+  assert.match(STORY_PROMPT, /사용자 정정 우선/);
+  assert.match(STORY_PROMPT, /최우선 사실로 취급한다/);
+  assert.match(STORY_PROMPT, /임의로 반박하지 않는다/);
+  // 우선순위 첫 항목이 사용자 입력·정정이다
+  assert.match(STORY_PROMPT, /1\) 사용자의 최신 입력과 정정 2\) 직전 장면의 연속성/);
+});
+
+test('STORY-RULES 4: story, extract and TTS share one dialogue-format contract', () => {
+  const workerSource = readFileSync(new URL('../worker/game-proxy-v2.js', import.meta.url), 'utf8');
+  // Story 계약: 화자명 굵게 금지 (파서 계약과 동일)
+  assert.match(STORY_PROMPT, /굵게\(\*\*\)로 감싸지 않는다\(Extract\/TTS 파서와 동일 계약\)/);
+  // Extract 프롬프트의 대사 추출 형식과 동일
+  assert.match(workerSource, /서사에서 캐릭터명 \(연기지시\): "대사 내용" 형식을 찾아 dialogue_lines에 담아라/);
+  // TTS/파서는 같은 화자명-연기지시-대사 라인 패턴을 사용한다
+  assert.match(workerSource, /DIALOGUE_SPEAKER_LINE_PATTERN = /);
+  // 중복된 별도 대사 형식 규칙은 계약 참조로 통합됐다
+  assert.match(workerSource, /형식은 \[대사 — AUTHORITATIVE DIALOGUE CONTRACT\]과 동일하다/);
+});
+
+test('STORY-RULES 5: no new strength gate blocks ordinary play synergy', () => {
+  const workerSource = readFileSync(new URL('../worker/game-proxy-v2.js', import.meta.url), 'utf8');
+  // strength_exceeded는 기존 suggestion/CSA 전용 마커 4건만 존재해야 한다 (신규 일반 행동 강도 차단기 없음)
+  assert.equal((workerSource.match(/strength_exceeded/g) || []).length, 4);
+  assert.doesNotMatch(workerSource, /validatePlayStrength|action_strength|strength_gate/i);
+});
+
+test('STORY-RULES 6: parser accepts speaker-acting dialogue lines', () => {
+  assert.equal(dialogueLineMatches('강세라 (떨리는 목소리로): “네……”'), true);
+  assert.equal(dialogueLineMatches('박도훈 (낮은 목소리로): “계속하세요.”'), true);
+  // 굵게 감싼 레거시 형식도 파서는 받아들인다
+  assert.equal(dialogueLineMatches('**강세라** (작은 목소리로): “네……”'), true);
+});
+
+test('STORY-RULES 7: player dialogue is distinguished from NPC dialogue', () => {
+  const characters = { heroine2: { name: '강세라' } };
+  const text = '강세라 (떨리는 목소리로): “네……”\n박도훈 (낮은 목소리로): “계속하세요.”';
+  const unregistered = findUnregisteredDialogueSpeakers(text, characters, '박도훈');
+  assert.deepEqual(unregistered, []);
+});
+
+test('STORY-RULES 8: a bare quoted line without a speaker is a contract violation', () => {
+  assert.equal(dialogueLineMatches('“네……”'), false);
+  assert.equal(dialogueLineMatches('“계속하세요.”'), false);
+  // 서술문 속 인용은 대사 라인이 아니므로 위반 대상이 아니다
+  assert.equal(dialogueLineMatches('그녀는 “그만두라”는 쪽지를 읽었다.'), false);
 });

@@ -1798,7 +1798,7 @@ function buildNarrativeLengthSection() {
 }
 
 function buildNpcDialogueMinimumSection() {
-  return `\n\n[NPC DIALOGUE MINIMUM CONTRACT]\n\n- 등록 NPC가 실제 장면에 있고 플레이어와 대화·상호작용하는 일반 턴이라면 의미 있는 NPC 발언을 최소 3회 포함한다. 형식은 기존과 동일하게 캐릭터명 (연기지시): "대사 내용"이다.\n- "의미 있는 발언"은 다음 중 하나를 새로 수행해야 한다: 입력에 직접 답변 / 새 정보 제공 / 질문 또는 확인 / 결정·수락·거절·조건 제시 / 감정이나 관계 변화 표현 / 행동을 시작하거나 중단시키는 말 / 다른 NPC와의 실제 상호작용.\n- 각 NPC 발언 사이에는 새로운 행동·정보·결정·관계 변화 중 하나가 있어야 한다. 한 문장을 세 조각으로 나누거나 같은 의미를 반복해서 3회를 채우는 것은 금지한다.\n- 다음 경우에는 최소 3회를 강제하지 않는다: NPC가 없는 narrator 장면 / 플레이어가 말없이 관찰만 하겠다고 명시한 장면 / NPC가 잠들었거나 의식을 잃었거나 말할 수 없는 장면 / 대사보다 즉각적인 물리 행동이 중심이고 발언 3회가 부자연스러운 순간 / 재진입 모드 / player_setup 모드. 다만 NPC가 있는 일반 대화 장면에서 단순히 짧게 끝내기 위해 이 예외를 쓰지 않는다.\n- 여러 NPC가 등장하면 장면 전체 등록 NPC 발언 합계가 최소 3회이면 되고, NPC마다 3회씩 강제하지 않는다. 메인 NPC가 대화의 중심을 유지하고, 다른 NPC의 짧은 발언만으로 메인 NPC를 자동 전환하지 않는 기존 계약을 유지한다.\n- 플레이어가 입력하지 않은 새 플레이어 발언을 임의로 만들어 대화 횟수를 채우지 않는다. 플레이어 입력은 이미 발생한 말 또는 행동으로 취급하고, 이후 NPC 반응과 장면 전개만 쓴다.`;
+  return `\n\n[NPC DIALOGUE MINIMUM CONTRACT]\n\n- 등록 NPC가 실제 장면에 있고 플레이어와 대화·상호작용하는 일반 턴이라면 의미 있는 NPC 발언을 최소 3회 포함한다. 형식은 [대사 — AUTHORITATIVE DIALOGUE CONTRACT]과 동일하다.\n- "의미 있는 발언"은 다음 중 하나를 새로 수행해야 한다: 입력에 직접 답변 / 새 정보 제공 / 질문 또는 확인 / 결정·수락·거절·조건 제시 / 감정이나 관계 변화 표현 / 행동을 시작하거나 중단시키는 말 / 다른 NPC와의 실제 상호작용.\n- 각 NPC 발언 사이에는 새로운 행동·정보·결정·관계 변화 중 하나가 있어야 한다. 한 문장을 세 조각으로 나누거나 같은 의미를 반복해서 3회를 채우는 것은 금지한다.\n- 다음 경우에는 최소 3회를 강제하지 않는다: NPC가 없는 narrator 장면 / 플레이어가 말없이 관찰만 하겠다고 명시한 장면 / NPC가 잠들었거나 의식을 잃었거나 말할 수 없는 장면 / 대사보다 즉각적인 물리 행동이 중심이고 발언 3회가 부자연스러운 순간 / 재진입 모드 / player_setup 모드. 다만 NPC가 있는 일반 대화 장면에서 단순히 짧게 끝내기 위해 이 예외를 쓰지 않는다.\n- 여러 NPC가 등장하면 장면 전체 등록 NPC 발언 합계가 최소 3회이면 되고, NPC마다 3회씩 강제하지 않는다. 메인 NPC가 대화의 중심을 유지하고, 다른 NPC의 짧은 발언만으로 메인 NPC를 자동 전환하지 않는 기존 계약을 유지한다.\n- 플레이어가 입력하지 않은 새 플레이어 발언을 임의로 만들어 대화 횟수를 채우지 않는다. 플레이어 입력은 이미 발생한 말 또는 행동으로 취급하고, 이후 NPC 반응과 장면 전개만 쓴다.`;
 }
 
 function buildAntiRepetitionSection() {
@@ -1828,7 +1828,10 @@ function buildStoryPrompt(ctx, playerInput, currentTurn, feedback = []) {
 
 [금지] 이미지(![), 오디오(<audio), URL(http), HTML 태그를 절대 쓰지 마라. 이건 렌더러가 처리한다.
 [순서] 출력 순서: [1. 서사 및 행동] [2. 플레이어 상황판] [3. 선택지]. 마인드 모니터는 본문에 절대 출력하지 않는다. 선택지는 항상 맨 마지막.
-[대사] NPC 대사는 캐릭터명 (연기지시): "대사 내용" 형식으로만. 캐릭터명을 마크다운 굵게(**)로 감싸지 않는다.
+[대사 — AUTHORITATIVE DIALOGUE CONTRACT] [1. 서사 및 행동] 안의 모든 직접 대사는 반드시 '화자명 (짧은 연기지시): “대사”' 이 한 가지 형식으로만 쓴다. NPC는 캐릭터명, 플레이어는 플레이어 이름을 화자명으로 쓰고, 괄호 안 연기지시는 짧고 구체적으로 반드시 포함한다. 이름 없는 따옴표 대사는 금지한다 — 신음, 숨소리, 짧은 감탄도 직접 발화라면 같은 형식을 적용한다. 서술문 속 인용이나 문서 문구의 인용만 예외다. 화자명을 마크다운 굵게(**)로 감싸지 않는다(Extract/TTS 파서와 동일 계약). 자연스러운 소설체보다 이 화자 형식이 우선한다.
+예: 강세라 (숨을 얕게 몰아쉬며): “……감사관님……”
+예: 박도훈 (차분하게 압박하며): “계속 보고하세요.”
+[사용자 정정 우선] 사용자가 직전 장면의 상태·복장·위치·행동 결과를 직접 정정하면, 그 입력을 현재 장면의 최우선 사실로 취급한다. 직전 서사·요약·저장 기억이 사용자 정정과 충돌하면 사용자 정정을 우선하고, "실제로는 그렇지 않았다"거나 "사용자가 착각했다"고 임의로 반박하지 않는다. 정정은 현재 장면에 자연스럽게 반영하고 과거 전체를 다시 서술하지 않는다.
 [등록 상호작용 NPC] 마인드 모니터·NPC 수치·이미지·관계 기록처럼 영구 저장되는 상태를 가질 수 있는 NPC는 master.characters의 등록 히로인뿐이다. 미등록 의사·간호사·환자·보호자·직원 같은 단역 NPC도 이름과 대사를 자유롭게 가질 수 있고, 먼저 말을 걸거나 선택지/현재 접근 대상이 될 수 있다 — 다만 그 단역에게는 수치·이미지·관계 기록 같은 영구 상태를 만들지 않는다. 외형만 보고 heroine ID를 추측하지 마라 — 실제로 등장한 등록 히로인에게만 붙인다.
 [모니터] 매턴 [1.표면의식]/[2.잠재의식] 각 100~200자, 대화체로 작성.`;
 
@@ -1918,7 +1921,7 @@ ${recentMemorySlice.map((m, index) => clipHeadTail(m.content || '', index === re
     ? `\n\n[USER FEEDBACK — APPLY TO THIS NEXT RESPONSE ONLY]\n${feedback.map(item => `- ${typeof item === 'string' ? item : item?.text || ''}`).filter(Boolean).join('\n')}\nThis is not an in-world action. Never narrate it as dialogue or an event; use it only to improve output quality.`
     : '';
   const continuitySection = `\n\n[TURN CONTINUITY CONTRACT]\n- 직전 턴에서 완료된 행동을 다시 실행하지 않는다.\n- 이미 성공한 암시를 다시 시도하지 않는다.\n- NPC가 확정 암시를 매 턴 이유 없이 의심하거나 거부하지 않는다.\n- 현재 장면을 한 단계 앞으로 진행한다.\n- 저장된 확정 사실과 충돌하는 쪽지, 과거 사건, 시간, 인물 관계를 새로 만들지 않는다.`;
-  const finalFormatRules = `\n\n[FINAL OUTPUT CONTRACT — HIGHEST PRIORITY]\nThe response body contains exactly three sections: [1. 서사 및 행동], [2. 플레이어 상황판], [3. 선택지]. Never include a mind monitor, NPC stat table, character body information, or turn number in the body. Mind monitor belongs only to npc_emotion extraction and the sidebar UI. The Player Status Panel Contract overrides any legacy display-format text, including whatever [2] format appears inside [최근 기억] from earlier turns — past turns may still show 🎯 접근 대상 or 📌 현재 목표 from an older contract; never copy that old layout, only follow the current Player Status Panel Contract's fields. In normal play, [3] contains exactly four in-world action choices; never include an app-information choice.\nDo not use formulaic first-impression or hypnosis-success calculations.\n지침이 서로 충돌하면 다음 우선순위를 따른다: 확정 상태·NPC 프로필 정확성 > 사용자 입력의 실제 의도 > 장면 연속성 > 서사 길이 목표 > 문체 다양성. 길이를 채우기 위해 확정 사실을 깨거나 플레이어 행동을 임의로 추가하지 않는다.\n`;
+  const finalFormatRules = `\n\n[FINAL OUTPUT CONTRACT — HIGHEST PRIORITY]\nThe response body contains exactly three sections: [1. 서사 및 행동], [2. 플레이어 상황판], [3. 선택지]. Never include a mind monitor, NPC stat table, character body information, or turn number in the body. Mind monitor belongs only to npc_emotion extraction and the sidebar UI. The Player Status Panel Contract overrides any legacy display-format text, including whatever [2] format appears inside [최근 기억] from earlier turns — past turns may still show 🎯 접근 대상 or 📌 현재 목표 from an older contract; never copy that old layout, only follow the current Player Status Panel Contract's fields. In normal play, [3] contains exactly four in-world action choices; never include an app-information choice.\nDo not use formulaic first-impression or hypnosis-success calculations.\n지침이 서로 충돌하면 다음 우선순위를 따른다: 1) 사용자의 최신 입력과 정정 2) 직전 장면의 연속성 3) 등록 캐릭터 설정과 현재 관계 상태 4) 자연스러운 반응과 플레이어 유도 5) 모든 직접 대사의 화자명·연기지시 형식 6) [1] 서사 / [2] 상황판 / [3] 선택지 출력. 길이를 채우기 위해 확정 사실을 깨거나 플레이어 행동을 임의로 추가하지 않는다.\n`;
   const openingFlow = mode === 'opening'
     ? `\n\n[OPENING PHASE — AFTER PLAYER SETUP]\nThe player setup is confirmed. Generate only the first hospital scene and first NPC encounter now. Do not repeat the app discovery, app feature explanation, player questions, or character recommendation. Never claim that the player has already used the app to change the hospital in the past.\n`
     : '';
@@ -4717,6 +4720,7 @@ export {
   resolveCsaDailyReset,
   currentUtcDateString,
   findUnregisteredNamedIndividualsInNarrative,
+  DIALOGUE_SPEAKER_LINE_PATTERN,
   findUnregisteredDialogueSpeakers,
   deriveChoiceNamedTargets,
   findLocationIneligibleChoiceTargets,

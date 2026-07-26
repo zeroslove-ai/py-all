@@ -370,10 +370,106 @@ function collectSemanticStrengthCandidates(previousSave, canonicalAction) {
   });
 }
 
+function readAppStrengthExamples(system, exampleKey, tier) {
+  const source = Array.isArray(system?.[exampleKey]?.[tier]) ? system[exampleKey][tier] : [];
+  const seen = new Set();
+  const result = [];
+  for (const item of source) {
+    const rawText = typeof item === 'string' ? item : (typeof item?.text === 'string' ? item.text : '');
+    const text = rawText.trim().slice(0, 200);
+    if (!text || seen.has(text)) continue;
+    seen.add(text);
+    result.push(text);
+    if (result.length >= 12) break;
+  }
+  return result;
+}
+
+function formatAppStrengthExampleTier(tier, examples) {
+  const lines = Array.isArray(examples) && examples.length ? examples.map(text => `- ${text}`).join('\n') : '- 예시 없음';
+  return `${tier}:\n${lines}`;
+}
+
+function buildAppStrengthExampleSection(system) {
+  const tiers = ['weak', 'medium', 'strong'];
+  const suggestionSection = tiers.map(tier => formatAppStrengthExampleTier(tier, readAppStrengthExamples(system, 'suggestion_examples', tier))).join('\n\n');
+  const csaSection = tiers.map(tier => formatAppStrengthExampleTier(tier, readAppStrengthExamples(system, 'csa_examples', tier))).join('\n\n');
+  return `[개인 암시 룰북 예시]\n\n${suggestionSection}\n\n[상식개변 룰북 예시]\n\n${csaSection}`;
+}
+
 function buildAppStrengthValidationPrompt(candidates, master) {
   const system = isPlainObject(master?.rulebook_game_system) ? master.rulebook_game_system : {};
-  const examples = ['suggestion_examples', 'csa_examples'].map(key => `${key}: ${['weak','medium','strong'].map(tier => (Array.isArray(system?.[key]?.[tier]) ? system[key][tier] : []).map(item => typeof item === 'string' ? item : item?.text).filter(text => typeof text === 'string' && text.trim()).slice(0,12).map(text => text.trim().slice(0,200)).join(' | ')).join(' / ')}`).join('\n');
-  return `너는 최면 어플 내용의 최소 필요 강도를 독립적으로 판정한다. 선택 강도에 맞추지 말고 내용만 본다. weak=제한적 경계완화·친근행동, medium=지속 관계·친밀행동·우선순위 변화, strong=중요 판단·의무·관계·장기목표 변화, unsupported=물리 불가능·세계규칙 무시·즉각적 자살·명백한 자기파괴. 상식개변도 같은 단계로 사회 규범의 영향 범위를 판정한다. 모든 후보에 정확히 한 결과를 반환하고 JSON 외 출력하지 마라. reason은 80자 이하.\n\n[공개 룰북 예시]\n${examples}\n\n[후보]\n${JSON.stringify(candidates)}\n\n[JSON]\n{"results":[{"client_id":"...","required_strength":"weak|medium|strong|unsupported","reason":"..."}]}`;
+  const exampleSection = buildAppStrengthExampleSection(system);
+  return `너는 최면 어플에 입력된 개인 암시와 상식개변 내용의 최소 필요 강도를 판정한다.
+
+사용자가 선택한 강도에 끌려가지 말고 내용 자체가 요구하는 최소 단계를 독립적으로 판정한다.
+각 입력마다 weak, medium, strong, unsupported 중 하나를 반환한다.
+
+[개인 암시 판정 기준]
+
+weak:
+- 특정 대상이나 상황에 한정된 경계 완화
+- 가벼운 접근, 친근 행동, 일상적인 부탁
+- 기존 성격·핵심 가치관과 크게 충돌하지 않는 제한적 변화
+
+medium:
+- 반복적이고 지속적인 관계 행동
+- 친밀한 접촉이나 개인적인 비밀 공유
+- 부끄러움과 망설임을 상당 부분 넘는 변화
+- 기존 성격과 관계를 완전히 제거하지 않는 우선순위 변화
+
+strong:
+- 중요한 판단, 의무, 인간관계, 장기 목표의 우선순위를 크게 변경
+- 플레이어를 중요한 판단 기준으로 삼게 하는 변화
+
+unsupported:
+- 물리적으로 불가능한 행동
+- 존재하지 않는 능력이나 정보를 생성
+- 게임 세계 규칙을 무시
+- 즉각적 자살 또는 명백한 자기파괴
+
+[상식개변 판정 기준]
+
+weak:
+- 범위 안에서 분명히 관찰되는 제한적인 예절·관습 변화
+
+medium:
+- 반복적이고 지속적인 친밀 행동, 관계 규범, 업무 관행의 변화
+
+strong:
+- 중요한 의무, 조직 질서, 인간관계, 판단 기준을 바꾸는 강한 사회 규범
+
+unsupported:
+- 물리적으로 불가능한 규범
+- 게임 세계 규칙을 무시하는 규범
+- 즉각적 자살 또는 명백한 자기파괴를 요구하는 규범
+
+[중요 판정 규칙]
+
+- selected_strength에 맞춰 required_strength를 낮추지 않는다.
+- 룰북 예시는 참고 자료이며, 입력 내용 전체의 실제 효과를 기준으로 판정한다.
+- 모든 후보에 대해 정확히 하나의 결과를 반환한다.
+- client_id는 입력값을 한 글자도 바꾸지 않고 그대로 복사한다.
+- reason은 80자 이하의 구체적인 한국어 문장으로 작성한다.
+- JSON 객체 이외의 설명문이나 마크다운은 출력하지 않는다.
+
+${exampleSection}
+
+[판정 대상]
+
+${JSON.stringify(candidates)}
+
+[요구 JSON]
+
+{
+  "results": [
+    {
+      "client_id": "입력값 그대로",
+      "required_strength": "weak|medium|strong|unsupported",
+      "reason": "80자 이하의 구체적 이유"
+    }
+  ]
+}`;
 }
 
 async function classifyAppOperationStrengths(env, candidates, master) {

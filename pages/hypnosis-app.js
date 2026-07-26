@@ -76,11 +76,11 @@ window.hypnosisApp = (() => {
     const grid = el('div', 'hypnosis-app-status-grid');
     const entries = [
       ['레벨', `Lv.${home.status?.level || 1}`], ['경험치', `${home.status?.exp || 0} / ${home.status?.next_level_exp || 0}`],
-      ['개인 암시', `${home.status?.suggestion_active || 0} / ${home.status?.suggestion_max || 0}`],
-      ['상식개변', `${home.status?.csa_active || 0} / ${home.status?.csa_max || 0}`],
+      ['개인 암시', `${home.status?.suggestion_active || 0} / ${home.status?.suggestion_max || 0}`, 'suggestions'],
+      ['상식개변', `${home.status?.csa_active || 0} / ${home.status?.csa_max || 0}`, 'csa'],
       ['현재 위치', home.current_location || '미확인'], ['현재 NPC', (home.current_npc_ids || []).map(nameFor).join(', ') || '없음']
     ];
-    entries.forEach(([label, value]) => { const card = el('div', 'hypnosis-app-card'); card.append(el('small', '', label), el('strong', '', value)); grid.appendChild(card); });
+    entries.forEach(([label, value, tab]) => { const card = el(tab ? 'button' : 'div', `hypnosis-app-card${tab ? ' hypnosis-app-card-link' : ''}`); if (tab) { card.type='button'; card.setAttribute('aria-label', `${label} 관리하기`); card.addEventListener('click',()=>renderTab(tab)); } card.append(el('small', '', label), el('strong', '', value)); if (tab) card.append(el('span','hypnosis-app-card-link-label','관리하기 〉')); grid.appendChild(card); });
     body.appendChild(grid);
     (home.diagnostics || []).forEach(item => body.appendChild(el('p', `hypnosis-app-diagnostic ${item.type || ''}`, item.text)));
   }
@@ -94,6 +94,20 @@ window.hypnosisApp = (() => {
       card.append(el('p', '', `위치: ${npc.location?.known ? npc.location.location_label : '위치 미확인'}`));
       const stats = npc.stats || {};
       card.append(el('p', '', `호감 ${stats.호감도 ?? 0} · 신뢰 ${stats.신뢰도 ?? 0} · 최면 ${stats.최면깊이 ?? 0} · 순응 ${stats.순응도 ?? 0} · 저항 ${stats.최면저항력 ?? 0}`));
+      const details = el('details','hypnosis-app-npc-details');
+      details.appendChild(el('summary','', '상세정보'));
+      const section = (title, rows, className='') => { const root=el('section',`hypnosis-app-detail-section ${className}`); root.appendChild(el('h4','',title)); rows.filter(([,value])=>value!==null&&value!==undefined&&value!=='').forEach(([label,value])=>root.appendChild(el('p','hypnosis-app-record-row',`${label}: ${value}`))); return root; };
+      const withUnit=(value,unit)=> value===null||value===undefined||value==='' ? '' : (new RegExp(`${unit}$`,'i').test(String(value).trim()) ? String(value).trim() : `${value}${unit}`);
+      const profile=npc.profile||{}, npcBody=npc.body||{}, record=npc.relationship_record||{}, privateInfo=npc.private_info||{unlocked:false};
+      details.appendChild(section('인물정보',[['이름',npc.name],['나이',withUnit(profile.age,'세')],['소속',profile.affiliation],['직책',profile.role]]));
+      details.appendChild(section('신체정보',[['키',withUnit(npcBody.height_cm,'cm')],['몸무게',withUnit(npcBody.weight_kg,'kg')],['체형',npcBody.body_type],['가슴',npcBody.cup]]));
+      details.appendChild(section('현재 상태',[['마음상태',npc.mind?.state_label || '상태 미확인'],['위치',npc.location?.known ? npc.location.location_label : '위치 미확인'],['활성 개인 암시',`${npc.active_suggestion_count || 0}개`]]));
+      details.appendChild(section('관계 기록',[['플레이어 사정 횟수',`${record.player_ejaculation_count || 0}회`],[`${npc.name || 'NPC'} 오르가즘 횟수`,`${record.npc_orgasm_count || 0}회`]]));
+      if (!privateInfo.unlocked) details.appendChild(section('은밀정보', [['🔒', '해당 NPC와의 사정 또는 오르가즘 기록이 생기면 확인할 수 있습니다.']], 'hypnosis-app-private-locked'));
+      else details.appendChild(section('은밀정보',[['유두',privateInfo.nipple],['유륜 크기',privateInfo.areola_size],['유륜 색',privateInfo.areola_color],['음모 상태',privateInfo.pubic_hair],['과거 남성 경험',privateInfo.past_partner_count === undefined ? '' : `${privateInfo.past_partner_count}명`],['과거 오르가즘 경험',privateInfo.past_orgasm_count === undefined ? '' : `${privateInfo.past_orgasm_count}회`],['연인 관계',privateInfo.relationship]],'hypnosis-app-private-unlocked'));
+      const draftSuggestions=(draft?.suggestions||[]).filter(item=>item.character_id===npc.character_id&&!item._deleted);
+      details.appendChild(section('활성 개인 암시',draftSuggestions.length ? draftSuggestions.map(item=>[`[${item.strength_label || item.strength}]`,item.content]) : [['', '활성 개인 암시 없음']], 'hypnosis-app-effect-list'));
+      card.appendChild(details);
       const find = el('button', 'choice-btn', npc.present_now ? '현재 함께 있음' : '찾아가기');
       find.disabled = npc.present_now || !npc.location?.known;
       find.addEventListener('click', async () => {
@@ -105,7 +119,8 @@ window.hypnosisApp = (() => {
         try { const result = await api.validateAppAction(state.gameId, action); forceCloseAfterValidation(); window.runHypnosisStructuredAction(result.canonical_action, result.display_input); }
         catch (error) { isApplying=false; find.disabled=false; find.textContent='찾아가기'; showDialog('찾아갈 수 없습니다.',error.details?.error||error.message,[{label:'확인',run:()=>{}}]); }
       });
-      card.appendChild(find); body.appendChild(card);
+      const manage=el('button','choice-btn','암시 관리'); manage.addEventListener('click',()=>{requestedCharacterId=npc.character_id; renderTab('suggestions');});
+      card.append(find,manage); body.appendChild(card);
     });
   }
 

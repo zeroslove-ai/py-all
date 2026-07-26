@@ -669,6 +669,70 @@ function normalizeNpcMindState(rawState, emotion = {}) {
   return 'normal';
 }
 
+function cleanProfileValue(value) {
+  if (value === null || value === undefined || String(value).trim() === '') return null;
+  const text = String(value).trim();
+  const numeric = Number(text.replace(/[^0-9.-]/g, ''));
+  return text === String(numeric) && Number.isFinite(numeric) ? numeric : text;
+}
+
+function buildPublicNpcProfile(character = {}) {
+  const result = {};
+  const age = cleanProfileValue(character.age ?? character['나이']);
+  const affiliation = cleanProfileValue(character.department ?? character.affiliation ?? character.organization ?? character['소속']);
+  const role = cleanProfileValue(character.rank ?? character['직책'] ?? character.role ?? character['역할']);
+  if (age !== null) result.age = age;
+  if (affiliation !== null) result.affiliation = affiliation;
+  if (role !== null) result.role = role;
+  return result;
+}
+
+function buildPublicNpcBody(character = {}) {
+  const result = {};
+  const height = cleanProfileValue(character.height ?? character.height_cm ?? character['키']);
+  const weight = cleanProfileValue(character.weight ?? character.weight_kg ?? character['몸무게']);
+  const bodyType = cleanProfileValue(character.body_type ?? character['체형']);
+  const cup = cleanProfileValue(character.cup ?? character.npc_컵 ?? character['컵']);
+  if (height !== null) result.height_cm = height;
+  if (weight !== null) result.weight_kg = weight;
+  if (bodyType !== null) result.body_type = bodyType;
+  if (cup !== null) result.cup = cup;
+  return result;
+}
+
+function isNpcIntimateInfoUnlocked(relationship = {}) {
+  return relationship?.intimate_info_unlocked === true
+    || Math.max(0, Number(relationship?.player_ejaculation_count) || 0) > 0
+    || Math.max(0, Number(relationship?.npc_orgasm_count) || 0) > 0;
+}
+
+function buildNpcRelationshipRecord(save = {}, characterId) {
+  const relationship = isPlainObject(save?.npc_relationship_state?.[characterId]) ? save.npc_relationship_state[characterId] : {};
+  return {
+    player_ejaculation_count: Math.max(0, Number.isInteger(relationship.player_ejaculation_count) ? relationship.player_ejaculation_count : 0),
+    npc_orgasm_count: Math.max(0, Number.isInteger(relationship.npc_orgasm_count) ? relationship.npc_orgasm_count : 0)
+  };
+}
+
+function buildNpcPrivateInfo(character = {}, relationship = {}) {
+  if (!isNpcIntimateInfoUnlocked(relationship)) return { unlocked: false };
+  const result = { unlocked: true };
+  const fields = [
+    ['nipple', '은밀유두'], ['areola_size', '은밀유륜'], ['areola_color', '은밀유륜색'],
+    ['pubic_hair', '은밀보지털'], ['past_partner_count', '과거남자경험'],
+    ['past_orgasm_count', '과거오르가즘경험'], ['relationship', '연인관계']
+  ];
+  fields.forEach(([key, source]) => {
+    const value = cleanProfileValue(character?.[source]);
+    if (value === null) return;
+    if (key === 'past_partner_count' || key === 'past_orgasm_count') {
+      const match = String(value).match(/\d+/);
+      result[key] = match ? Number(match[0]) : value;
+    } else result[key] = value;
+  });
+  return result;
+}
+
 function buildAppStatePayload(master, save, turnCount = 0) {
   const manual = buildAppManualPayload(master, save, turnCount);
   const characters = isPlainObject(master?.characters) ? master.characters : {};
@@ -685,6 +749,7 @@ function buildAppStatePayload(master, save, turnCount = 0) {
       ? { ...currentWorld, updated_turn: null } : null;
     const location = savedLocation || fallbackLocation;
     const state = normalizeNpcMindState(emotion.state, emotion);
+    const relationship = isPlainObject(save?.npc_relationship_state?.[character_id]) ? save.npc_relationship_state[character_id] : {};
     return {
       character_id,
       name: character?.name || character?.['이름'] || '',
@@ -695,7 +760,11 @@ function buildAppStatePayload(master, save, turnCount = 0) {
       mind: { state, state_label: state ? NPC_MIND_STATE_LABELS[state] : '상태 미확인', surface: typeof emotion.surface === 'string' ? emotion.surface : '', inner: typeof emotion.inner === 'string' ? emotion.inner : '', physical_reaction: typeof emotion.physical_reaction === 'string' ? emotion.physical_reaction : '', updated_turn: Number.isInteger(emotion.updated_turn) ? emotion.updated_turn : null },
       location: { known: Boolean(location?.location_label), location_label: location?.location_label || '', ward: location?.ward || '', floor: location?.floor || '', building: location?.building || '', updated_turn: Number.isInteger(location?.updated_turn) ? location.updated_turn : null },
       stats: isPlainObject(save?.npc_stats?.[character_id]) ? save.npc_stats[character_id] : {},
-      active_suggestion_count: Array.isArray(suggestionMap?.[character_id]) ? suggestionMap[character_id].filter(item => item?.active).length : 0
+      active_suggestion_count: Array.isArray(suggestionMap?.[character_id]) ? suggestionMap[character_id].filter(item => item?.active).length : 0,
+      profile: buildPublicNpcProfile(character),
+      body: buildPublicNpcBody(character),
+      relationship_record: buildNpcRelationshipRecord(save, character_id),
+      private_info: buildNpcPrivateInfo(character, relationship)
     };
   });
   const strength_options = [['weak', '약함', 1], ['medium', '중간', 3], ['strong', '강함', 5]].map(([id, label, unlock_level]) => ({ id, label, available: manual.status.level >= unlock_level, unlock_level }));
@@ -2643,12 +2712,18 @@ ${suggestionPanelData.count ? suggestionPanelData.lines : '없음'}
 활성 ${csaPanelData.count}개 / 최대 ${csaPanelData.maxActive}개, 오늘 사용 ${csaPanelData.dailyUsed}회 / 한도 ${csaPanelData.dailyLimit}회
 ${csaPanelData.count ? csaPanelData.lines : '없음'}`;
 
+  const currentHypnosisStatusText = buildCurrentHypnosisStatusPanelText(save, master);
   const playerStatusPanel = `
 
 [PLAYER STATUS PANEL CONTRACT — HIGHEST PRIORITY FOR SECTION 2]
-[2. 플레이어 상황판]은 현재 장면에 맞춘 짧고 읽기 쉬운 최면 어플 화면처럼 작성한다. 플레이어 이름·현재 장소·플레이어의 1인칭 직접 독백(한국어 큰따옴표, 실질 40자 이상)·이번 턴의 실제 변화만 포함한다.
-📱 최면 어플: 활성 효과와 슬롯은 별도 최면 어플 화면에서 확인한다.
-NPC 수치, 활성 개인 암시/상식개변의 전체 내용, 슬롯·일일 사용량, 예상 수치 변화, 턴 번호, 사정·오르가즘 누적값은 출력하지 않는다.`;
+[2. 플레이어 상황판]은 플레이어 이름·현재 장소·플레이어의 1인칭 직접 독백(한국어 큰따옴표, 실질 40자 이상)·이번 턴의 실제 변화와 아래 Worker 확정 스냅샷을 포함한다. NPC 수치, 일일 사용량, 예상 수치 변화, 턴 번호, 사정·오르가즘 누적값은 출력하지 않는다.
+
+[PLAYER STATUS HYPNOSIS SNAPSHOT — COPY EXACTLY]
+아래 블록은 Worker가 현재 저장 상태에서 계산한 확정 정보다. [2. 플레이어 상황판]에 내용·강도·범위·개수를 바꾸지 말고 그대로 출력한다. 요약, 생략, 각색, 추측, 내부 ID 추가를 하지 않는다.
+
+${currentHypnosisStatusText}
+
+다른 NPC의 암시, 범위 밖 상식개변, 비활성 항목을 추가하지 않는다.`;
 
   // ─── 섹션 5: 컨텍스트 ───
   // 최근 기억: 가장 최근 1개는 최대 5000자, 그 이전 항목은 최대 2500자로 앞·뒤를 모두 보존해 절단한다.
@@ -2820,6 +2895,10 @@ npc_stat_changes만 반환한다. 서사에 숫자가 없어도 대사·행동·
 
 [FIRST ENCOUNTER CONTRACT]
 저장된 npc_encounters에 현재 NPC(character_id) 기록이 없고 이번이 실제로 처음 직접 조우한 장면일 때만 first_encounter_stats에 호감도·신뢰도를 0~35 사이 정수로 판단해 반환한다. 단순히 배경에 등장했거나 멀리서 본 것만으로는 첫 직접 조우가 아니다 — 직접 대화, 응대, 신체 접촉처럼 명확한 상호작용이 있어야 첫 직접 조우로 판단한다. 공식이나 랜덤 없이, 플레이어의 저장된 외형·복장·직업·말투·현재 태도와 NPC의 성격·가치관·경계심·현재 상황을 근거로 종합적으로 정한다. 제공되지 않은 정보를 지어내지 마라. 두 수치는 같을 필요가 없고 NPC 성격에 따라 결과가 달라져야 한다. 이미 조우한 NPC이거나 처음 만나는 장면이 아니면 first_encounter_stats는 반드시 null이다. 실제로 처음 직접 조우한 장면인데 이 판단을 빠뜨리지 마라 — 반드시 first_encounter_stats를 채워야 한다.
+
+[CURRENT NPC RELATIONSHIP RECORD]
+현재 메인 NPC의 직전 누적값: player_ejaculation_count=${Math.max(0, Number(save?.npc_relationship_state?.[save?.last_character_id]?.player_ejaculation_count) || 0)}, npc_orgasm_count=${Math.max(0, Number(save?.npc_relationship_state?.[save?.last_character_id]?.npc_orgasm_count) || 0)}.
+npc_relationship_state는 현재 메인 NPC와의 누적 절대값 두 개만 반환한다. 명확히 완료된 플레이어 사정 또는 현재 NPC 오르가즘만 증가시키고, 직전·실패·중단·가짜·상상·회상·다른 NPC 사건은 증가시키지 않는다. 값을 모르면 직전값을 유지하고 감소·초기화하지 않는다. narrator에는 반환하지 않는다.
 
 [WORLD STATE PATCH CONTRACT]
 플레이어가 실제로 출발해서 새 장소에 도착했고 장면이 그 새 장소로 전환된 경우, world_state_patch에 building, floor, ward, location_label을 모두 채워서 반환한다. 바뀌지 않은 필드는 이전 저장값의 기존 명칭을 그대로 다시 적고, 실제로 바뀐 필드만 새 값으로 적는다. building/floor/ward는 장소를 설명하는 한국어 명칭으로 적으면 Worker가 표준 ID로 정규화하며, 표준 ID로 정규화되지 않는 값은 무시된다. 이동을 제안하거나 준비만 했을 뿐 아직 도착하지 않았다면 world_state_patch를 채우지 말고 비워둔다. 빈 문자열로 기존 값을 덮어쓰지 마라. 알 수 없는 장소를 지어내지 마라.
@@ -3440,7 +3519,7 @@ function normalizeExtract(extract) {
         isPlainObject(item) && Number.isInteger(item.choice_index) && typeof item.name === 'string' && item.name.trim()
       )
     : [];
-  if (!isPlainObject(normalized.npc_relationship_state)) normalized.npc_relationship_state = null;
+  normalized.npc_relationship_state = normalizeRelationshipExtract(normalized.npc_relationship_state);
   if (!isPlainObject(normalized.first_encounter_stats)) normalized.first_encounter_stats = null;
   if (!isPlainObject(normalized.world_state_patch)) normalized.world_state_patch = null;
   delete normalized.image_reasoning;
@@ -3462,10 +3541,27 @@ function filterMainNpcDialogue(extract, characters) {
 }
 
 function normalizeRelationshipState(previous = {}, patch = {}) {
+  const previousPlayerEjaculationCount = Math.max(0, Number(previous?.player_ejaculation_count) || 0);
+  const previousNpcOrgasmCount = Math.max(0, Number(previous?.npc_orgasm_count) || 0);
+  const proposedPlayerEjaculationCount = Number.isInteger(patch?.player_ejaculation_count) && patch.player_ejaculation_count >= 0
+    ? patch.player_ejaculation_count : previousPlayerEjaculationCount;
+  const proposedNpcOrgasmCount = Number.isInteger(patch?.npc_orgasm_count) && patch.npc_orgasm_count >= 0
+    ? patch.npc_orgasm_count : previousNpcOrgasmCount;
+  const playerEjaculationCount = Math.max(previousPlayerEjaculationCount, proposedPlayerEjaculationCount);
+  const npcOrgasmCount = Math.max(previousNpcOrgasmCount, proposedNpcOrgasmCount);
   return {
-    player_ejaculation_count: Math.max(0, Number(previous?.player_ejaculation_count) || 0, Number.isInteger(patch.player_ejaculation_count) ? patch.player_ejaculation_count : 0),
-    npc_orgasm_count: Math.max(0, Number(previous?.npc_orgasm_count) || 0, Number.isInteger(patch.npc_orgasm_count) ? patch.npc_orgasm_count : 0)
+    player_ejaculation_count: playerEjaculationCount,
+    npc_orgasm_count: npcOrgasmCount,
+    intimate_info_unlocked: previous?.intimate_info_unlocked === true || playerEjaculationCount > 0 || npcOrgasmCount > 0
   };
+}
+
+function normalizeRelationshipExtract(value) {
+  if (!isPlainObject(value)) return null;
+  const result = {};
+  if (Number.isInteger(value.player_ejaculation_count) && value.player_ejaculation_count >= 0) result.player_ejaculation_count = value.player_ejaculation_count;
+  if (Number.isInteger(value.npc_orgasm_count) && value.npc_orgasm_count >= 0) result.npc_orgasm_count = value.npc_orgasm_count;
+  return Object.keys(result).length ? result : null;
 }
 
 const NPC_STAT_KEYS = ['호감도', '신뢰도', '최면깊이', '순응도', '최면저항력'];
@@ -3676,6 +3772,25 @@ function isCsaApplicable(csa, worldState = {}) {
 function getApplicableCsaEntries(save) {
   const world = isPlainObject(save?.world_state) ? save.world_state : (isPlainObject(save?.player_location) ? save.player_location : {});
   return (Array.isArray(save?.csa_active) ? save.csa_active : []).filter(csa => isCsaApplicable(csa, world));
+}
+
+function buildCurrentHypnosisStatusSnapshot(save = {}, master = {}) {
+  const capability = calculateHypnosisCapability(save, master);
+  const characterId = typeof save?.last_character_id === 'string' && save.last_character_id !== 'narrator' ? save.last_character_id : null;
+  const character = characterId && isPlainObject(master?.characters?.[characterId]) ? master.characters[characterId] : {};
+  const currentSuggestions = (normalizeLegacyActiveSuggestions(save?.active_suggestions)?.[characterId] || [])
+    .filter(item => item?.active)
+    .map(item => ({ strength: item.strength || '약함', content: typeof item.content === 'string' ? item.content.trim() : '' }))
+    .filter(item => item.content);
+  const applicableCsa = getApplicableCsaEntries(save).map(item => ({ strength: item.strength || '약함', scope_label: item.scope_label || '', content: typeof item.content === 'string' ? item.content.trim() : '' })).filter(item => item.content);
+  return { currentCharacterId: characterId, currentCharacterName: character?.name || character?.['이름'] || null, suggestionCount: capability.active_count, suggestionMax: capability.max_active, csaCount: capability.csa_active_count, csaMax: capability.csa_max_active, currentSuggestions, applicableCsa };
+}
+
+function buildCurrentHypnosisStatusPanelText(save = {}, master = {}) {
+  const snapshot = buildCurrentHypnosisStatusSnapshot(save, master);
+  const suggestionLines = snapshot.currentSuggestions.length ? snapshot.currentSuggestions.map(item => `- [${item.strength}] ${item.content}`).join('\n') : '- 없음';
+  const csaLines = snapshot.applicableCsa.length ? snapshot.applicableCsa.map(item => `- [${item.scope_label || '현재 범위'} · ${item.strength}] ${item.content}`).join('\n') : '- 없음';
+  return `👤 현재 NPC: ${snapshot.currentCharacterName || '없음'}\n\n📱 최면 어플: 개인 암시 ${snapshot.suggestionCount}/${snapshot.suggestionMax} · 상식개변 ${snapshot.csaCount}/${snapshot.csaMax}\n\n🌀 현재 NPC 개인 암시\n${suggestionLines}\n\n🌐 현재 위치 상식개변\n${csaLines}`;
 }
 
 function buildApplicableCsaSection(save) {

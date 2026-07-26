@@ -59,7 +59,7 @@ const sidebar = {
     document.getElementById('npc-relationship-title').textContent = `${character.name || characterId} 관계 기록`;
     const relationshipRoot = document.getElementById('npc-relationship');
     relationshipRoot.replaceChildren();
-    relationshipRoot.append('💦 사정 ', this.emphasis(`${playerEjaculationCount}회`), ' · ✨ 오르가즘 ', this.emphasis(`${npcOrgasmCount}회`));
+    relationshipRoot.append('💦 플레이어 사정 ', this.emphasis(`${playerEjaculationCount}회`), ` · ✨ ${character.name || characterId} 오르가즘 `, this.emphasis(`${npcOrgasmCount}회`));
     this.renderStats(context?.save?.npc_stats?.[characterId] || {}, characterId, context?.save?.npc_stat_changes?.[characterId]);
   },
 
@@ -144,9 +144,11 @@ const sidebar = {
     const age = this.withUnit(character.age || character['나이'], '세');
     const height = this.withUnit(character.height || character.height_cm || character['키'], 'cm');
     const weight = this.withUnit(character.weight || character.weight_kg || character['몸무게'], 'kg');
+    const cup = character.cup || character.npc_컵 || character['컵'];
     const metrics = [['나이', age], ['키', height], ['몸무게', weight]].filter(([, value]) => value);
     appendLine(metrics.map(([label, value]) => `${label} ${value}`).join(' · '));
     appendLine(character.body_type || character['체형']);
+    appendLine(cup ? `가슴 ${cup}` : '');
     const relationship = character.relationship || character.current_relationship || character['연인관계'];
     const publicBackground = character.public_background || character.current_status || character.public_summary;
     appendLine([relationship ? `관계 ${relationship}` : '', publicBackground].filter(Boolean).join(' · '));

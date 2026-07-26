@@ -92,16 +92,25 @@ window.hypnosisApp = (() => {
       add.disabled = !current; add.onclick = () => { if (!current) return; draft.suggestions.push({ _new:true, client_id:`draft_suggestion_${crypto.randomUUID()}`, character_id:current.character_id, strength:'weak', content:'' }); renderTab(kind); };
     } else add.onclick = () => { draft.csa.push({ _new:true, client_id:`draft_csa_${crypto.randomUUID()}`, strength:'weak', scope_type:'ward', content:'' }); renderTab(kind); };
     body.appendChild(add);
+    const selected = domain === 'suggestion' ? selectedSuggestionIds : selectedCsaIds;
+    const bulk = el('div', 'hypnosis-app-bulk-actions');
+    const selectedDelete = el('button', 'choice-btn', domain === 'suggestion' ? '선택 삭제' : '선택 해제');
+    selectedDelete.disabled = !selected.size;
+    selectedDelete.onclick = () => { const rows = domain === 'suggestion' ? draft.suggestions : draft.csa; rows.slice().forEach(item => { if (!selected.has(item.id || item.client_id)) return; if (item._new) rows.splice(rows.indexOf(item), 1); else item._deleted = true; }); selected.clear(); renderTab(kind); };
+    const allDelete = el('button', 'choice-btn', domain === 'suggestion' ? '전체 삭제' : '전체 해제');
+    allDelete.onclick = () => { const rows = domain === 'suggestion' ? draft.suggestions : draft.csa; rows.slice().forEach(item => { if (item._deleted) return; if (item._new) rows.splice(rows.indexOf(item), 1); else item._deleted = true; }); selected.clear(); renderTab(kind); };
+    bulk.append(selectedDelete, allDelete); body.appendChild(bulk);
     if (!list?.filter(item => !item._deleted).length) body.append(el('p', '', '현재 활성 항목이 없습니다.'));
     list.forEach(item => {
-      if (item._deleted) return;
-      const card = el('article', 'hypnosis-app-effect-card');
+      const card = el('article', `hypnosis-app-effect-card${item._deleted ? ' pending-delete' : ''}`);
       const title = domain === 'suggestion' ? `${item.character_name || nameFor(item.character_id)} · ${item.strength_label || item.strength}` : `${item.scope_label || item.scope_type} · ${item.strength_label || item.strength}`;
-      const strength = el('select'); ['weak','medium','strong'].forEach(value => { const option=el('option','',value === 'weak' ? '약함' : value === 'medium' ? '중간' : '강함'); option.value=value; option.selected=item.strength===value; strength.appendChild(option); });
-      const content = el('textarea'); content.value=item.content || ''; content.rows=3;
-      strength.onchange=()=>{ item.strength=strength.value; refreshDraftBar(); }; content.oninput=()=>{ item.content=content.value.trim().replace(/\s+/g,' '); refreshDraftBar(); };
-      const remove=el('button','choice-btn',item._new?'취소':'해제'); remove.onclick=()=>{ if(item._new){ const target=domain==='suggestion'?draft.suggestions:draft.csa; target.splice(target.indexOf(item),1); } else item._deleted=true; renderTab(kind); };
-      card.append(el('strong','',title),strength,content,remove); body.appendChild(card);
+      const strength = el('select'); (appState.strength_options || []).forEach(meta => { const option=el('option','',meta.label); option.value=meta.id; option.selected=item.strength===meta.id; option.disabled=!meta.available && !option.selected; strength.appendChild(option); });
+      const content = el('textarea'); content.value=item.content || ''; content.rows=3; strength.disabled=item._deleted; content.disabled=item._deleted;
+      strength.onchange=()=>{ item.strength=strength.value; refreshDraftBar(); }; content.oninput=()=>{ item.content=content.value; refreshDraftBar(); };
+      const check=el('input'); check.type='checkbox'; check.checked=selected.has(item.id || item.client_id); check.disabled=item._deleted; check.onchange=()=>{ const key=item.id||item.client_id; check.checked?selected.add(key):selected.delete(key); renderTab(kind); };
+      const remove=el('button','choice-btn',item._deleted?'복구':(item._new?'취소':'해제')); remove.onclick=()=>{ if(item._deleted) item._deleted=false; else if(item._new){ const target=domain==='suggestion'?draft.suggestions:draft.csa; target.splice(target.indexOf(item),1); } else item._deleted=true; selected.delete(item.id||item.client_id); renderTab(kind); };
+      if (domain === 'csa') { const scope=el('select'); (appState.scope_options||[]).forEach(meta=>{const option=el('option','',meta.available?meta.label:`${meta.label} · Lv.${meta.unlock_level}`);option.value=meta.id;option.selected=item.scope_type===meta.id;option.disabled=!meta.available&&!option.selected;scope.appendChild(option);}); scope.disabled=item._deleted; scope.onchange=()=>{item.scope_type=scope.value;refreshDraftBar();}; card.appendChild(scope); }
+      card.append(check,el('strong','',title),item._deleted?el('span','pending-badge',domain==='suggestion'?'삭제 예정':'해제 예정'):document.createTextNode(''),strength,content,remove); body.appendChild(card);
     });
   }
 

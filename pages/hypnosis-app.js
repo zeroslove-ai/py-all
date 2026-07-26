@@ -9,6 +9,12 @@ window.hypnosisApp = (() => {
   const selectedSuggestionIds = new Set();
   const selectedCsaIds = new Set();
   let keydownHandler = null;
+  let popstateHandler = null;
+  let historyToken = null;
+  let historyPushed = false;
+  let restoringHistory = false;
+  let validationIssues = [];
+  const beforeUnloadHandler = event => { if (overlay && operations().length) { event.preventDefault(); event.returnValue = ''; } };
   const el = (tag, className = '', text = '') => {
     const node = document.createElement(tag);
     if (className) node.className = className;
@@ -38,10 +44,10 @@ window.hypnosisApp = (() => {
     const order = { 'suggestion:deactivate':0, 'csa:deactivate':1, 'suggestion:update':2, 'csa:update':3, 'suggestion:activate':4, 'csa:activate':5 };
     return result.sort((a,b) => order[`${a.domain}:${a.operation}`] - order[`${b.domain}:${b.operation}`] || String(a.id || a.client_id).localeCompare(String(b.id || b.client_id)));
   }
-  function refreshDraftBar() { const bar = overlay?.querySelector('.hypnosis-app-draft-bar'); if (!bar) return; const count = operations().length; bar.replaceChildren(el('span', '', count ? `미적용 변경 ${count}건` : '변경사항 없음')); const reset = el('button', 'choice-btn', '모두 되돌리기'); reset.disabled=!count; reset.onclick=()=>{ draft.suggestions=copy(draft.originalSuggestions); draft.csa=copy(draft.originalCsa); renderTab(draft.tab); }; const apply=el('button','choice-btn','적용'); apply.disabled=!count || state.isStreaming; apply.onclick=applyDraft; bar.append(reset,apply); }
+  function refreshDraftBar() { const bar = overlay?.querySelector('.hypnosis-app-draft-bar'); if (!bar) return; const count = operations().length; window.removeEventListener('beforeunload', beforeUnloadHandler); if (count) window.addEventListener('beforeunload', beforeUnloadHandler); bar.replaceChildren(el('span', '', count ? `미적용 변경 ${count}건` : '변경사항 없음')); const reset = el('button', 'choice-btn', '모두 되돌리기'); reset.disabled=!count || isApplying; reset.onclick=()=>{ draft.suggestions=copy(draft.originalSuggestions); draft.csa=copy(draft.originalCsa); selectedSuggestionIds.clear(); selectedCsaIds.clear(); validationIssues=[]; renderTab(draft.tab); }; const apply=el('button','choice-btn',isApplying?'확인 중…':'적용'); apply.disabled=!count || state.isStreaming || isApplying; apply.onclick=applyDraft; bar.append(reset,apply); }
 
   function showDialog(title, message, actions) { const shade=el('div','hypnosis-app-dialog-overlay'); const box=el('div','hypnosis-app-dialog'); box.setAttribute('role','alertdialog'); box.append(el('h3','',title),el('p','',message)); actions.forEach(action=>{const b=el('button','choice-btn',action.label);b.onclick=()=>{shade.remove();action.run();};box.appendChild(b);});shade.appendChild(box);overlay.appendChild(shade);box.querySelector('button')?.focus(); }
-  function destroyApp() { if (!overlay) return; document.removeEventListener('keydown', keydownHandler); overlay.remove(); overlay=null; appState=null; draft=null; isApplying=false; selectedSuggestionIds.clear(); selectedCsaIds.clear(); opener?.focus?.(); opener=null; document.body.style.overflow=''; }
+  function destroyApp() { if (!overlay) return; document.removeEventListener('keydown', keydownHandler); window.removeEventListener('popstate', popstateHandler); window.removeEventListener('beforeunload', beforeUnloadHandler); if (historyPushed && history.state?.hypnosisApp === historyToken) { restoringHistory=true; history.back(); } overlay.remove(); overlay=null; appState=null; draft=null; isApplying=false; selectedSuggestionIds.clear(); selectedCsaIds.clear(); validationIssues=[]; historyToken=null; historyPushed=false; opener?.focus?.(); opener=null; document.body.style.overflow=''; }
   function requestClose() { if (!overlay || isApplying) return; const count=operations().length; if (!count) return destroyApp(); showDialog('미적용 변경사항',`아직 적용하지 않은 변경사항이 ${count}건 있습니다. 적용하시겠습니까?`,[{label:'계속 편집',run:()=>{}},{label:'변경사항 버리기',run:destroyApp},{label:'적용하고 닫기',run:()=>applyDraft(true)}]); }
   function forceCloseAfterValidation() { destroyApp(); }
 
@@ -132,6 +138,7 @@ window.hypnosisApp = (() => {
   function renderTab(tab) {
     draft.tab = tab;
     const body = overlay.querySelector('.hypnosis-app-body'); body.replaceChildren();
+    if (validationIssues.length) { const alert=el('div','hypnosis-app-error'); alert.setAttribute('role','alert'); alert.appendChild(el('strong','','변경사항을 적용할 수 없습니다.')); validationIssues.forEach(issue=>alert.appendChild(el('p','',issue.message||String(issue)))); body.appendChild(alert); }
     if (tab === 'home') renderHome(body);
     else if (tab === 'npc') renderNpcs(body);
     else if (tab === 'suggestions') renderEffects(body, 'suggestions');
@@ -154,6 +161,9 @@ window.hypnosisApp = (() => {
     overlay.addEventListener('click', event => { if (event.target === overlay) requestClose(); });
     keydownHandler = event => { if (event.key === 'Escape' && overlay && !overlay.querySelector('.hypnosis-app-dialog-overlay')) requestClose(); };
     document.addEventListener('keydown', keydownHandler);
+    historyToken=crypto.randomUUID(); history.pushState({ ...(history.state||{}), hypnosisApp:historyToken },'',location.href); historyPushed=true;
+    popstateHandler=()=>{ if(restoringHistory){ restoringHistory=false; return; } if(overlay){ history.pushState({ ...(history.state||{}), hypnosisApp:historyToken },'',location.href); requestClose(); } };
+    window.addEventListener('popstate',popstateHandler);
     document.body.style.overflow='hidden';
     document.body.appendChild(overlay); closeButton.focus();
     try { appState = (await api.appState(state.gameId)).app; draft = { tab: initialTab, originalSuggestions: copy(appState.suggestions), originalCsa: copy(appState.common_sense), suggestions: copy(appState.suggestions), csa: copy(appState.common_sense) }; renderTab(initialTab); }

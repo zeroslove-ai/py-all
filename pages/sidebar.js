@@ -26,9 +26,9 @@ const sidebar = {
     panel.appendChild(relationship);
     const actions = document.createElement('section');
     actions.className = 'side-panel-footer';
-    actions.innerHTML = '<div class="side-action-row"><button id="app-info-side-button" class="side-action-btn" type="button">📘 어플 매뉴얼</button><button id="resume-game-button" class="side-action-btn" type="button">▶ 플레이 재개</button></div>'
+    actions.innerHTML = '<div class="side-action-row"><button id="app-info-side-button" class="side-action-btn" type="button">📱 최면 어플</button><button id="resume-game-button" class="side-action-btn" type="button">▶ 플레이 재개</button></div>'
       + '<div class="side-action-row"><button id="reset-side-button" class="side-action-btn" type="button">🔄 리셋</button><button id="feedback-side-button" class="side-action-btn" type="button">✏️ 피드백</button></div>';
-    actions.querySelector('#app-info-side-button').addEventListener('click', () => window.showAppManual?.());
+    actions.querySelector('#app-info-side-button').addEventListener('click', () => window.hypnosisApp?.open('home'));
     actions.querySelector('#resume-game-button').addEventListener('click', () => window.resumeGame?.());
     actions.querySelector('#reset-side-button').addEventListener('click', () => window.showResetModal?.());
     actions.querySelector('#feedback-side-button').addEventListener('click', () => window.showFeedbackModal?.());

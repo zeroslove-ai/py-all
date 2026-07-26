@@ -4,6 +4,7 @@ window.hypnosisApp = (() => {
   let overlay = null;
   let opener = null;
   let appState = null;
+  let draft = null;
   const el = (tag, className = '', text = '') => {
     const node = document.createElement(tag);
     if (className) node.className = className;
@@ -11,9 +12,30 @@ window.hypnosisApp = (() => {
     return node;
   };
   const nameFor = (id) => appState?.npcs?.find(npc => npc.character_id === id)?.name || id;
+  const copy = value => JSON.parse(JSON.stringify(value || []));
+
+  function operations() {
+    if (!draft) return [];
+    const result = [];
+    const compare = (original, current, domain) => {
+      const before = new Map((original || []).map(item => [item.id, item]));
+      (current || []).forEach(item => {
+        if (item._new) { result.push({ client_id: item.client_id, domain, operation: 'activate', ...(domain === 'suggestion' ? { character_id: item.character_id } : { scope_type: item.scope_type }), strength: item.strength, content: item.content }); return; }
+        const old = before.get(item.id);
+        if (!old) return;
+        if (item._deleted) { result.push({ client_id: `${domain}:${item.id}`, domain, operation: 'deactivate', ...(domain === 'suggestion' ? { character_id: item.character_id } : {}), id: item.id }); return; }
+        const changed = item.content !== old.content || item.strength !== old.strength || (domain === 'csa' && item.scope_type !== old.scope_type);
+        if (changed) result.push({ client_id: `${domain}:${item.id}`, domain, operation: 'update', ...(domain === 'suggestion' ? { character_id: item.character_id } : {}), id: item.id, strength: item.strength, content: item.content, ...(domain === 'csa' ? { scope_type: item.scope_type } : {}) });
+      });
+    };
+    compare(draft.originalSuggestions, draft.suggestions, 'suggestion'); compare(draft.originalCsa, draft.csa, 'csa');
+    return result;
+  }
+  function refreshDraftBar() { const bar = overlay?.querySelector('.hypnosis-app-draft-bar'); if (!bar) return; const count = operations().length; bar.replaceChildren(el('span', '', count ? `미적용 변경 ${count}건` : '변경사항 없음')); const reset = el('button', 'choice-btn', '모두 되돌리기'); reset.disabled=!count; reset.onclick=()=>{ draft.suggestions=copy(draft.originalSuggestions); draft.csa=copy(draft.originalCsa); renderTab(draft.tab); }; const apply=el('button','choice-btn','적용'); apply.disabled=!count || state.isStreaming; apply.onclick=applyDraft; bar.append(reset,apply); }
 
   function close() {
     if (!overlay) return;
+    if (operations().length && !window.confirm(`아직 적용하지 않은 변경사항이 ${operations().length}건 있습니다. 변경사항을 버리고 닫을까요?`)) return;
     overlay.remove(); overlay = null; appState = null;
     opener?.focus?.(); opener = null;
   }
@@ -53,13 +75,32 @@ window.hypnosisApp = (() => {
   }
 
   function renderEffects(body, kind) {
-    const list = kind === 'suggestions' ? appState.suggestions : appState.common_sense;
-    if (!list?.length) { body.append(el('p', '', '현재 활성 항목이 없습니다.')); return; }
+    const domain = kind === 'suggestions' ? 'suggestion' : 'csa';
+    const list = domain === 'suggestion' ? draft.suggestions : draft.csa;
+    const add = el('button', 'choice-btn', domain === 'suggestion' ? '+ 새 개인 암시' : '+ 새 상식개변');
+    if (domain === 'suggestion') {
+      const current = appState.npcs?.find(npc => npc.can_add_suggestion);
+      add.disabled = !current; add.onclick = () => { if (!current) return; draft.suggestions.push({ _new:true, client_id:`draft_suggestion_${crypto.randomUUID()}`, character_id:current.character_id, strength:'weak', content:'' }); renderTab(kind); };
+    } else add.onclick = () => { draft.csa.push({ _new:true, client_id:`draft_csa_${crypto.randomUUID()}`, strength:'weak', scope_type:'ward', content:'' }); renderTab(kind); };
+    body.appendChild(add);
+    if (!list?.filter(item => !item._deleted).length) body.append(el('p', '', '현재 활성 항목이 없습니다.'));
     list.forEach(item => {
+      if (item._deleted) return;
       const card = el('article', 'hypnosis-app-effect-card');
-      const title = kind === 'suggestions' ? `${item.character_name || nameFor(item.character_id)} · ${item.strength_label}` : `${item.scope_label} · ${item.strength_label}`;
-      card.append(el('strong', '', title), el('p', '', item.content)); body.appendChild(card);
+      const title = domain === 'suggestion' ? `${item.character_name || nameFor(item.character_id)} · ${item.strength_label || item.strength}` : `${item.scope_label || item.scope_type} · ${item.strength_label || item.strength}`;
+      const strength = el('select'); ['weak','medium','strong'].forEach(value => { const option=el('option','',value === 'weak' ? '약함' : value === 'medium' ? '중간' : '강함'); option.value=value; option.selected=item.strength===value; strength.appendChild(option); });
+      const content = el('textarea'); content.value=item.content || ''; content.rows=3;
+      strength.onchange=()=>{ item.strength=strength.value; refreshDraftBar(); }; content.oninput=()=>{ item.content=content.value.trim().replace(/\s+/g,' '); refreshDraftBar(); };
+      const remove=el('button','choice-btn',item._new?'취소':'해제'); remove.onclick=()=>{ if(item._new){ const target=domain==='suggestion'?draft.suggestions:draft.csa; target.splice(target.indexOf(item),1); } else item._deleted=true; renderTab(kind); };
+      card.append(el('strong','',title),strength,content,remove); body.appendChild(card);
     });
+  }
+
+  async function applyDraft() {
+    const requested = operations(); if (!requested.length) return;
+    const action = { version:1, type:'app_transaction', base_turn_count:appState.turn_count, operations:requested };
+    try { const result = await api.validateAppAction(state.gameId, action); close(); window.runHypnosisStructuredAction?.(result.canonical_action, result.display_input); }
+    catch (error) { window.alert(error.details?.issues?.map(issue => issue.message).join('\n') || error.details?.error || error.message); }
   }
 
   function renderManual(body) {
@@ -70,6 +111,7 @@ window.hypnosisApp = (() => {
   }
 
   function renderTab(tab) {
+    draft.tab = tab;
     const body = overlay.querySelector('.hypnosis-app-body'); body.replaceChildren();
     if (tab === 'home') renderHome(body);
     else if (tab === 'npc') renderNpcs(body);
@@ -77,6 +119,7 @@ window.hypnosisApp = (() => {
     else if (tab === 'csa') renderEffects(body, 'csa');
     else renderManual(body);
     overlay.querySelectorAll('[role="tab"]').forEach(button => button.setAttribute('aria-selected', String(button.dataset.tab === tab)));
+    refreshDraftBar();
   }
 
   async function open(initialTab = 'home') {
@@ -88,11 +131,11 @@ window.hypnosisApp = (() => {
     closeButton.addEventListener('click', close); header.append(title, closeButton);
     const tabs = el('div', 'hypnosis-app-tabs'); tabs.setAttribute('role', 'tablist');
     [['home','홈'],['npc','NPC'],['suggestions','개인 암시'],['csa','상식개변'],['manual','매뉴얼']].forEach(([id,label]) => { const button = el('button', 'hypnosis-app-tab', label); button.dataset.tab=id; button.setAttribute('role','tab'); button.addEventListener('click', () => renderTab(id)); tabs.appendChild(button); });
-    modal.append(header, tabs, el('div', 'hypnosis-app-body')); overlay.appendChild(modal);
+    const draftBar = el('div', 'hypnosis-app-draft-bar'); modal.append(header, tabs, el('div', 'hypnosis-app-body'), draftBar); overlay.appendChild(modal);
     overlay.addEventListener('click', event => { if (event.target === overlay) close(); });
     document.addEventListener('keydown', function escape(event) { if (event.key === 'Escape' && overlay) { document.removeEventListener('keydown', escape); close(); } });
     document.body.appendChild(overlay); closeButton.focus();
-    try { appState = (await api.appState(state.gameId)).app; renderTab(initialTab); }
+    try { appState = (await api.appState(state.gameId)).app; draft = { tab: initialTab, originalSuggestions: copy(appState.suggestions), originalCsa: copy(appState.common_sense), suggestions: copy(appState.suggestions), csa: copy(appState.common_sense) }; renderTab(initialTab); }
     catch (error) { const body = overlay.querySelector('.hypnosis-app-body'); body.replaceChildren(el('p', 'hypnosis-app-error', '최면 어플 정보를 불러오지 못했습니다.')); }
   }
   return { init() {}, open, close, isOpen: () => Boolean(overlay), onGameReset: close };

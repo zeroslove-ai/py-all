@@ -388,7 +388,15 @@
       .side-panel-footer { position: static; }
       .character-img { width: 100%; height: min(620px, 125vw); object-fit: contain; object-position: top center; }
       .bottom-bar { position: sticky; bottom: 0; z-index: 20; }
-      .header { padding: 10px 12px; gap: 8px; flex-wrap: wrap; }
+      .header {
+        position: sticky;
+        top: 0;
+        z-index: 30;
+        background: var(--bg-secondary);
+        padding: 10px 12px;
+        gap: 8px;
+        flex-wrap: wrap;
+      }
       .header-controls { margin-left: 0; width: 100%; }
       .tts-status { max-width: none; flex: 1 1 160px; }
       .choice-buttons { grid-template-columns: 1fr; gap: 9px; max-height: 46vh; }

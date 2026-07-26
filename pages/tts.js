@@ -108,8 +108,47 @@ const tts = {
     this.playing = false;
   },
 
-  key(turn, line) {
-    return `${turn}:${line.speaker}:${line.text}`;
+  key(turn, lines) {
+    return `${turn}:${lines[0].speaker}:${lines.map(line => line.text).join('|')}`;
+  },
+
+  // Coarse tone grouping used only to decide whether adjacent same-speaker
+  // lines can share one TTS request — deliberately looser/broader than the
+  // Worker's own mapDirection (which picks the one emotion actually sent to
+  // Fish Audio); this only needs to tell "compatible enough to read as one
+  // breath" apart from a real tone swing (차분함→울음, 속삭임→분노, 중립→비명).
+  ttsToneGroup(direction = '') {
+    if (/속삭|작게|귓속말/.test(direction)) return 'whisper';
+    if (/울먹|눈물|흐느끼|서럽/.test(direction)) return 'sad';
+    if (/화난|분노|날카롭게|소리치|비명/.test(direction)) return 'angry';
+    if (/웃으며|밝게|활기차게|신나/.test(direction)) return 'happy';
+    if (/떨리는|떨림|긴장|당황|머뭇|가쁜|조심스럽게/.test(direction)) return 'nervous';
+    if (/차분|침착|평온|담담/.test(direction)) return 'calm';
+    return 'neutral';
+  },
+
+  // 같은 화자의 인접 발화를 하나의 TTS 요청으로 묶는다 — 화자명/연기지시는
+  // 절대 TTS text에 넣지 않고 대사만 이어 붙인다. 화자가 바뀌면(현재 구조상
+  // dialogue_lines는 이미 메인 NPC 한 명뿐이지만) 항상 새 묶음이고, 톤이
+  // 크게 어긋나거나 350자를 넘으면 자연스러운 발화 경계에서 분리한다.
+  batchDialogueLines(validLines) {
+    const TTS_BATCH_MAX_CHARS = 350;
+    const batches = [];
+    let current = null;
+    for (const line of validLines) {
+      const speaker = line.speaker;
+      const tone = this.ttsToneGroup(line.direction);
+      const text = line.text.trim();
+      const merged = current ? `${current.text} ${text}` : text;
+      if (current && current.speaker === speaker && current.tone === tone && merged.length <= TTS_BATCH_MAX_CHARS) {
+        current.text = merged;
+        current.lines.push(line);
+      } else {
+        current = { speaker, tone, direction: line.direction, text, lines: [line] };
+        batches.push(current);
+      }
+    }
+    return batches;
   },
 
   // H3-A item 10: a TTS failure (missing DOM, bad extract shape, network
@@ -153,12 +192,14 @@ const tts = {
       this.showStatus('NPC 대사 데이터가 불완전합니다. speaker, text, direction을 확인하세요.', true);
       return;
     }
-    this.lastPlayable = { extract: { ...extract, dialogue_lines: [validLines[validLines.length - 1]] }, turn };
-    for (const line of validLines) {
-      const key = this.key(turn, line);
+    const batches = this.batchDialogueLines(validLines);
+    const lastBatch = batches[batches.length - 1];
+    this.lastPlayable = { extract: { ...extract, dialogue_lines: lastBatch.lines }, turn };
+    for (const batch of batches) {
+      const key = this.key(turn, batch.lines);
       if (!force && (this.pendingKeys.has(key) || this.completedKeys.has(key))) continue;
       this.pendingKeys.add(key);
-      this.queue.push({ line, voiceId: character.voice_id.trim(), key, generation: this.generation });
+      this.queue.push({ batch, voiceId: character.voice_id.trim(), key, generation: this.generation });
     }
     if (this.replay) this.replay.hidden = false;
     this.drain();
@@ -184,8 +225,10 @@ const tts = {
   async play(job) {
     const audio = this.ensureAudioElement();
     try {
-      this.showStatus(`음성 준비 중: ${job.line.speaker}`);
-      const result = await api.tts(job.line.text, job.voiceId, job.line.direction);
+      this.showStatus(`음성 준비 중: ${job.batch.speaker}`);
+      // 묶음 text는 대사만 이어 붙인 것 — 화자명/(연기지시)는 절대 포함하지
+      // 않는다. direction은 묶음의 대표(첫 발화) 값 하나만 전달한다.
+      const result = await api.tts(job.batch.text, job.voiceId, job.batch.direction);
       if (!result.url) throw new Error('TTS 응답에 audio URL이 없습니다.');
       if (!state.autoTts || job.generation !== this.generation) return;
       audio.src = result.url;

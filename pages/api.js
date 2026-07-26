@@ -124,8 +124,8 @@ const api = {
     return readApiResponse(res, 'reset');
   },
 
-  // ─── 9-2. 마지막 턴 롤백 + 피드백 재생성 ───
-  async feedback(gameId, feedbackText, expectedTurnNumber = null) {
+  // ─── 9-2. 마지막 턴 롤백만 수행 (Story/Extract/Commit은 여기서 하지 않음) ───
+  async feedbackRollback(gameId, feedbackText, expectedTurnNumber = null) {
     const res = await fetch(`${API_BASE}/api/feedback`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -136,6 +136,16 @@ const api = {
       })
     });
     return readApiResponse(res, 'feedback');
+  },
+
+  // ─── 9-3. 피드백 재생성 실패 시 롤백된 턴 복구 ───
+  async feedbackRestore(gameId, turnNumber, restorePayload) {
+    const res = await fetch(`${API_BASE}/api/feedback/restore`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ game_id: gameId, turn_number: turnNumber, restore_payload: restorePayload })
+    });
+    return readApiResponse(res, 'feedback-restore');
   },
 
   // ─── 10. API 버전 조회 — 배포 확인용, 앱 초기화 시 1회만 호출 ───

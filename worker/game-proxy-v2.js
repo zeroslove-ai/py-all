@@ -37,6 +37,7 @@ export default {
         case '/api/version': return handleVersion(env);
         case '/api/reset':      return await handleReset(req, env);
         case '/api/feedback':   return await handleFeedback(req, env);
+        case '/api/feedback/restore': return await handleFeedbackRestore(req, env);
         default:
           return jsonResponse({ error: 'Not Found' }, 404);
       }
@@ -289,7 +290,11 @@ const STORY_HEADERS_TIMEOUT_MS = 90000;
 
 async function handleStory(req, env) {
   const requestId = crypto.randomUUID();
-  const { game_id, player_input, feedback = [] } = await readJson(req);
+  // regeneration_feedback is only ever sent by the frontend's feedback
+  // rollback+regenerate flow (never a normal turn) — it injects the
+  // highest-priority regeneration-only block; `feedback` (the array) keeps
+  // its existing, unrelated "apply to next response" meaning.
+  const { game_id, player_input, feedback = [], regeneration_feedback = null } = await readJson(req);
   if (!game_id) return jsonResponse({ error: 'game_id required', request_id: requestId }, 400);
 
   const contextStart = Date.now();
@@ -304,7 +309,7 @@ async function handleStory(req, env) {
   const currentTurn = ctx?.turn_count ?? 0;
   const resolvedPlayerInput = resolveMarkerChoiceInput(player_input, ctx?.save?.last_choices);
   const promptStart = Date.now();
-  const prompt = buildStoryPrompt(ctx, resolvedPlayerInput, currentTurn, feedback);
+  const prompt = buildStoryPrompt(ctx, resolvedPlayerInput, currentTurn, feedback, regeneration_feedback);
   const promptMs = Date.now() - promptStart;
 
   let deepseekRes;
@@ -354,44 +359,6 @@ async function handleStory(req, env) {
       'Server-Timing': `context;dur=${contextMs}, prompt;dur=${promptMs}, upstream;dur=${upstreamMs}`
     }
   });
-}
-
-// /api/feedback's regeneration needs the full narrative text in one Worker-
-// side call (never streamed to a client) — same prompt/model as normal
-// Story, just stream:false so the complete completion comes back in a
-// single response instead of an SSE body the caller would have to consume.
-async function generateStoryNarrativeOnce(env, game_id, playerInput, regenerationFeedback, requestId) {
-  const ctx = await supabaseRpc(env, 'get_story_context', { p_game_id: game_id, p_recent_count: 5 });
-  const currentTurn = ctx?.turn_count ?? 0;
-  const resolvedPlayerInput = resolveMarkerChoiceInput(playerInput, ctx?.save?.last_choices);
-  const prompt = buildStoryPrompt(ctx, resolvedPlayerInput, currentTurn, [], regenerationFeedback);
-
-  const res = await fetchWithTimeout('https://api.deepseek.com/v1/chat/completions', {
-    method: 'POST',
-    headers: {
-      'Authorization': `Bearer ${env.DEEPSEEK_API_KEY}`,
-      'Content-Type': 'application/json'
-    },
-    body: JSON.stringify({
-      model: 'deepseek-v4-flash',
-      thinking: { type: 'disabled' },
-      messages: prompt.messages,
-      stream: false,
-      max_tokens: 5000
-    })
-  }, STORY_HEADERS_TIMEOUT_MS);
-
-  if (!res.ok) {
-    const text = await res.text();
-    throw new Error(`DeepSeek error: ${res.status} ${text.slice(0, 300)}`);
-  }
-  const data = await res.json();
-  const text = data?.choices?.[0]?.message?.content;
-  if (typeof text !== 'string' || !text.trim()) {
-    throw new Error('DeepSeek returned empty content');
-  }
-  console.log(JSON.stringify({ event: 'gamebuilder_timing', endpoint: '/api/feedback', request_id: requestId, game_id, phase: 'story_regenerate' }));
-  return { text, mode: prompt.mode };
 }
 
 // ─────────────────────────────────────────────
@@ -1594,6 +1561,11 @@ async function restoreTurnAfterFeedbackFailure(env, { game_id, turn_number, prev
   }
 }
 
+// Rollback-only — Story/Extract/Commit are never called from here. The
+// frontend re-runs the exact same normal-turn pipeline (/api/story SSE →
+// /api/extract → /api/commit-turn) with the returned original player input
+// plus the user's feedback text, so every future perf/behavior improvement
+// to that pipeline automatically applies to feedback regeneration too.
 async function handleFeedback(req, env) {
   const requestId = crypto.randomUUID();
   const { game_id, feedback, expected_turn_number } = await readJson(req);
@@ -1630,67 +1602,48 @@ async function handleFeedback(req, env) {
     return jsonResponse({ error: message, error_code: 'FEEDBACK_NO_SNAPSHOT', request_id: requestId }, 409);
   }
 
-  const turnNumber = rollback.rolled_back_turn_number;
   const resolvedInput = typeof rollback.resolved_input === 'string' ? rollback.resolved_input : '';
-  const restoreCtx = {
-    game_id, turn_number: turnNumber,
-    previous_save_data: rollback.previous_save_data,
-    deleted_turn_row: rollback.deleted_turn_row,
-    requestId
-  };
-
-  let narrativeText;
-  let storyMode;
-  try {
-    const generated = await generateStoryNarrativeOnce(env, game_id, resolvedInput, feedbackText, requestId);
-    narrativeText = generated.text;
-    storyMode = generated.mode;
-  } catch (error) {
-    await restoreTurnAfterFeedbackFailure(env, restoreCtx);
-    console.error('Feedback story regeneration failed:', { request_id: requestId, game_id, error: error.message });
-    return jsonResponse({ error: '피드백 재생성에 실패하여 기존 턴을 복구했습니다.', error_code: 'FEEDBACK_STORY_FAILED', request_id: requestId }, 502);
-  }
-
-  const extractResult = await runExtractPipeline(env, { game_id, narrative_text: narrativeText, player_input: resolvedInput, requestId });
-  if (extractResult.status >= 400) {
-    await restoreTurnAfterFeedbackFailure(env, restoreCtx);
-    console.error('Feedback extract failed:', { request_id: requestId, game_id, response: extractResult.body });
-    return jsonResponse({ error: '피드백 재생성에 실패하여 기존 턴을 복구했습니다.', error_code: 'FEEDBACK_EXTRACT_FAILED', request_id: requestId }, 502);
-  }
-
-  const playerAction = {
-    source: rollback.source || 'direct_text',
-    raw_input: resolvedInput,
-    resolved_input: resolvedInput,
-    choice_index: Number.isInteger(rollback.choice_index) ? rollback.choice_index : null,
-    choice_text: null
-  };
-
-  const commitResult = await runCommitPipeline(env, {
-    game_id,
-    turn_number: turnNumber,
-    content: narrativeText,
-    extract: extractResult.body.extract,
-    engine_patch: storyMode === 'opening' ? { opening_started: true } : {},
-    player_input: resolvedInput,
-    player_action: playerAction,
-    requestId
-  });
-
-  if (commitResult.status >= 400 || commitResult.body?.error) {
-    await restoreTurnAfterFeedbackFailure(env, restoreCtx);
-    console.error('Feedback commit failed:', { request_id: requestId, game_id, response: commitResult.body });
-    return jsonResponse({ error: '피드백 재생성에 실패하여 기존 턴을 복구했습니다.', error_code: 'FEEDBACK_COMMIT_FAILED', request_id: requestId }, 502);
-  }
-
   return jsonResponse({
-    ...commitResult.body,
-    narrative_text: narrativeText,
-    extract: extractResult.body.extract,
-    choices: extractResult.body.extract?.choices || [],
-    narrative_replacement: extractResult.body.narrative_replacement,
+    success: true,
+    rolled_back_turn_number: rollback.rolled_back_turn_number,
+    player_input: resolvedInput,
+    player_action: {
+      source: rollback.source || 'direct_text',
+      choice_index: Number.isInteger(rollback.choice_index) ? rollback.choice_index : null,
+      choice_text: null,
+      resolved_input: resolvedInput
+    },
+    feedback: feedbackText,
+    // Handed back to the frontend only so it can pass it to /api/feedback/restore
+    // if the regeneration that follows fails — never a new table/token/DO.
+    restore_payload: {
+      previous_save_data: rollback.previous_save_data,
+      deleted_turn_row: rollback.deleted_turn_row
+    },
     request_id: requestId
   });
+}
+
+// Thin wrapper around the existing restore RPC — used only when the
+// frontend's own normal-turn pipeline fails after a feedback rollback. No
+// LLM call, no Story/Extract/Commit here either.
+async function handleFeedbackRestore(req, env) {
+  const requestId = crypto.randomUUID();
+  const { game_id, turn_number, restore_payload } = await readJson(req);
+  if (!game_id || !Number.isInteger(turn_number) || !isPlainObject(restore_payload)) {
+    return jsonResponse({ error: 'game_id, integer turn_number and restore_payload required', request_id: requestId }, 400);
+  }
+  const restored = await restoreTurnAfterFeedbackFailure(env, {
+    game_id,
+    turn_number,
+    previous_save_data: restore_payload.previous_save_data,
+    deleted_turn_row: restore_payload.deleted_turn_row,
+    requestId
+  });
+  if (!restored) {
+    return jsonResponse({ error: '기존 턴 복구에 실패했습니다.', error_code: 'FEEDBACK_RESTORE_FAILED', request_id: requestId }, 502);
+  }
+  return jsonResponse({ ok: true, request_id: requestId });
 }
 
 // ═════════════════════════════════════════════
@@ -2252,7 +2205,7 @@ ${JSON.stringify(storyMasterSnapshot, null, 2).slice(0, 2000)}
 ${JSON.stringify(storyStateSnapshot, null, 2)}
 
 [최근 기억]
-${recentMemorySlice.map((m, index) => clipHeadTail(m.content || '', index === recentMemorySlice.length - 1 ? 5000 : 2500)).join('\n---\n')}`;
+${recentMemorySlice.map((m, index) => clipHeadTail(sanitizeRecentNarrativeForPrompt(m.content || ''), index === recentMemorySlice.length - 1 ? 5000 : 2500)).join('\n---\n')}`;
 
   // ─── 조립 ───
   const currentSceneSection = buildCurrentSceneSection(save, master.characters || {});
@@ -2939,9 +2892,17 @@ function resolveTtsDirection(rawDirection) {
 // this only shapes what gets sent to Fish Audio. Excess ellipsis is what
 // Fish Audio's s2.1-pro-free model reads as long pauses + pitch swings per
 // word (the actual cause of the "singing" delivery), so every ellipsis run
-// is removed here, not merely capped.
-const TTS_ELLIPSIS_RUN_RE = /[.…]{2,}/g;
+// is removed here, not merely capped. No literal ".."/"…" ever survives —
+// TTS gets real punctuation instead (space/comma/period), never dots.
 const TTS_DASH_RUN_RE = /[—–\-]{2,}/g;
+
+// A short token right before an ellipsis run that reads as a moan/
+// interjection/short answer rather than a regular content word — only these
+// become a comma (a real spoken pause). Every other mid-text ellipsis run
+// between two ordinary words collapses to a plain space instead, so
+// "19시부터 익일 7시까지……총……7명이……배치됩니다" doesn't turn into an
+// over-punctuated "..., 총, 7명이, 배치됩니다" run of commas.
+const TTS_INTERJECTION_RE = /(?:네|예|응|아|어|윽|앗|읏|하아|흑|큭|후|엇|음|와|헉|으응|아하앗)$/;
 
 function normalizeTtsText(rawText) {
   let text = typeof rawText === 'string' ? rawText : '';
@@ -2951,10 +2912,16 @@ function normalizeTtsText(rawText) {
   text = text.replace(/^[.…]{2,}\s*/, '');
   // 문장 끝을 감싸는 말줄임표는 자연스러운 마침표 하나로.
   text = text.replace(/\s*[.…]{2,}\s*$/, '.');
-  // 남은 단어 사이 말줄임표 반복은 자연스러운 쉼표로 — TTS가 과도한 정지·
-  // 피치 변화로 해석할 말줄임표 문자를 남기지 않는다. 신음·감탄 음절
-  // 자체(읏, 앗, 하아 등)는 그대로 유지된다.
-  text = text.replace(TTS_ELLIPSIS_RUN_RE, ', ');
+  // 남은 말줄임표: 직전 토큰이 신음/감탄이면 쉼표(실제 발화 정지)로, 일반
+  // 단어 사이는 공백으로 — 문법 분석 없이 제한된 신음 후보 목록만 사용한다.
+  const parts = text.split(/([.…]{2,})/);
+  let output = parts[0] || '';
+  for (let i = 1; i < parts.length; i += 2) {
+    const nextPart = parts[i + 1] || '';
+    const precedingWord = (output.match(/(\S+)\s*$/) || [])[1] || '';
+    output += TTS_INTERJECTION_RE.test(precedingWord) ? `, ${nextPart}` : ` ${nextPart}`;
+  }
+  text = output;
   text = text.replace(/\s{2,}/g, ' ');
   text = text.replace(/,\s*,/g, ',');
   text = text.replace(/,\s*\./g, '.');
@@ -4690,6 +4657,34 @@ function buildStoryStateSnapshot(save = {}, master = {}) {
     opening_started: save.opening_started === true,
     player_setup: isPlainObject(save.player_setup) ? save.player_setup : {}
   };
+}
+
+// A short token right before an ellipsis run that reads as an interjection/
+// moan/short answer rather than a regular word — only these keep the ".."
+// pause; every other mid-text ellipsis run collapses to a plain space so a
+// unit like "오늘……3병동……야간……근무" doesn't keep reading as word-by-word
+// gasping once it's shown back to the model as [최근 기억].
+const PROMPT_MEMORY_INTERJECTION_RE = /(?:네|예|응|아|어|윽|앗|읏|하아|흑|큭|후|엇|음|와|헉)$/;
+
+// DB에 저장된 game_memories는 절대 수정하지 않는다 — 이 함수는 Story
+// 프롬프트에 [최근 기억]으로 주입되는 사본에만 적용해, 과거에 저장된
+// 단어 단위 말줄임표 패턴("……")을 모델이 다시 모방하지 않게 한다.
+function sanitizeRecentNarrativeForPrompt(text) {
+  let result = typeof text === 'string' ? text : '';
+  // 문장 시작을 감싸는 말줄임표 제거.
+  result = result.replace(/^[.…]{2,}\s*/, '');
+  // 문장 끝을 감싸는 말줄임표는 마침표 하나로.
+  result = result.replace(/\s*[.…]{2,}\s*$/, '.');
+  // 남은 단어 사이 말줄임표: 직전 토큰이 짧은 감탄/호흡이면 ..을 유지하고,
+  // 그 외 일반 단어 사이는 공백으로 — 완벽한 문법 분석은 하지 않는다.
+  const parts = result.split(/([.…]{2,})/);
+  let output = parts[0] || '';
+  for (let i = 1; i < parts.length; i += 2) {
+    const nextPart = parts[i + 1] || '';
+    const precedingWord = (output.match(/(\S+)\s*$/) || [])[1] || '';
+    output += PROMPT_MEMORY_INTERJECTION_RE.test(precedingWord) ? `.. ${nextPart}` : ` ${nextPart}`;
+  }
+  return output.replace(/\s{2,}/g, ' ').trim();
 }
 
 // Preserves both ends of a long turn instead of chopping off whatever

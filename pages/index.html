@@ -646,7 +646,11 @@
         showResetModal();
       } else if (command === '/피드백') {
         if (!value) { showFeedbackModal(); return; }
-        await runFeedbackRegeneration(value, { onDone: message => ui.showSystemMessage(message) });
+        const rollback = await requestFeedbackRollback(value, message => ui.showSystemMessage(message));
+        if (rollback) {
+          ui.showSystemMessage('마지막 턴을 다시 만드는 중...');
+          await runFeedbackRegeneration(rollback, value);
+        }
       } else if (command === '/음성' && value === '켜기') {
         setAutoTts(true); ui.showSystemMessage('자동 음성을 켰습니다.');
       } else if (command === '/음성' && value === '끄기') {
@@ -668,30 +672,60 @@
       document.body.appendChild(overlay); overlay.querySelector('.cancel').focus();
     }
 
-    // Shared by both the /피드백 텍스트 명령 and the 피드백 팝업's "다시 생성"
-    // button — a single code path for "roll back the last committed turn and
-    // regenerate it with this feedback" so the two entry points can never
-    // drift into different behavior.
-    async function runFeedbackRegeneration(feedbackText, { onDone, onError } = {}) {
+    // /api/feedback now only rolls back the last committed turn and hands
+    // back the original player input/action — it never calls Story/Extract/
+    // Commit itself. Shared by both the /피드백 텍스트 명령 and the 피드백
+    // 팝업's "다시 생성" button so they can never drift into different
+    // rollback behavior. Returns the rollback response on success, or null
+    // (after reporting via onError) on failure — the popup uses this to
+    // decide whether to stay open.
+    async function requestFeedbackRollback(feedbackText, onError) {
       if (state.isStreaming) {
-        onError?.('다른 요청이 진행 중입니다. 잠시 후 다시 시도해 주세요.');
-        return false;
+        onError('다른 요청이 진행 중입니다. 잠시 후 다시 시도해 주세요.');
+        return null;
       }
-      state.isStreaming = true;
-      ui.setLoading(true, '마지막 턴을 다시 만드는 중...');
       try {
-        await api.feedback(state.gameId, feedbackText, state.turnCount);
-        await restoreToLastCommittedTurn('마지막 턴을 피드백에 따라 다시 생성했습니다.');
-        onDone?.('마지막 턴을 다시 만들었습니다.');
-        return true;
+        return await api.feedbackRollback(state.gameId, feedbackText, state.turnCount);
       } catch (error) {
-        const message = error.message || `피드백 재생성에 실패했습니다. [${error.status || 'UNKNOWN'}]`;
-        onError?.(message);
-        return false;
-      } finally {
-        state.isStreaming = false;
-        ui.setLoading(false);
+        onError(error.message || `피드백 재생성에 실패했습니다. [${error.status || 'UNKNOWN'}]`);
+        return null;
       }
+    }
+
+    // Runs after a successful rollback — from here on this is just a normal
+    // turn (real /api/story SSE, real typing, real Extract/Commit) with the
+    // original resolved input replayed and the feedback text injected as the
+    // highest-priority regeneration block. Any failure from here on is
+    // handled by runTurn()'s own pending.rollbackInfo branch (restore the
+    // rolled-back turn), not by this function.
+    async function runFeedbackRegeneration(rollback, feedbackText) {
+      // 기존 마지막 턴 UI 제거 — 이 앱은 항상 마지막 턴만 보여주므로 전체
+      // narrative/구분선/선택지를 비우면 충분하다.
+      ui.restoreNarrative('');
+      ui.els.choiceButtons.replaceChildren();
+      await runTurn({
+        playerInput: rollback.player_input,
+        source: rollback.player_action?.source || 'direct_text',
+        choiceIndex: Number.isInteger(rollback.player_action?.choice_index) ? rollback.player_action.choice_index : null,
+        choiceText: rollback.player_action?.choice_text || null,
+        regenerationFeedback: feedbackText,
+        expectedTurnNumber: rollback.rolled_back_turn_number - 1,
+        rollbackInfo: { turnNumber: rollback.rolled_back_turn_number, restorePayload: rollback.restore_payload }
+      });
+    }
+
+    // Best-effort recovery when a feedback-regeneration turn fails somewhere
+    // in Story/Extract/Commit — restores the rolled-back turn server-side,
+    // then re-syncs the screen to whatever is now actually committed
+    // (reusing restoreToLastCommittedTurn exactly like resume/discard do).
+    async function restoreFeedbackTurnAfterFailure(pending, defaultMessage) {
+      let message = defaultMessage;
+      try {
+        await api.feedbackRestore(state.gameId, pending.rollbackInfo.turnNumber, pending.rollbackInfo.restorePayload);
+      } catch (restoreError) {
+        message = '재생성과 기존 턴 복구에 실패했습니다. 화면을 새로 불러와 주세요.';
+      }
+      await restoreToLastCommittedTurn(message);
     }
 
     function showFeedbackModal() {
@@ -722,11 +756,15 @@
         cancelBtn.disabled = true; confirmBtn.disabled = true; textarea.disabled = true;
         errorEl.hidden = true;
         confirmBtn.textContent = '다시 생성하는 중...';
-        const ok = await runFeedbackRegeneration(value, { onError: showError });
+        // 팝업은 롤백 성공 시점에 즉시 닫는다 — 이후 Story/Extract/Commit은
+        // 일반 턴과 똑같이 보여야 하고, 그 단계의 실패는 팝업이 아니라
+        // 일반 턴 실패 UI(재시도 알림/자동 복구)가 처리한다.
+        const rollback = await requestFeedbackRollback(value, showError);
         submitting = false;
-        if (ok) {
+        if (rollback) {
           document.removeEventListener('keydown', onKey);
           overlay.remove();
+          await runFeedbackRegeneration(rollback, value);
         } else {
           cancelBtn.disabled = false; confirmBtn.disabled = false; textarea.disabled = false;
           confirmBtn.textContent = '다시 생성';
@@ -739,6 +777,23 @@
     // 최종 검증과 resolved_input 결정은 Worker가 한다.
     const DIRECT_MARKER_INPUT_RE = /^(?:[1-4]|[A-Da-d]|[①②③④])$/;
 
+    // Single common entry point for every turn — normal input, choice
+    // clicks, player-setup start, and feedback regeneration all build a
+    // pending object and hand it to retryStory(). regenerationFeedback/
+    // expectedTurnNumber/rollbackInfo are no-ops for a normal turn (all
+    // default to null) and only ever populated by runFeedbackRegeneration().
+    async function runTurn({
+      playerInput, source = 'direct_text', choiceIndex = null, choiceText = null,
+      regenerationFeedback = null, expectedTurnNumber = null, systemStart = false, rollbackInfo = null
+    } = {}) {
+      const nextTurn = (Number.isInteger(expectedTurnNumber) ? expectedTurnNumber : state.turnCount) + 1;
+      const playerAction = { source, raw_input: playerInput, choice_index: choiceIndex, choice_text: choiceText };
+      await retryStory({
+        input: playerInput, nextTurn, narrative: null, extract: null, mode: null,
+        narrativeElement: null, playerAction, regenerationFeedback, systemStart, rollbackInfo
+      });
+    }
+
     async function handleTurnInput(actionMeta = { source: 'direct_text' }) {
       const input = document.getElementById('chat-input').value.trim();
       if (!input || !state.gameId || state.isStreaming) return;
@@ -749,35 +804,71 @@
       const source = meta.source === 'choice_button'
         ? 'choice_button'
         : (DIRECT_MARKER_INPUT_RE.test(input) ? 'direct_marker' : 'direct_text');
-      const playerAction = {
-        source,
-        raw_input: input,
-        choice_index: Number.isInteger(meta.choice_index) ? meta.choice_index : null,
-        choice_text: typeof meta.choice_text === 'string' ? meta.choice_text : null
-      };
-      await retryStory({ input, nextTurn: state.turnCount + 1, narrative: null, extract: null, mode: null, narrativeElement: null, playerAction });
+      await runTurn({
+        playerInput: input, source,
+        choiceIndex: Number.isInteger(meta.choice_index) ? meta.choice_index : null,
+        choiceText: typeof meta.choice_text === 'string' ? meta.choice_text : null
+      });
+    }
+
+    // Feedback-regeneration turns fail open into a full restore-and-resync
+    // instead of the normal retry-notice UI — this is the one shared check
+    // every catch block below makes first. Returns true if it handled the
+    // failure (caller should stop), false for a normal turn (caller proceeds
+    // with its usual retry UI).
+    async function handleTurnFailureAsRollback(pending, message) {
+      if (!pending.rollbackInfo) return false;
+      ui.failCurrentNarrative();
+      await restoreFeedbackTurnAfterFailure(pending, message);
+      return true;
+    }
+
+    // Finalizes the typing animation exactly once per turn and applies any
+    // Extract-driven narrative correction only after that — called from
+    // whichever path reaches "the narrative is fully decided" first
+    // (reentry, an Extract failure, or a successful commit), regardless of
+    // whether the typing animation (renderDone) or the network calls
+    // (Extract/Commit) finished first.
+    async function finalizeRenderedNarrative(pending) {
+      if (pending.narrativeElement) return pending.narrativeElement;
+      await pending.renderDone;
+      pending.narrativeElement = ui.finalizeNarrative();
+      if (pending.narrativeElement && pending.narrativeReplacement) {
+        pending.narrativeElement.textContent = ui.stripBoldMarkers(pending.narrativeReplacement);
+      } else if (pending.narrativeElement && pending.contentAddition) {
+        pending.narrativeElement.textContent += `\n\n${ui.stripBoldMarkers(pending.contentAddition)}`;
+      }
+      return pending.narrativeElement;
     }
 
     async function retryStory(pending) {
-      state.isStreaming = true; ui.setLoading(true, '서사 생성 중');
+      state.isStreaming = true;
+      ui.setLoading(true, pending.regenerationFeedback ? '마지막 턴을 다시 만드는 중...' : '서사 생성 중');
       ui.clearPendingTurnActions();
       try {
-        const result = await stream.story(state.gameId, pending.input, state.turnCount, chunk => ui.appendNarrative(chunk), getFeedback());
+        // networkDone resolves once the full narrative text is in (Extract
+        // can start immediately); renderDone resolves once the paced typing
+        // queue has finished revealing every character (DOM-visible updates
+        // wait for this instead).
+        const { networkDone, renderDone } = stream.story(
+          state.gameId, pending.input, state.turnCount, chunk => ui.appendNarrative(chunk),
+          getFeedback(), pending.regenerationFeedback || null
+        );
+        pending.renderDone = renderDone;
+        const result = await networkDone;
         pending.narrative = result.text; pending.mode = result.mode;
         pending.timing = { ...(pending.timing || {}), story: result.timing };
-        // finalizeNarrative() returns the exact DOM node it just finalized —
-        // every later step that needs to touch "this turn's narrative" uses
-        // this direct reference instead of re-scanning for "the last .narrative".
-        pending.narrativeElement = ui.finalizeNarrative();
         if (result.mode === 'reentry') {
+          await finalizeRenderedNarrative(pending);
           state.inputLocked = false;
           ui.renderChoices(ui.parseChoices(result.text), submitChoice);
           return;
         }
         await retryExtract(pending);
       } catch (error) {
-        ui.failCurrentNarrative();
         ui.setChoicesEnabled(true);
+        if (await handleTurnFailureAsRollback(pending, '피드백 재생성에 실패하여 기존 턴을 복구했습니다.')) return;
+        ui.failCurrentNarrative();
         const code = error.status || 'UNKNOWN';
         const suffix = error.requestId ? ` · 요청 ${error.requestId}` : '';
         if (pending.systemStart) {
@@ -805,6 +896,8 @@
       ui.clearUncommittedNarrativeBadges();
       let failed = false;
       try {
+        // Started as soon as the network text is ready — runs concurrently
+        // with the still-typing display queue, not after it.
         const result = await api.extract(state.gameId, pending.narrative, pending.nextTurn, pending.input);
         console.info('[extract-timing]', result.timing);
         pending.extract = result.extract;
@@ -813,25 +906,25 @@
         pending.extractDegraded = result.extract_degraded === true;
         pending.timing = { ...(pending.timing || {}), extract: result.timing };
         // Story가 생성한 [3. 선택지] 블록은 본문에 그대로 표시한다 (제거 호출 삭제).
+        // The actual DOM patch is deferred to finalizeRenderedNarrative() —
+        // the typing animation may still be running when Extract returns.
         if (result.narrative_replacement) {
-          // A CSA-omission fix: the Worker already inserted the correction
-          // before [2. 플레이어 상황판] server-side — replace pending.narrative
-          // and this turn's exact Story element with that corrected string,
-          // never append blindly to whatever ".narrative" happens to be last.
           pending.narrative = result.narrative_replacement;
-          if (pending.narrativeElement) pending.narrativeElement.textContent = ui.stripBoldMarkers(result.narrative_replacement);
+          pending.narrativeReplacement = result.narrative_replacement;
         } else if (result.content_addition) {
           // Legacy-compat only — current Worker responses always carry
           // narrative_replacement instead and leave this null.
           pending.narrative = `${pending.narrative}\n\n${result.content_addition}`;
-          if (pending.narrativeElement) pending.narrativeElement.textContent += `\n\n${ui.stripBoldMarkers(result.content_addition)}`;
+          pending.contentAddition = result.content_addition;
         }
         await retryCommit(pending);
       } catch (error) {
         failed = true;
+        if (await handleTurnFailureAsRollback(pending, '피드백 재생성에 실패하여 기존 턴을 복구했습니다.')) return;
         const code = error.details?.error_code || error.status || 'UNKNOWN';
         const requestId = error.details?.request_id;
         const suffix = requestId ? ` · 요청 ${requestId}` : '';
+        await finalizeRenderedNarrative(pending);
         ui.markLastNarrativeUncommitted();
         // H2 item 13: Extract hard failures are now all one path — H1
         // removed the blocking NPC-contract check, and H2's degraded
@@ -863,6 +956,8 @@
       ui.setLoading(true, '턴 저장 중');
       ui.clearPendingTurnActions();
       try {
+        // Runs immediately after Extract, in parallel with the still-typing
+        // display queue — only the DOM updates below wait for renderDone.
         const saved = await api.commitTurn(state.gameId, pending.nextTurn, pending.narrative, pending.extract, pending.mode === 'opening' ? { opening_started: true } : {}, pending.input, pending.playerAction);
         state.turnCount = saved.turn_count; ui.updateMeta(null, state.turnCount);
         pending.timing = { ...(pending.timing || {}), commit: saved.timing };
@@ -870,15 +965,35 @@
         if (saved.npc_stat_changes) pending.extract.npc_stat_changes = saved.npc_stat_changes;
         if (Number.isInteger(saved.image_id)) pending.extract.image_id = saved.image_id;
         if (typeof saved.image_scene_role === 'string') pending.extract.image_scene_role = saved.image_scene_role;
-        // Keeps 어플 정보 (and anything else reading state.context.save)
-        // current immediately after commit, instead of showing the
-        // pre-commit snapshot until the next full /api/context reload.
-        if (saved.state_patch) {
+        if (pending.rollbackInfo) {
+          // A feedback-regenerated commit's patch is computed against the
+          // rolled-back (pre-turn) save, not against whatever state.context.save
+          // still holds client-side from the cancelled turn — incrementally
+          // merging the new patch onto that stale base could leave fields the
+          // cancelled turn changed (but this one doesn't) stuck at their old
+          // values. A fresh full reload is the only way to guarantee this
+          // matches the server exactly.
+          try {
+            const refreshed = await api.context(state.gameId);
+            state.context = refreshed.context || state.context;
+          } catch (error) {
+            console.error('post-feedback context refresh failed', error);
+          }
+        } else if (saved.state_patch) {
+          // Keeps 어플 정보 (and anything else reading state.context.save)
+          // current immediately after commit, instead of showing the
+          // pre-commit snapshot until the next full /api/context reload.
           state.context = state.context || {};
           state.context.save = deepMergeStatePatch(state.context.save, saved.state_patch);
         }
         ui.clearUncommittedNarrativeBadges();
         saveFeedback([]);
+
+        // Screen updates (narrative text/choices/sidebar/media/scroll) wait
+        // for the typing animation to actually finish — everything above
+        // this point (Story/Extract/Commit's own network calls) never was.
+        await finalizeRenderedNarrative(pending);
+
         // H2 item 12: a degraded turn saved narrative + choices only — NPC
         // stats/mind/image are all untouched, so the sidebar and any shown
         // image must keep showing whatever was already there, and there is
@@ -903,11 +1018,13 @@
             .reduce((sum, value) => sum + (value || 0), 0)
         });
       } catch (error) {
+        if (await handleTurnFailureAsRollback(pending, '피드백 재생성에 실패하여 기존 턴을 복구했습니다.')) return;
         if (error.status === 409) {
           document.getElementById('chat-input').value = pending.input;
           ui.showSystemMessage('다른 창에서 게임이 먼저 진행되었습니다. 최신 상태를 다시 불러왔습니다.');
           await loadGameContext();
         } else {
+          await finalizeRenderedNarrative(pending);
           const code = error.details?.error_code || error.status || 'UNKNOWN';
           const requestId = error.details?.request_id;
           const suffix = requestId ? ` · 요청 ${requestId}` : '';
@@ -1003,7 +1120,7 @@
       if (!state.gameId || state.isStreaming || state.startupRequested) return;
       state.startupRequested = true;
       try {
-        await retryStory({ input: '__START_PLAYER_SETUP__', nextTurn: state.turnCount + 1, narrative: null, extract: null, mode: 'player_setup', systemStart: true });
+        await runTurn({ playerInput: '__START_PLAYER_SETUP__', systemStart: true });
       } finally {
         state.startupRequested = false;
       }

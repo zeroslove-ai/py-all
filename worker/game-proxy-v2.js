@@ -2181,7 +2181,7 @@ ${JSON.stringify({ rulebook_address: master.rulebook_address }, null, 2)}`;
   const suggestionPanelData = buildActiveSuggestionPanelText(save, master.characters || {});
   const csaPanelData = buildCsaPanelText(save);
   const hypnosisCapability = calculateHypnosisCapability(save, master);
-  const hypnosisSummaryText = buildHypnosisStatusPanelData(hypnosisCapability);
+  const hypnosisSummaryText = buildHypnosisStatusPanelData(hypnosisCapability, resolveHypnosisStoryState(save));
   const playerStatusPanel = `
 
 [PLAYER STATUS PANEL CONTRACT — HIGHEST PRIORITY FOR SECTION 2]
@@ -2402,7 +2402,7 @@ npc_emotion.physical_reaction은 표정, 시선, 자세, 목소리, 손동작, �
 직전 저장된 npc_emotion 문장을 그대로 복사하거나 단어만 바꿔치기하지 마라. 이번 턴 서사에서 새로 일어난 인식·감정·신체 변화만 기록하고, 변화가 작더라도 직전 문장을 그대로 반복하지 마라. 일시적인 신체 반응이나 순간의 동요를 사랑, 영구 복종, 완전한 욕망으로 자동 확정하지 말고, 갈등·혼란·자기합리화가 남아 있다면 그대로 유지해라.
 
 [NPC STAT DELTA CONTRACT]
-npc_stat_changes만 반환한다. 서사에 숫자가 없어도 대사·행동·표정·판단의 실제 변화를 근거로 판단하되 변화 없는 반복 대화는 0이다. 의미 있는 호의·편안함·자발적 대화 지속은 호감 +1~2, 의심 완화·정직성 확인·도움 수용은 신뢰 +1~2, 부탁 자발 수용·자기합리화·자연스러운 따름은 순응 +1~3을 검토한다. 무례는 호감 -1~-2, 거짓말 발각·모순·신분 의심은 신뢰 -1~-3, 명확한 거부는 순응 -1~-3을 검토한다. 실제 반응 변화가 명백하면 모든 값을 기계적으로 0으로 두지 마라. 최면깊이는 플레이어가 어플을 사용해 실제로 최면을 시도·성공·실패·각성시켰거나 활성 암시가 작동했을 때만 변화하며, 일반 대화·설득만으로는 변화하지 않는다. 저항력은 항상 0이다. 한도는 호감·신뢰·최면 -5~+5, 순응 일반 -3~+3·최면 사건 -5~+5이고 ±4~5는 중요한 전환에만 쓴다. reason은 서사 근거 한 문장이다.
+npc_stat_changes만 반환한다. 서사에 숫자가 없어도 대사·행동·표정·판단의 실제 변화를 근거로 판단하되 변화 없는 반복 대화는 0이다. 의미 있는 호의·편안함·자발적 대화 지속은 호감 +1~2, 의심 완화·정직성 확인·도움 수용은 신뢰 +1~2, 부탁 자발 수용·자기합리화·자연스러운 따름은 순응 +1~3을 검토한다. 무례는 호감 -1~-2, 거짓말 발각·모순·신분 의심은 신뢰 -1~-3, 명확한 거부는 순응 -1~-3을 검토한다. 실제 반응 변화가 명백하면 모든 값을 기계적으로 0으로 두지 마라. 최면깊이 delta는 Worker가 결정하므로 항상 0을 반환하고, 현재 NPC의 활성 암시가 실제 수행되면 reason은 "활성 암시 실제 수행", 활성이나 미수행이면 "활성 암시 미수행", 없으면 "활성 암시 없음"으로만 쓴다. 등록·시도·계획만으로 수행 처리하지 않는다. 저항력은 항상 0이다. 한도는 호감·신뢰·최면 -5~+5, 순응 일반 -3~+3·최면 사건 -5~+5이고 ±4~5는 중요한 전환에만 쓴다. reason은 서사 근거 한 문장이다.
 
 [FIRST ENCOUNTER CONTRACT]
 저장된 npc_encounters에 현재 NPC(character_id) 기록이 없고 이번이 실제로 처음 직접 조우한 장면일 때만 first_encounter_stats에 호감도·신뢰도를 0~35 사이 정수로 판단해 반환한다. 단순히 배경에 등장했거나 멀리서 본 것만으로는 첫 직접 조우가 아니다 — 직접 대화, 응대, 신체 접촉처럼 명확한 상호작용이 있어야 첫 직접 조우로 판단한다. 공식이나 랜덤 없이, 플레이어의 저장된 외형·복장·직업·말투·현재 태도와 NPC의 성격·가치관·경계심·현재 상황을 근거로 종합적으로 정한다. 제공되지 않은 정보를 지어내지 마라. 두 수치는 같을 필요가 없고 NPC 성격에 따라 결과가 달라져야 한다. 이미 조우한 NPC이거나 처음 만나는 장면이 아니면 first_encounter_stats는 반드시 null이다. 실제로 처음 직접 조우한 장면인데 이 판단을 빠뜨리지 마라 — 반드시 first_encounter_stats를 채워야 한다.
@@ -2765,10 +2765,25 @@ function buildSavePatch(extract, enginePatch = {}, summaryPlan = null, previousS
     const structured = hasStructuredEncounter(previousSave, characterId);
     const legacy = !structured && hasLegacyEncounterEvidence(previousSave, characterId);
     const firstEncounterStats = !structured && !legacy ? normalizeFirstEncounterStats(extract.first_encounter_stats) : null;
+    const suggestionPatch = applySuggestionAction(previousSave, extract.suggestion_action, characterId, turnNumber);
+    const effectiveActiveSuggestions = suggestionPatch?.active_suggestions
+      ? { ...normalizeLegacyActiveSuggestions(previousSave?.active_suggestions), ...suggestionPatch.active_suggestions }
+      : previousSave?.active_suggestions;
+    const hypnosisDepthChange = resolveHypnosisDepthDelta({
+      previousDepth: previousSave?.npc_stats?.[characterId]?.최면깊이,
+      currentCharacterId: characterId,
+      activeSuggestions: effectiveActiveSuggestions,
+      hypnosisReason: extract.npc_stat_changes?.최면깊이?.reason,
+      extractDegraded: extract.extract_degraded === true
+    });
+    const workerStatChangeInput = {
+      ...extract.npc_stat_changes,
+      최면깊이: hypnosisDepthChange
+    };
 
     const statChangeInput = firstEncounterStats
-      ? { ...extract.npc_stat_changes, 호감도: { delta: 0, reason: '' }, 신뢰도: { delta: 0, reason: '' } }
-      : extract.npc_stat_changes;
+      ? { ...workerStatChangeInput, 호감도: { delta: 0, reason: '' }, 신뢰도: { delta: 0, reason: '' } }
+      : workerStatChangeInput;
     const statUpdate = applyNpcStatChanges(previousSave?.npc_stats?.[characterId], statChangeInput);
     if (statUpdate.errors.length) console.warn('NPC stat delta rejected:', { characterId, errors: statUpdate.errors });
 
@@ -2804,7 +2819,6 @@ function buildSavePatch(extract, enginePatch = {}, summaryPlan = null, previousS
       } };
     }
 
-    const suggestionPatch = applySuggestionAction(previousSave, extract.suggestion_action, characterId, turnNumber);
     if (suggestionPatch) Object.assign(patch, suggestionPatch);
   }
   const setupComplete = isSetupComplete(previousSave);
@@ -3464,7 +3478,7 @@ function buildActiveSuggestionSection(save, characters = {}) {
     const lines = list.map(item => `- ${item.content}\n  강도: ${item.strength}\n  적용 턴: ${item.created_turn}`).join('\n');
     return `${name}(${characterId})\n${lines}`;
   }).join('\n\n');
-  return `\n\n[ACTIVE PERSONAL SUGGESTIONS — ESTABLISHED FACTS]\n\n${blocks}\n\n규칙:\n- 위 암시는 각 NPC에게 이미 성공해 활성 상태다.\n- 성공 여부를 다시 의심하거나 같은 암시를 다시 거는 장면을 만들지 않는다.\n- 해당 NPC는 암시 범위 안의 요청을 자기 성격에 맞게 자연스럽게 따른다.\n- 암시 범위를 벗어난 무조건 복종으로 확대하지 않는다.\n- 다른 NPC에게 잘못 적용하지 않는다.\n- 활성 암시 슬롯이 가득 찼으면 신규 암시는 반드시 실패한다.\n- 사용자가 명시적으로 삭제·해제·수정·교체하지 않은 기존 암시는 절대 변경하지 않는다.\n- 대상 NPC에게 기존 활성 암시가 없으면 기존 암시 수정으로 처리하지 않는다.\n- 실패한 암시의 효과나 신체 반응을 발생시키지 않는다.\n\n[금지 표현]\n- 암시가 먹힌 것 같다\n- 암시가 제대로 적용됐는지 모르겠다\n- 다시 걸어봐야겠다\n- 효과를 확인해야겠다\n- 아까 최면이 성공했는지 확실하지 않다`;
+  return `\n\n[ACTIVE PERSONAL SUGGESTIONS — ESTABLISHED FACTS]\n\n${blocks}\n\n규칙:\n- 위 암시는 각 NPC에게 이미 성공해 활성 상태다.\n- 성공 여부를 다시 의심하거나 같은 암시를 다시 거는 장면을 만들지 않는다.\n- 해당 NPC는 암시 범위 안의 요청을 자기 성격에 맞게 자연스럽게 따른다. 실제 수행 효과는 최면깊이에 누적될 수 있으나, 같은 내용을 반복 문장으로 쓰지 않는다.\n- 암시 범위를 벗어난 무조건 복종으로 확대하지 않는다.\n- 다른 NPC에게 잘못 적용하지 않는다.\n- 활성 암시 슬롯이 가득 찼으면 신규 암시는 반드시 실패한다.\n- 사용자가 명시적으로 삭제·해제·수정·교체하지 않은 기존 암시는 절대 변경하지 않는다.\n- 대상 NPC에게 기존 활성 암시가 없으면 기존 암시 수정으로 처리하지 않는다.\n- 실패한 암시의 효과나 신체 반응을 발생시키지 않는다.\n\n[금지 표현]\n- 암시가 먹힌 것 같다\n- 암시가 제대로 적용됐는지 모르겠다\n- 다시 걸어봐야겠다\n- 효과를 확인해야겠다\n- 아까 최면이 성공했는지 확실하지 않다`;
 }
 
 // Pre-formats every currently active personal suggestion, grouped by real
@@ -3523,6 +3537,25 @@ const HYPNOSIS_STRENGTH_TIERS = ['약함', '중간', '강함'];
 function hypnosisStrengthRank(strength) {
   const index = HYPNOSIS_STRENGTH_TIERS.indexOf(strength);
   return index === -1 ? 0 : index;
+}
+
+function resolveHypnosisDepthDelta({ previousDepth, currentCharacterId, activeSuggestions, hypnosisReason, extractDegraded }) {
+  const depth = Math.max(0, Math.min(100, Number(previousDepth) || 0));
+  if (extractDegraded || !currentCharacterId || currentCharacterId === 'narrator') {
+    return { delta: 0, reason: '최면 영향 없음' };
+  }
+  const suggestions = normalizeLegacyActiveSuggestions(activeSuggestions);
+  const active = Array.isArray(suggestions[currentCharacterId])
+    ? suggestions[currentCharacterId].filter(item => item?.active)
+    : [];
+  if (!active.length) {
+    return depth > 0
+      ? { delta: -1, reason: '암시 해제 후 자연 회복' }
+      : { delta: 0, reason: '최면 영향 없음' };
+  }
+  if (hypnosisReason !== '활성 암시 실제 수행') return { delta: 0, reason: '활성 암시 유지' };
+  const strongestRank = active.reduce((max, item) => Math.max(max, hypnosisStrengthRank(item?.strength)), 0);
+  return { delta: Math.min(3, strongestRank + 1), reason: '활성 암시 수행' };
 }
 
 // Strength and slot-count are deliberately separate growth axes (stage
@@ -3700,14 +3733,29 @@ function buildCurrentHypnosisCapabilitySection(capability) {
   return `\n\n[CURRENT HYPNOSIS APP CAPABILITY — HARD CONSTRAINT]\n\n현재 레벨: Lv.${currentLevel}\n사용 가능한 최면 강도: ${availableStrength}\n암시 슬롯: 활성 ${activeCount} / 최대 ${maxActive} (남은 슬롯 ${remainingSlots})\n\n이번 턴 실제로 가능한 어플 행동:\n- 새 암시 생성: ${canCreateSuggestion ? '가능' : '불가능'}\n- 기존 암시를 현재 허용 강도 안에서 수정: ${canEditSameStrength ? '가능' : '불가능(활성 암시 없음)'}\n- 기존 암시 OFF 또는 삭제: ${canDisableOrDelete ? '가능' : '불가능(활성 암시 없음)'}\n- 기존 암시 강도 올리기: ${canIncreaseStrength ? '가능' : '불가능'}\n- 중간 강도 사용: ${canUseMedium ? '가능' : '불가능'}\n- 강한 강도 사용: ${canUseStrong ? '가능' : '불가능'}\n${slotBan}${strengthBan}${increaseBan}\n- 슬롯이 가득 차 있어도 기존 암시를 같은 허용 강도 안에서 수정하거나 OFF/삭제하는 선택지는 항상 만들 수 있다.\n- 이미 활성 상태인 암시의 효과를 이용해 평범한 대화나 부탁을 하는 선택지는 항상 만들 수 있다. 단, 그 대화 자체를 암시 강화나 최면 심화로 표현하지 마라.\n- [3. 선택지] 네 개는 위 조건을 모두 만족해야 한다. 하나라도 위반하면 안 된다.`;
 }
 
-// Pre-computed display text for [2. 플레이어 상황판]'s 최면 어플 요약 4줄 — the
+// Pre-computed display text for [2. 플레이어 상황판]'s 최면 어플 요약 5줄 — the
 // model transcribes this verbatim instead of counting slots or guessing the
 // current strength tier itself.
-function buildHypnosisStatusPanelData(capability) {
+function resolveHypnosisStoryState(save = {}) {
+  const characterId = typeof save?.last_character_id === 'string' ? save.last_character_id : null;
+  const previousDepth = Math.max(0, Math.min(100, Number(save?.npc_stats?.[characterId]?.최면깊이) || 0));
+  const activeSuggestions = normalizeLegacyActiveSuggestions(save?.active_suggestions);
+  const activeCount = characterId && characterId !== 'narrator'
+    ? (Array.isArray(activeSuggestions[characterId]) ? activeSuggestions[characterId].filter(item => item?.active).length : 0)
+    : 0;
+  const previousReason = save?.npc_stat_changes?.[characterId]?.최면깊이?.reason;
+  const status = activeCount
+    ? (previousReason === '활성 암시 수행' ? '활성화' : '유지')
+    : (previousDepth > 0 ? '회복' : '정상');
+  return { characterId, previousDepth, activeCount, status };
+}
+
+function buildHypnosisStatusPanelData(capability, hypnosisState = {}) {
   return [
     `📱 최면 어플: Lv.${capability.current_level} · 경험치 ${capability.exp} / 다음 레벨까지 ${capability.next_level_exp}`,
     `🌀 암시 슬롯: 활성 ${capability.active_count} / 최대 ${capability.max_active} · 남은 슬롯 ${capability.remaining_slots}`,
     `⚡ 사용 가능 강도: ${capability.available_strength}`,
+    `🧠 현재 NPC 최면 상태: 깊이 ${hypnosisState.previousDepth || 0} · 활성 암시 ${hypnosisState.activeCount || 0}개 · ${hypnosisState.status || '정상'}`,
     `🌐 상식 개변: 활성 ${capability.csa_active_count} / 최대 ${capability.csa_max_active} · 오늘 사용 ${capability.csa_daily_used} / 한도 ${capability.csa_daily_limit}`
   ].join('\n');
 }
@@ -5107,6 +5155,7 @@ export {
   selectImageId,
   calculateProgress,
   applyNpcStatChanges,
+  resolveHypnosisDepthDelta,
   getCsaLimits,
   applyCsaAction,
   isCsaApplicable,
@@ -5148,6 +5197,7 @@ export {
   hypnosisStrengthRank,
   normalizeStrengthForStorage,
   buildCurrentHypnosisCapabilitySection,
+  resolveHypnosisStoryState,
   buildHypnosisStatusPanelData,
   findInfeasibleChoices,
   repairInfeasibleChoices,

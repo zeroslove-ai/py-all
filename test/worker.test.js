@@ -13,6 +13,7 @@ import {
   normalizeImageCatalog,
   selectImageId,
   applyNpcStatChanges,
+  resolveHypnosisDepthDelta,
   getCsaLimits,
   applyCsaAction,
   isCsaApplicable,
@@ -55,6 +56,7 @@ import {
   getHypnosisSuggestionLimits,
   hypnosisStrengthRank,
   buildCurrentHypnosisCapabilitySection,
+  resolveHypnosisStoryState,
   buildHypnosisStatusPanelData,
   findInfeasibleChoices,
   getApplicableCsaEntries,
@@ -555,6 +557,33 @@ test('NPC stat deltas are Worker-calculated, bounded, and preserve hypnosis resi
   assert.equal(update.changes.신뢰도.delta, 0);
   assert.match(update.errors.join('\n'), /신뢰도: delta -8 exceeds allowed ±5/);
   assert.match(update.errors.join('\n'), /최면저항력: non-zero delta ignored/);
+});
+
+test('hypnosis depth is Worker-owned: strongest active suggestion executes once, otherwise it holds or recovers', () => {
+  const active = strength => ({ heroine1: [{ active: true, strength }] });
+  assert.deepEqual(resolveHypnosisDepthDelta({ previousDepth: 10, currentCharacterId: 'heroine1', activeSuggestions: active('약함'), hypnosisReason: '활성 암시 실제 수행', extractDegraded: false }), { delta: 1, reason: '활성 암시 수행' });
+  assert.deepEqual(resolveHypnosisDepthDelta({ previousDepth: 10, currentCharacterId: 'heroine1', activeSuggestions: active('중간'), hypnosisReason: '활성 암시 실제 수행', extractDegraded: false }), { delta: 2, reason: '활성 암시 수행' });
+  assert.deepEqual(resolveHypnosisDepthDelta({ previousDepth: 10, currentCharacterId: 'heroine1', activeSuggestions: active('강함'), hypnosisReason: '활성 암시 실제 수행', extractDegraded: false }), { delta: 3, reason: '활성 암시 수행' });
+  assert.deepEqual(resolveHypnosisDepthDelta({ previousDepth: 10, currentCharacterId: 'heroine1', activeSuggestions: { heroine1: [{ active: true, strength: '약함' }, { active: true, strength: '강함' }] }, hypnosisReason: '활성 암시 실제 수행', extractDegraded: false }), { delta: 3, reason: '활성 암시 수행' });
+  assert.deepEqual(resolveHypnosisDepthDelta({ previousDepth: 10, currentCharacterId: 'heroine1', activeSuggestions: active('강함'), hypnosisReason: '활성 암시 미수행', extractDegraded: false }), { delta: 0, reason: '활성 암시 유지' });
+  assert.deepEqual(resolveHypnosisDepthDelta({ previousDepth: 12, currentCharacterId: 'heroine1', activeSuggestions: {}, hypnosisReason: '활성 암시 실제 수행', extractDegraded: false }), { delta: -1, reason: '암시 해제 후 자연 회복' });
+  assert.deepEqual(resolveHypnosisDepthDelta({ previousDepth: 0, currentCharacterId: 'heroine1', activeSuggestions: {}, hypnosisReason: '활성 암시 없음', extractDegraded: false }), { delta: 0, reason: '최면 영향 없음' });
+  assert.deepEqual(resolveHypnosisDepthDelta({ previousDepth: 12, currentCharacterId: 'narrator', activeSuggestions: active('강함'), hypnosisReason: '활성 암시 실제 수행', extractDegraded: false }), { delta: 0, reason: '최면 영향 없음' });
+  assert.deepEqual(resolveHypnosisDepthDelta({ previousDepth: 12, currentCharacterId: 'heroine1', activeSuggestions: active('강함'), hypnosisReason: '활성 암시 실제 수행', extractDegraded: true }), { delta: 0, reason: '최면 영향 없음' });
+});
+
+test('buildSavePatch ignores Extract hypnosis delta and uses the Worker result', () => {
+  const patch = buildSavePatch({
+    character_id: 'heroine1',
+    extract_degraded: false,
+    npc_stat_changes: { 최면깊이: { delta: 5, reason: '활성 암시 실제 수행' } }
+  }, {}, null, {
+    npc_stats: { heroine1: { 최면깊이: 10, 최면저항력: 65 } },
+    active_suggestions: { heroine1: [{ id: 's1', active: true, strength: '중간', content: '따르기 쉽다' }] }
+  }, 12);
+  assert.equal(patch.npc_stats.heroine1.최면깊이, 12);
+  assert.deepEqual(patch.npc_stat_changes.heroine1.최면깊이, { delta: 2, reason: '활성 암시 수행' });
+  assert.equal(patch.npc_stats.heroine1.최면저항력, 65);
 });
 
 test('NPC obedience is capped at three without a hypnosis-depth event', () => {
@@ -1739,13 +1768,15 @@ test('first encounter stats round decimals and ignore same-turn affinity/trust d
   assert.equal(patch.npc_stats.heroine9.신뢰도, 9);
 });
 
-test('obedience and hypnosis-depth deltas still apply normally on a first-encounter turn', () => {
+test('obedience and Worker-owned hypnosis depth apply on a first-encounter turn with an executed active suggestion', () => {
   const extract = {
     character_id: 'heroine9',
     first_encounter_stats: { 호감도: 10, 신뢰도: 10, reason: 'r' },
-    npc_stat_changes: { 순응도: { delta: 2, reason: '자연스러운 수용' }, 최면깊이: { delta: 2, reason: '명확한 최면 성공' } }
+    npc_stat_changes: { 순응도: { delta: 2, reason: '자연스러운 수용' }, 최면깊이: { delta: 0, reason: '활성 암시 실제 수행' } }
   };
-  const patch = buildSavePatch(extract, {}, null, {}, 1, '');
+  const patch = buildSavePatch(extract, {}, null, {
+    active_suggestions: { heroine9: [{ id: 's1', active: true, strength: '중간', content: '요청을 자연스럽게 따른다' }] }
+  }, 1, '');
   assert.equal(patch.npc_stats.heroine9.순응도, 2);
   assert.equal(patch.npc_stats.heroine9.최면깊이, 2);
 });
@@ -4060,18 +4091,41 @@ test('calculateHypnosisCapability computes CSA active/max/daily numbers from sav
   assert.equal(capability.csa_daily_limit, limits.daily_limit);
 });
 
-test('buildHypnosisStatusPanelData renders the exact four-line summary format with no invented numbers', () => {
+test('buildHypnosisStatusPanelData renders the Worker-derived current-NPC depth status', () => {
   const capability = calculateHypnosisCapability({
     player_progress: { level: 1, exp: 0 },
     active_suggestions: { heroine1: [{ content: 'a', strength: '약함', active: true }] }
   });
-  const text = buildHypnosisStatusPanelData(capability);
+  const state = resolveHypnosisStoryState({
+    last_character_id: 'heroine1',
+    npc_stats: { heroine1: { 최면깊이: 12 } },
+    npc_stat_changes: { heroine1: { 최면깊이: { reason: '활성 암시 수행' } } },
+    active_suggestions: { heroine1: [{ content: 'a', strength: '약함', active: true }] }
+  });
+  const text = buildHypnosisStatusPanelData(capability, state);
   assert.equal(text, [
     '📱 최면 어플: Lv.1 · 경험치 0 / 다음 레벨까지 10',
     '🌀 암시 슬롯: 활성 1 / 최대 1 · 남은 슬롯 0',
     '⚡ 사용 가능 강도: 약함',
+    '🧠 현재 NPC 최면 상태: 깊이 12 · 활성 암시 1개 · 활성화',
     '🌐 상식 개변: 활성 0 / 최대 1 · 오늘 사용 0 / 한도 1'
   ].join('\n'));
+});
+
+test('Story and Extract prompts keep hypnosis progression compact and Worker-owned', () => {
+  const save = {
+    player_setup: { status: 'complete' }, player: { name: '민준', job: '의사' }, opening_started: true,
+    last_character_id: 'heroine1', npc_stats: { heroine1: { 최면깊이: 12 } },
+    npc_stat_changes: { heroine1: { 최면깊이: { reason: '활성 암시 수행' } } },
+    active_suggestions: { heroine1: [{ content: '요청을 자연스럽게 따른다', strength: '중간', active: true }] }
+  };
+  const story = buildStoryPrompt({ master: { characters: { heroine1: { name: '한소영' } } }, save, recent_memories: [] }, '계속', 5).messages[0].content;
+  const extract = buildExtractPrompt('한소영이 요청을 받아들인다.', '계속', { master: {}, save }, [], 6);
+  assert.match(story, /현재 NPC 최면 상태: 깊이 12 · 활성 암시 1개 · 활성화/);
+  assert.match(story, /실제 수행 효과는 최면깊이에 누적될 수 있으나/);
+  assert.match(extract, /최면깊이 delta는 Worker가 결정하므로 항상 0을 반환/);
+  assert.match(extract, /활성 암시 실제 수행/);
+  assert.match(extract, /등록·시도·계획만으로 수행 처리하지 않는다/);
 });
 
 test('buildCurrentHypnosisCapabilitySection bans new/overlapping-suggestion phrases when slots are full', () => {

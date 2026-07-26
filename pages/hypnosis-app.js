@@ -167,11 +167,106 @@ window.hypnosisApp = (() => {
     showDialog('변경사항 적용',summary.join('\n'),[{label:'계속 편집',run:()=>{}},{label:'적용',run:proceed}]);
   }
 
+  function manualSection(title, options = {}) {
+    const details = el('details', 'app-manual-section');
+    details.open = options.open === true;
+    details.appendChild(el('summary', '', title));
+    const content = el('div', 'app-manual-section-body');
+    details.appendChild(content);
+    return { details, content };
+  }
+
+  function appendManualList(root, items, ordered = false) {
+    const list = el(ordered ? 'ol' : 'ul', 'app-manual-list');
+    (Array.isArray(items) ? items : []).forEach(item => list.appendChild(el('li', '', String(item))));
+    root.appendChild(list);
+  }
+
+  function appendManualTiers(root, tiers, includeDescription = false) {
+    (Array.isArray(tiers) ? tiers : []).forEach(tier => {
+      const details = el('details', 'app-manual-tier');
+      details.appendChild(el('summary', '', tier.available ? `${tier.label} · 사용 가능` : `${tier.label} · Lv.${tier.unlock_level} 해금 🔒`));
+      const content = el('div');
+      if (includeDescription && tier.description) content.appendChild(el('p', '', tier.description));
+      if (tier.available) appendManualList(content, tier.examples || [], true);
+      else content.appendChild(el('p', '', '현재 레벨에서는 이 단계의 상세 예시를 확인할 수 없습니다.'));
+      details.appendChild(content);
+      root.appendChild(details);
+    });
+  }
+
+  function renderHospitalMap(root, map) {
+    if (!map?.floors?.length) { root.appendChild(el('p', '', '현재 표시할 병원 지도 정보가 없습니다.')); return; }
+    root.appendChild(el('h3', '', `🏥 ${map.building_name || '서울중앙병원'}`));
+    const legend = el('p', 'app-manual-map-legend', '● 기본 시설 · ◇ 게임 중 발견한 장소 · 📍 현재 위치 · 👤 마지막 확인된 NPC 위치');
+    root.appendChild(legend);
+    const grid = el('div', 'app-manual-map');
+    map.floors.forEach(floor => {
+      const floorCard = el('article', 'app-manual-floor');
+      floorCard.appendChild(el('h4', '', floor.label));
+      (floor.locations || []).forEach(location => {
+        const locationNode = el('div', `app-manual-location app-manual-location-${location.source || 'fixed'}${location.current ? ' app-manual-location-current' : ''}`);
+        if (location.current) locationNode.setAttribute('aria-current', 'location');
+        locationNode.appendChild(el('strong', '', `${location.source === 'discovered' ? '◇' : '●'} ${location.label}`));
+        if (location.current) locationNode.appendChild(el('span', '', '📍 현재 위치'));
+        (location.npcs || []).forEach(npc => locationNode.appendChild(el('span', 'app-manual-location-npcs', `${npc.current ? '👥' : '👤'} ${npc.name}`)));
+        floorCard.appendChild(locationNode);
+      });
+      (floor.other_locations || []).forEach(other => {
+        const otherNode = el('div', 'app-manual-location app-manual-location-other');
+        otherNode.appendChild(el('strong', '', other.current ? '📍 현재 위치' : '기타 확인 위치'));
+        otherNode.appendChild(el('span', '', other.label));
+        (other.npcs || []).forEach(npc => otherNode.appendChild(el('span', 'app-manual-location-npcs', `${npc.current ? '👥' : '👤'} ${npc.name}`)));
+        floorCard.appendChild(otherNode);
+      });
+      grid.appendChild(floorCard);
+    });
+    root.appendChild(grid);
+  }
+
   function renderManual(body) {
     const manual = appState.manual || {};
     body.append(el('h3', '', manual.title || '최면 어플 사용자 매뉴얼'));
-    (manual.quick_start || []).forEach(text => body.appendChild(el('p', '', text)));
-    (manual.diagnostics || []).forEach(item => body.appendChild(el('p', `hypnosis-app-diagnostic ${item.type || ''}`, item.text)));
+    if (manual.subtitle) body.appendChild(el('p', '', manual.subtitle));
+    const status = manual.status || {};
+    const statusSection = manualSection('현재 어플 상태', { open:true });
+    const statusGrid = el('div', 'app-manual-status-grid');
+    const addStatus = (label, value, detail = '') => { const card=el('div','app-manual-status-card'); card.append(el('small','',label),el('strong','',value)); if(detail) card.appendChild(el('small','',detail)); statusGrid.appendChild(card); };
+    addStatus('레벨', `Lv.${status.level || 1}`);
+    addStatus('경험치', `${status.exp || 0} / ${status.next_level_exp || 0}`, `${status.exp_percent || 0}%`);
+    addStatus('사용 가능 강도', status.available_strength || '약함');
+    addStatus('개인 암시', `${status.suggestion_active || 0} / ${status.suggestion_max || 0}`, `남은 슬롯 ${status.suggestion_remaining || 0}`);
+    addStatus('상식개변', `${status.csa_active || 0} / ${status.csa_max || 0}`, `현재 범위: ${status.csa_scope_label || '-'}`);
+    addStatus('오늘 상식개변', `${status.csa_daily_used || 0} / ${status.csa_daily_limit || 0}회`);
+    if (status.next_unlock) addStatus('다음 해금', `Lv.${status.next_unlock.level}`, status.next_unlock.text || '');
+    statusSection.content.appendChild(statusGrid);
+    (manual.diagnostics || []).forEach(item => statusSection.content.appendChild(el('p', `hypnosis-app-diagnostic ${item.type || ''}`, item.text)));
+    body.appendChild(statusSection.details);
+
+    const quick = manualSection('빠른 사용법', { open:true }); appendManualList(quick.content, manual.quick_start, true); body.appendChild(quick.details);
+    const map = manualSection('병원 지도', { open:true }); renderHospitalMap(map.content, manual.hospital_map); body.appendChild(map.details);
+
+    const suggestions = manualSection('개인 암시');
+    if (manual.suggestions?.description) suggestions.content.appendChild(el('p','',manual.suggestions.description));
+    suggestions.content.appendChild(el('h4','', '규칙')); appendManualList(suggestions.content, manual.suggestions?.rules); appendManualTiers(suggestions.content, manual.suggestions?.tiers, true); body.appendChild(suggestions.details);
+
+    const csa = manualSection('상식개변');
+    if (manual.common_sense?.description) csa.content.appendChild(el('p','',manual.common_sense.description));
+    csa.content.appendChild(el('p','',`현재 사용 가능 범위: ${manual.common_sense?.current_scope?.label || '-'}`));
+    appendManualList(csa.content, manual.common_sense?.rules);
+    const scopeList = el('div','app-manual-unlock-list'); (manual.common_sense?.scope_unlocks || []).forEach(item => scopeList.appendChild(el('p','',`${item.level_range} · ${item.scope_label} · 활성 ${item.max_active}개 · 하루 ${item.daily_limit}회${item.available ? ' · 사용 가능' : ' · 잠금'}`))); csa.content.appendChild(scopeList);
+    appendManualTiers(csa.content, manual.common_sense?.tiers, true); body.appendChild(csa.details);
+
+    const strength = manualSection('최면 강도'); strength.content.appendChild(el('h4','', '개인 암시')); appendManualTiers(strength.content, manual.suggestions?.tiers, true); strength.content.appendChild(el('h4','', '상식개변')); appendManualTiers(strength.content, manual.common_sense?.tiers, true); body.appendChild(strength.details);
+    const depth = manualSection('최면깊이'); if(manual.hypnosis_depth?.description) depth.content.appendChild(el('p','',manual.hypnosis_depth.description)); appendManualList(depth.content, manual.hypnosis_depth?.rules); body.appendChild(depth.details);
+
+    const stats = manualSection('NPC 상태 수치'); const statGrid=el('div','app-manual-stat-grid'); (manual.stats||[]).forEach(stat=>{const item=el('article','app-manual-active-item'); item.append(el('strong','',`${stat.label} (${stat.range})`),el('p','',stat.description||''),el('small','',stat.change_rule||'')); statGrid.appendChild(item);}); stats.content.appendChild(statGrid); body.appendChild(stats.details);
+    const unlocks = manualSection('레벨별 해금'); (manual.unlocks||[]).forEach(unlock=>{const item=el('div','app-manual-active-item'); item.appendChild(el('strong','',`Lv.${unlock.level}`)); appendManualList(item, unlock.items); unlocks.content.appendChild(item);}); body.appendChild(unlocks.details);
+
+    const effects = manualSection('현재 활성 효과'); const active=manual.active_effects||{};
+    if (!(active.suggestions||[]).length && !(active.common_sense||[]).length) effects.content.appendChild(el('p','', '현재 활성 효과가 없습니다.'));
+    else { const groups=new Map(); (active.suggestions||[]).forEach(item=>groups.set(item.character_name,[...(groups.get(item.character_name)||[]),item])); groups.forEach((items,name)=>{effects.content.appendChild(el('h4','',name)); items.forEach(item=>effects.content.appendChild(el('div','app-manual-active-item',`[${item.strength}] ${item.content}`)));}); (active.common_sense||[]).forEach(item=>effects.content.appendChild(el('div','app-manual-active-item',`[${item.scope_label} · ${item.strength}] ${item.content}`))); } body.appendChild(effects.details);
+    const failures = manualSection('자주 실패하는 이유'); (manual.common_failures||[]).forEach(item=>{const card=el('details','app-manual-failure'); card.appendChild(el('summary','',item.title)); const content=el('div'); appendManualList(content,item.reasons); card.appendChild(content); failures.content.appendChild(card);}); body.appendChild(failures.details);
   }
 
   function renderTab(tab) {

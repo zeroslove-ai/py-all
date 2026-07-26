@@ -618,6 +618,177 @@ function buildManualActiveEffects(master, save) {
   return { suggestions, common_sense };
 }
 
+const HOSPITAL_FIXED_MAP = {
+  building_id: 'seoul_central_hospital',
+  name: '서울중앙병원',
+  floors: [
+    { id: 'hospital_floor_1', label: '1층', locations: [
+      { id: 'hospital_lobby', label: '로비', type: 'public_area', building: 'seoul_central_hospital', floor: 'hospital_floor_1', ward: null },
+      { id: 'hospital_reception', label: '접수·원무 창구', aliases: ['접수', '원무과', '원무 창구', '접수 창구'], type: 'service_area', building: 'seoul_central_hospital', floor: 'hospital_floor_1', ward: null }
+    ] },
+    { id: 'hospital_floor_3', label: '3층', locations: [
+      { id: 'hospital_3ward', label: '3병동', type: 'ward', building: 'seoul_central_hospital', floor: 'hospital_floor_3', ward: 'hospital_3ward' },
+      { id: 'hospital_3ward_nurse_station', label: '3병동 간호사 스테이션', aliases: ['3병동 스테이션', '간호사 스테이션'], type: 'station', building: 'seoul_central_hospital', floor: 'hospital_floor_3', ward: 'hospital_3ward' },
+      { id: 'hospital_3ward_general_room', label: '3병동 일반 병실', aliases: ['3병동 병실', '일반 병실'], type: 'patient_room', building: 'seoul_central_hospital', floor: 'hospital_floor_3', ward: 'hospital_3ward' },
+      { id: 'hospital_3ward_treatment_room', label: '3병동 처치실', aliases: ['처치실'], type: 'treatment_room', building: 'seoul_central_hospital', floor: 'hospital_floor_3', ward: 'hospital_3ward' }
+    ] },
+    { id: 'hospital_floor_5', label: '5층', locations: [
+      { id: 'hospital_internal_medicine_outpatient', label: '내과 외래', type: 'outpatient', building: 'seoul_central_hospital', floor: 'hospital_floor_5', ward: null },
+      { id: 'hospital_internal_medicine_chief_office', label: '내과 과장실', aliases: ['과장실'], type: 'office', building: 'seoul_central_hospital', floor: 'hospital_floor_5', ward: null },
+      { id: 'hospital_exam_room', label: '검사실', type: 'exam_room', building: 'seoul_central_hospital', floor: 'hospital_floor_5', ward: null }
+    ] },
+    { id: 'hospital_floor_6', label: '6층', locations: [
+      { id: 'hospital_6ward', label: '6병동', type: 'ward', building: 'seoul_central_hospital', floor: 'hospital_floor_6', ward: 'hospital_6ward' },
+      { id: 'hospital_6ward_nurse_station', label: '6병동 간호사 스테이션', aliases: ['6병동 스테이션'], type: 'station', building: 'seoul_central_hospital', floor: 'hospital_floor_6', ward: 'hospital_6ward' },
+      { id: 'hospital_6ward_general_room', label: '6병동 일반 병실', aliases: ['6병동 병실'], type: 'patient_room', building: 'seoul_central_hospital', floor: 'hospital_floor_6', ward: 'hospital_6ward' },
+      { id: 'hospital_6ward_treatment_room', label: '6병동 처치실', type: 'treatment_room', building: 'seoul_central_hospital', floor: 'hospital_floor_6', ward: 'hospital_6ward' }
+    ] }
+  ]
+};
+
+function normalizeLocationLabel(value) {
+  return typeof value === 'string' ? value.trim().replace(/\s+/g, ' ') : '';
+}
+
+function normalizeLocationComparisonKey(value) {
+  return normalizeLocationLabel(value)
+    .replace(/^서울중앙병원\s*/u, '')
+    .replace(/[\s·]/g, '');
+}
+
+function normalizeLocationKeyForParent(value, worldState = {}) {
+  let label = normalizeLocationLabel(value).replace(/^서울중앙병원\s*/u, '');
+  const floorNumber = String(worldState.floor || '').match(/hospital_floor_(\d+)/)?.[1];
+  const wardNumber = String(worldState.ward || '').match(/hospital_(\d+)ward/)?.[1];
+  if (floorNumber) label = label.replace(new RegExp(`^${floorNumber}층\\s*`), '');
+  if (wardNumber) label = label.replace(new RegExp(`^${wardNumber}병동\\s*`), '');
+  return label.replace(/[\s·]/g, '');
+}
+
+function locationMatchesParent(location, worldState = {}) {
+  return (!location.floor || !worldState.floor || location.floor === worldState.floor)
+    && (!location.ward || !worldState.ward || location.ward === worldState.ward);
+}
+
+function findFixedHospitalLocation(locationLabel, worldState = {}) {
+  const key = normalizeLocationComparisonKey(locationLabel);
+  if (!key || worldState?.building && worldState.building !== HOSPITAL_FIXED_MAP.building_id) return null;
+  for (const floor of HOSPITAL_FIXED_MAP.floors) {
+    for (const location of floor.locations) {
+      if (location.id === locationLabel || normalizeLocationComparisonKey(location.label) === key) return location;
+    }
+  }
+  for (const floor of HOSPITAL_FIXED_MAP.floors) {
+    for (const location of floor.locations) {
+      if (!locationMatchesParent(location, worldState)) continue;
+      const shortKey = normalizeLocationKeyForParent(locationLabel, worldState);
+      if ((location.aliases || []).some(alias => normalizeLocationComparisonKey(alias) === key || normalizeLocationKeyForParent(alias, worldState) === shortKey)) return location;
+      if (normalizeLocationKeyForParent(location.label, worldState) === shortKey) return location;
+    }
+  }
+  return null;
+}
+
+function isEphemeralHospitalLocation(label) {
+  return /복도|엘리베이터\s*앞|계단참|계단|창가|자판기|문\s*앞|병실\s*앞|로비\s*한쪽|구석|근처|입구|출구/.test(normalizeLocationLabel(label));
+}
+
+function isConcreteHospitalFacility(label) {
+  return /(?:실|스테이션|창구|라운지|휴게실|면회실|상담실|당직실|창고|탈의실|린넨실)$/u.test(normalizeLocationLabel(label));
+}
+
+function stableLocationHash(value) {
+  let hash = 2166136261;
+  for (let index = 0; index < value.length; index += 1) {
+    hash ^= value.charCodeAt(index);
+    hash = Math.imul(hash, 16777619);
+  }
+  return (hash >>> 0).toString(36);
+}
+
+function dynamicHospitalLocationId(worldState, label) {
+  return `dynamic_${stableLocationHash(`${worldState.building || ''}\n${worldState.floor || ''}\n${worldState.ward || ''}\n${normalizeLocationComparisonKey(label)}`)}`;
+}
+
+function findDynamicHospitalLocation(locations, locationLabel, worldState = {}) {
+  const key = normalizeLocationComparisonKey(locationLabel);
+  const shortKey = normalizeLocationKeyForParent(locationLabel, worldState);
+  if (!key || !isPlainObject(locations)) return null;
+  return Object.values(locations).find(location => location?.active !== false
+    && (normalizeLocationComparisonKey(location.label) === key || normalizeLocationKeyForParent(location.label, worldState) === shortKey)
+    && location.building === worldState.building
+    && location.floor === worldState.floor
+    && (location.ward || null) === (worldState.ward || null)) || null;
+}
+
+function buildDynamicHospitalLocationPatch(previousSave, effectiveWorldState, turnNumber) {
+  const label = normalizeLocationLabel(effectiveWorldState?.location_label);
+  if (!label || effectiveWorldState?.building !== HOSPITAL_FIXED_MAP.building_id || !effectiveWorldState?.floor) return null;
+  if (!HOSPITAL_FIXED_MAP.floors.some(floor => floor.id === effectiveWorldState.floor) || isEphemeralHospitalLocation(label)) return null;
+  if (findFixedHospitalLocation(label, effectiveWorldState)) return null;
+  const existing = isPlainObject(previousSave?.hospital_dynamic_locations) ? previousSave.hospital_dynamic_locations : {};
+  const matched = findDynamicHospitalLocation(existing, label, effectiveWorldState);
+  if (matched) {
+    return { ...existing, [matched.id]: { ...matched, last_used_turn: turnNumber, active: true } };
+  }
+  if (!isConcreteHospitalFacility(label)) return null;
+  if (Object.keys(existing).length >= 30) {
+    console.warn(JSON.stringify({ event: 'hospital_dynamic_location_limit_reached', count: Object.keys(existing).length }));
+    return null;
+  }
+  const id = dynamicHospitalLocationId(effectiveWorldState, label);
+  const location = { id, label, short_label: label, type: 'room', building: effectiveWorldState.building, floor: effectiveWorldState.floor, ward: effectiveWorldState.ward || null, source: 'discovered', discovered_turn: turnNumber, last_used_turn: turnNumber, active: true };
+  console.log(JSON.stringify({ event: 'hospital_dynamic_location_discovered', location_id: id, label, floor: location.floor, ward: location.ward, turn: turnNumber }));
+  return { ...existing, [id]: location };
+}
+
+function resolveHospitalMapLocation(locationLabel, worldState, dynamicLocations) {
+  const fixed = findFixedHospitalLocation(locationLabel, worldState);
+  if (fixed) return { source: 'fixed', location: fixed };
+  const dynamic = findDynamicHospitalLocation(dynamicLocations, locationLabel, worldState);
+  if (dynamic) return { source: 'discovered', location: dynamic };
+  return null;
+}
+
+function buildHospitalMapPayload(master, save) {
+  const current = isPlainObject(save?.world_state) ? save.world_state : {};
+  const dynamicLocations = isPlainObject(save?.hospital_dynamic_locations) ? save.hospital_dynamic_locations : {};
+  const characters = isPlainObject(master?.characters) ? master.characters : {};
+  const floors = HOSPITAL_FIXED_MAP.floors.map(floor => ({ id: floor.id, label: floor.label, locations: floor.locations.map(location => ({ id: location.id, label: location.label, short_label: location.label, source: 'fixed', type: location.type, current: false, npcs: [] })), other_locations: [] }));
+  const floorById = new Map(floors.map(floor => [floor.id, floor]));
+  Object.values(dynamicLocations).filter(location => location?.active !== false && location?.building === HOSPITAL_FIXED_MAP.building_id && floorById.has(location.floor)).forEach(location => floorById.get(location.floor).locations.push({ id: location.id, label: location.label, short_label: location.short_label || location.label, source: 'discovered', type: location.type || 'room', current: false, npcs: [] }));
+  const placeNpc = (characterId, rawLocation, isCurrent = false) => {
+    if (!isPlainObject(rawLocation) || (rawLocation.building && rawLocation.building !== HOSPITAL_FIXED_MAP.building_id) || !rawLocation.location_label) return;
+    const floor = floorById.get(rawLocation.floor);
+    if (!floor) return;
+    const match = resolveHospitalMapLocation(rawLocation.location_label, rawLocation, dynamicLocations);
+    const npc = { character_id: characterId, name: characters?.[characterId]?.name || characters?.[characterId]?.['이름'] || characterId, current: isCurrent };
+    if (match) {
+      const target = floor.locations.find(location => location.id === match.location.id);
+      if (target) target.npcs.push(npc);
+    } else floor.other_locations.push({ label: rawLocation.location_label, npcs: [npc], current: isCurrent });
+  };
+  const currentMatch = resolveHospitalMapLocation(current.location_label, current, dynamicLocations);
+  if (currentMatch && floorById.has(current.floor)) {
+    const location = floorById.get(current.floor).locations.find(item => item.id === currentMatch.location.id);
+    if (location) location.current = true;
+  }
+  const npcLocations = isPlainObject(save?.npc_locations) ? save.npc_locations : {};
+  Object.entries(npcLocations).forEach(([characterId, location]) => placeNpc(characterId, location, (save?.last_npcs_present || []).includes(characterId)));
+  if (!currentMatch && current.location_label && floorById.has(current.floor)) floorById.get(current.floor).other_locations.unshift({ label: current.location_label, npcs: [], current: true });
+  return { building_id: HOSPITAL_FIXED_MAP.building_id, building_name: HOSPITAL_FIXED_MAP.name, current: { building: current.building || null, floor: current.floor || null, ward: current.ward || null, location_label: current.location_label || '' }, floors };
+}
+
+function buildHospitalLocationMemorySection(save) {
+  const dynamic = Object.values(isPlainObject(save?.hospital_dynamic_locations) ? save.hospital_dynamic_locations : {})
+    .filter(location => location?.active !== false && location?.building === HOSPITAL_FIXED_MAP.building_id)
+    .sort((a, b) => Number(b.last_used_turn || 0) - Number(a.last_used_turn || 0))
+    .slice(0, 20);
+  const discovered = dynamic.length ? dynamic.map(location => `- ${normalizeLocationLabel(location.label).slice(0, 40)}`).join('\n') : '- 없음';
+  const current = normalizeLocationLabel(save?.world_state?.location_label).slice(0, 60) || '미확인';
+  return `\n\n[HOSPITAL MAP — ESTABLISHED LOCATIONS]\n1층: 로비, 접수·원무 창구\n3층/3병동: 간호사 스테이션, 일반 병실, 처치실\n5층: 내과 외래, 내과 과장실, 검사실\n6층/6병동: 간호사 스테이션, 일반 병실, 처치실\n현재 위치: ${current}\n\n[DISCOVERED LOCATIONS]\n${discovered}\n\n규칙: 기존 장소를 우선 재사용한다. 새 방은 기존 1·3·5·6층과 기존 3·6병동 내부에만 만들며, 새 병원·건물·층·병동은 만들지 않는다.`;
+}
+
 function buildAppManualPayload(master, save, turnCount = 0) {
   const capability = calculateHypnosisCapability(save, master);
   const level = capability.current_level;
@@ -650,6 +821,7 @@ function buildAppManualPayload(master, save, turnCount = 0) {
     quick_start: ['대상에게 최면 어플 화면을 2초 이상 보여 일반 최면을 시작합니다. 2초 미만이면 적용되지 않습니다.', '개인 암시는 특정 NPC에게 등록하는 지속 효과입니다. 새로 등록하거나 기존 내용을 수정하거나 해제할 수 있습니다.', '상식개변은 특정 NPC가 아니라 지정된 공간 안의 사회적 상식을 변경합니다.', '평범한 대화·명령·말투만으로 저장된 암시나 상식개변은 바뀌지 않습니다. 변경은 반드시 어플 조작으로 처리됩니다.', '범위 초과·슬롯 부족·대상 미확인 등으로 처리되지 않은 시도는 상태·경험치·수치를 바꾸지 않습니다.', '이 매뉴얼을 열고 닫는 행동은 턴을 소비하지 않습니다.'],
     suggestions: { title: '개인 암시', description: '특정 NPC 한 명에게 지속되는 개인 규칙입니다. 모든 NPC의 개인 암시는 하나의 공용 슬롯 풀을 사용합니다.', rules: ['일반 최면을 통해 대상에게 암시를 등록할 수 있습니다.', '같은 NPC에게 여러 암시를 등록할 수 있지만 전체 슬롯 한도를 함께 사용합니다.', '새 암시는 빈 슬롯을 1개 사용합니다.', '기존 암시 수정은 같은 슬롯을 유지합니다.', '암시 해제는 슬롯을 즉시 비웁니다.', '개인 암시에는 하루 사용 횟수 제한이 없습니다.', '최면 어플은 적용 전에 내용 자체에 필요한 최소 강도를 확인합니다. 선택한 강도보다 필요한 강도가 높으면 저장되지 않으며, 현재 해금된 단계 안에서 강도를 변경한 뒤 다시 적용해야 합니다.', '내용이 현재 해금 단계보다 강하거나 강한 단계에서도 지원하지 않는 내용은 어떤 변경사항도 저장하지 않습니다. 강도는 자동으로 변경되지 않습니다.'], tiers },
     common_sense: { title: '상식개변', description: '특정 NPC가 아니라 지정 공간의 사회적 상식 자체를 변경합니다. 범위 안의 인물은 변경된 내용을 원래부터 당연했던 관습으로 받아들입니다.', rules: ['activate는 새 상식개변과 새 슬롯을 만들며 하루 사용 횟수 1회를 소비합니다.', 'update는 기존 슬롯을 유지하면서 내용·강도·범위를 변경하며 하루 사용 횟수 1회를 소비합니다.', 'deactivate는 기존 상식개변을 해제하며 하루 사용 횟수를 소비하지 않습니다.', '활성 슬롯이 가득 차 있어도 기존 상식개변 수정은 가능하지만 하루 사용 횟수가 남아 있어야 합니다.', '직접 해제하지 않은 활성 상식개변은 날짜가 바뀌어도 유지됩니다.', '날짜가 바뀌면 하루 사용 횟수만 초기화됩니다.', '적용 당시 공간 범위는 고정되며 레벨이 올라도 기존 상식개변의 범위가 자동으로 확대되지 않습니다.', '현재 강도나 공간 범위를 넘는 요청은 적용되지 않으며 사용 횟수도 소비하지 않습니다.'], current_scope: { type: limits.scope_type, label: MANUAL_SCOPE_LABELS[limits.scope_type] }, scope_unlocks: [[1, 'Lv.1~3'], [4, 'Lv.4~6'], [7, 'Lv.7~9'], [10, 'Lv.10']].map(([unlockLevel, level_range]) => { const item = getCsaLimits(unlockLevel); return { level_range, scope_type: item.scope_type, scope_label: MANUAL_SCOPE_LABELS[item.scope_type], max_active: item.max_active, daily_limit: item.daily_limit, available: level >= unlockLevel }; }), tiers: csaTiers },
+    hospital_map: buildHospitalMapPayload(master, save),
     hypnosis_depth: { title: '최면깊이', description: '최면과 활성 암시가 대상에게 각인된 정도입니다.', rules: ['활성 암시가 실제 행동에 반영된 턴에는 현재 활성 암시 중 가장 강한 단계 기준으로 깊이가 상승합니다.', '약한 암시가 작동하면 +1, 중간 암시는 +2, 강한 암시는 +3입니다.', '활성 암시가 있지만 이번 턴에 실제로 작동하지 않았다면 최면깊이는 변하지 않습니다.', '활성 암시가 하나도 없는 NPC는 정상적으로 저장되는 매 턴마다 최면깊이가 2씩 감소합니다.', '최면깊이는 0 아래로 내려가지 않습니다.', '암시가 모두 사라져 최면깊이가 회복돼도 그동안의 기억은 삭제되지 않습니다.', '평범한 대화, 칭찬, 친밀감만으로 최면깊이는 변하지 않습니다.', '최면저항력은 고정값이며 플레이 중 변하지 않습니다.'] }, stats, unlocks: unlock.unlocks, active_effects: buildManualActiveEffects(master, save), common_failures: [{ title: '일반 최면이 적용되지 않음', reasons: ['어플 화면을 2초 이상 보여주지 않았습니다.', '대상에게 실제로 어플을 사용하지 않고 말이나 행동만 했습니다.'] }, { title: '새 개인 암시를 만들 수 없음', reasons: ['개인 암시 슬롯이 가득 찼습니다.', '요청 내용의 실제 강도가 현재 사용 가능 강도를 넘었습니다.', '등록 대상 NPC를 특정하지 못했습니다.'] }, { title: '기존 암시를 수정하거나 해제할 수 없음', reasons: ['대상 암시를 찾지 못했습니다.', '실제 변경되는 내용이 없습니다.', '암시가 이미 비활성 상태입니다.'] }, { title: '새 상식개변을 만들 수 없음', reasons: ['상식개변 활성 슬롯이 가득 찼습니다.', '오늘 사용 횟수를 모두 사용했습니다.', '요청한 공간 범위가 현재 레벨의 범위를 넘었습니다.', '요청 내용의 실제 강도가 현재 사용 가능 강도를 넘었습니다.'] }, { title: '상식개변 수정이 적용되지 않음', reasons: ['오늘 사용 횟수를 모두 사용했습니다.', '대상 상식개변을 찾지 못했습니다.', '내용·강도·범위가 기존과 동일해 실제 변경이 없습니다.'] }] };
 }
 
@@ -2749,6 +2921,7 @@ ${recentMemorySlice.map((m, index) => clipHeadTail(sanitizeRecentNarrativeForPro
 
   // ─── 조립 ───
   const currentSceneSection = buildCurrentSceneSection(save, master.characters || {});
+  const hospitalLocationMemorySection = buildHospitalLocationMemorySection(save);
   const npcProfileSection = buildCurrentNpcProfileSection(save, master.characters || {});
   const explicitMentionSection = buildExplicitNpcMentionSection(playerInput, master.characters || {});
   const csaSection = buildApplicableCsaSection(save);
@@ -2799,7 +2972,7 @@ ${recentMemorySlice.map((m, index) => clipHeadTail(sanitizeRecentNarrativeForPro
   // everything above it, including [최근 기억]'s now-stale account of the
   // turn that was just rolled back.
   const regenerationFeedbackSection = buildRegenerationFeedbackSection(regenerationFeedback);
-  const systemPrompt = coreRules + playerGate + modeSection + rulebookSection + openingScenarioSection + appUsageSection + eligibleNpcRosterSection + buildHypnosisRuntimeSection() + buildHypnosisRecoveryNarrativeRule() + currentSceneSection + npcProfileSection + explicitMentionSection + csaSection + suggestionSection + narrativeLengthSection + npcDialogueSection + moanVocalReactionSection + antiRepetitionSection + playerStatusPanel + contextSection + feedbackSection + continuitySection + finalFormatRules + openingFlow + playerSetupReminder + registeredNpcChoiceReminder + choiceLengthReminder + buildAddressAbbreviationSection() + regenerationFeedbackSection + buildStructuredActionStorySection(structuredPlan);
+  const systemPrompt = coreRules + playerGate + modeSection + rulebookSection + openingScenarioSection + appUsageSection + eligibleNpcRosterSection + buildHypnosisRuntimeSection() + buildHypnosisRecoveryNarrativeRule() + currentSceneSection + hospitalLocationMemorySection + npcProfileSection + explicitMentionSection + csaSection + suggestionSection + narrativeLengthSection + npcDialogueSection + moanVocalReactionSection + antiRepetitionSection + playerStatusPanel + contextSection + feedbackSection + continuitySection + finalFormatRules + openingFlow + playerSetupReminder + registeredNpcChoiceReminder + choiceLengthReminder + buildAddressAbbreviationSection() + regenerationFeedbackSection + buildStructuredActionStorySection(structuredPlan);
 
   return {
     mode,
@@ -2901,7 +3074,7 @@ npc_stat_changes만 반환한다. 서사에 숫자가 없어도 대사·행동·
 npc_relationship_state는 현재 메인 NPC와의 누적 절대값 두 개만 반환한다. 명확히 완료된 플레이어 사정 또는 현재 NPC 오르가즘만 증가시키고, 직전·실패·중단·가짜·상상·회상·다른 NPC 사건은 증가시키지 않는다. 값을 모르면 직전값을 유지하고 감소·초기화하지 않는다. narrator에는 반환하지 않는다.
 
 [WORLD STATE PATCH CONTRACT]
-플레이어가 실제로 출발해서 새 장소에 도착했고 장면이 그 새 장소로 전환된 경우, world_state_patch에 building, floor, ward, location_label을 모두 채워서 반환한다. 바뀌지 않은 필드는 이전 저장값의 기존 명칭을 그대로 다시 적고, 실제로 바뀐 필드만 새 값으로 적는다. building/floor/ward는 장소를 설명하는 한국어 명칭으로 적으면 Worker가 표준 ID로 정규화하며, 표준 ID로 정규화되지 않는 값은 무시된다. 이동을 제안하거나 준비만 했을 뿐 아직 도착하지 않았다면 world_state_patch를 채우지 말고 비워둔다. 빈 문자열로 기존 값을 덮어쓰지 마라. 알 수 없는 장소를 지어내지 마라.
+플레이어가 실제로 출발해서 새 장소에 도착했고 장면이 그 새 장소로 전환된 경우, world_state_patch에 building, floor, ward, location_label을 모두 채워서 반환한다. 바뀌지 않은 필드는 이전 저장값의 기존 명칭을 그대로 다시 적고, 실제로 바뀐 필드만 새 값으로 적는다. building/floor/ward는 장소를 설명하는 한국어 명칭으로 적으면 Worker가 표준 ID로 정규화하며, 표준 ID로 정규화되지 않는 값은 무시된다. 이동을 제안하거나 준비만 했을 뿐 아직 도착하지 않았다면 world_state_patch를 채우지 말고 비워둔다. 기존 지도 장소를 우선 재사용하고, 새 구체적 방이 실제 장면 위치가 되면 기존 1·3·5·6층과 3·6병동 안의 정확한 location_label만 반환한다. 새 병원·건물·층·병동과 단순 언급·가정 장소를 만들거나 저장하지 마라. 빈 문자열로 기존 값을 덮어쓰지 마라.
 
 [이미지 선택]
 1. is_sexual 판단: 실제 성행위/삽입/성기노출/오르가즘이 구체적이면 true. 키스/포옹/스킨십/분위기만으로는 false. 애매하면 반드시 false.
@@ -3235,6 +3408,10 @@ function buildSavePatch(extract, enginePatch = {}, summaryPlan = null, previousS
   const worldStatePatch = buildWorldStatePatch(extract.world_state_patch);
   const mergedWorldState = computeEffectiveWorldState(previousSave?.world_state, extract.world_state_patch);
   if (worldStatePatch) patch.world_state = mergedWorldState;
+  if (!degraded && worldStatePatch?.location_label) {
+    const dynamicLocations = buildDynamicHospitalLocationPatch(previousSave, mergedWorldState, turnNumber);
+    if (dynamicLocations) patch.hospital_dynamic_locations = dynamicLocations;
+  }
 
   if (characterId && characterId !== 'narrator' && extract._npc_registration_rejected !== true && extract._npc_location_rejected !== true) {
     const structured = hasStructuredEncounter(previousSave, characterId);
@@ -3827,6 +4004,8 @@ function buildActiveCsaOperationSection(save = {}) {
 
 const WORLD_STATE_BUILDING_IDS = { '서울중앙병원': 'seoul_central_hospital', seoul_central_hospital: 'seoul_central_hospital' };
 const WORLD_STATE_FLOOR_IDS = {
+  '1층': 'hospital_floor_1',
+  hospital_floor_1: 'hospital_floor_1',
   '3층': 'hospital_floor_3',
   hospital_floor_3: 'hospital_floor_3',
   '5층': 'hospital_floor_5',

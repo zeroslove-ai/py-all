@@ -325,9 +325,93 @@ async function handleAppState(req, env) {
   return jsonResponse({ app: buildAppStatePayload(master, saveRow.data, saveRow.turn_count) });
 }
 
+const APP_STRENGTH_RANK = { weak: 1, medium: 2, strong: 3 };
+const APP_STRENGTH_LABEL = { weak: '약함', medium: '중간', strong: '강함' };
+
+function stableStringify(value) {
+  if (value === null || typeof value !== 'object') return JSON.stringify(value);
+  if (Array.isArray(value)) return `[${value.map(stableStringify).join(',')}]`;
+  return `{${Object.keys(value).sort().filter(key => value[key] !== undefined).map(key => `${JSON.stringify(key)}:${stableStringify(value[key])}`).join(',')}}`;
+}
+
+function bytesToBase64url(bytes) {
+  let binary = '';
+  for (const byte of bytes) binary += String.fromCharCode(byte);
+  return btoa(binary).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/g, '');
+}
+
+async function sha256Base64url(text) {
+  return bytesToBase64url(new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(text))));
+}
+
+async function signAppValidationProof(env, payload) {
+  const secret = env.APP_ACTION_SIGNING_SECRET || env.SUPABASE_SECRET_KEY;
+  if (!secret) throw new Error('app validation signing secret unavailable');
+  const key = await crypto.subtle.importKey('raw', new TextEncoder().encode(secret), { name: 'HMAC', hash: 'SHA-256' }, false, ['sign']);
+  return bytesToBase64url(new Uint8Array(await crypto.subtle.sign('HMAC', key, new TextEncoder().encode(`gamebuilder-app-validation-v1\n${stableStringify(payload)}`))));
+}
+
+async function verifyAppValidationProof(env, payload, signature) {
+  if (typeof signature !== 'string' || !signature) return false;
+  return (await signAppValidationProof(env, payload)) === signature;
+}
+
+function collectSemanticStrengthCandidates(previousSave, canonicalAction) {
+  const suggestions = normalizeLegacyActiveSuggestions(previousSave?.active_suggestions);
+  const csa = Array.isArray(previousSave?.csa_active) ? previousSave.csa_active : [];
+  return canonicalAction.operations.flatMap(operation => {
+    if (!['activate', 'update'].includes(operation.operation)) return [];
+    let previous = null;
+    if (operation.domain === 'suggestion' && operation.operation === 'update') previous = (suggestions[operation.character_id] || []).find(item => item?.id === operation.id);
+    if (operation.domain === 'csa' && operation.operation === 'update') previous = csa.find(item => item?.id === operation.id);
+    const contentChanged = operation.operation === 'activate' || normalizeAppContent(previous?.content) !== normalizeAppContent(operation.content);
+    const strengthChanged = operation.operation === 'activate' || normalizeStrengthForStorage(previous?.strength) !== normalizeStrengthForStorage(operation.strength);
+    return contentChanged || strengthChanged ? [{ client_id: operation.client_id, domain: operation.domain, operation: operation.operation, selected_strength: operation.strength, content: operation.content }] : [];
+  });
+}
+
+function buildAppStrengthValidationPrompt(candidates, master) {
+  const system = isPlainObject(master?.rulebook_game_system) ? master.rulebook_game_system : {};
+  const examples = ['suggestion_examples', 'csa_examples'].map(key => `${key}: ${['weak','medium','strong'].map(tier => (Array.isArray(system?.[key]?.[tier]) ? system[key][tier] : []).map(item => typeof item === 'string' ? item : item?.text).filter(text => typeof text === 'string' && text.trim()).slice(0,12).map(text => text.trim().slice(0,200)).join(' | ')).join(' / ')}`).join('\n');
+  return `너는 최면 어플 내용의 최소 필요 강도를 독립적으로 판정한다. 선택 강도에 맞추지 말고 내용만 본다. weak=제한적 경계완화·친근행동, medium=지속 관계·친밀행동·우선순위 변화, strong=중요 판단·의무·관계·장기목표 변화, unsupported=물리 불가능·세계규칙 무시·즉각적 자살·명백한 자기파괴. 상식개변도 같은 단계로 사회 규범의 영향 범위를 판정한다. 모든 후보에 정확히 한 결과를 반환하고 JSON 외 출력하지 마라. reason은 80자 이하.\n\n[공개 룰북 예시]\n${examples}\n\n[후보]\n${JSON.stringify(candidates)}\n\n[JSON]\n{"results":[{"client_id":"...","required_strength":"weak|medium|strong|unsupported","reason":"..."}]}`;
+}
+
+async function classifyAppOperationStrengths(env, candidates, master) {
+  if (!candidates.length) return [];
+  const result = await requestDeepSeekJsonWithRetry(env, { model: 'deepseek-v4-flash', thinking: { type: 'disabled' }, messages: [{ role: 'system', content: buildAppStrengthValidationPrompt(candidates, master) }], response_format: { type: 'json_object' }, stream: false, max_tokens: 1600 }, { timeoutMs: 30000, maxAttempts: 2 });
+  const rows = Array.isArray(result?.parsed?.results) ? result.parsed.results : [];
+  const expected = new Set(candidates.map(item => item.client_id));
+  if (rows.length !== candidates.length || new Set(rows.map(item => item?.client_id)).size !== expected.size || rows.some(item => !expected.has(item?.client_id) || !['weak','medium','strong','unsupported'].includes(item?.required_strength))) throw new Error('invalid strength validation response');
+  return rows.map(item => ({ client_id: item.client_id, required_strength: item.required_strength, reason: typeof item.reason === 'string' ? item.reason.slice(0,160) : '' }));
+}
+
+function semanticStrengthIssues(candidates, results, availableStrength) {
+  const byId = new Map(results.map(item => [item.client_id, item]));
+  const availableRank = APP_STRENGTH_RANK[availableStrength] || 1;
+  return candidates.flatMap(candidate => {
+    const result = byId.get(candidate.client_id); const requiredRank = APP_STRENGTH_RANK[result.required_strength] || 0; const selectedRank = APP_STRENGTH_RANK[candidate.selected_strength] || 0;
+    if (result.required_strength === 'unsupported') return [{ client_id:candidate.client_id, domain:candidate.domain, operation:candidate.operation, code:'CONTENT_OUTSIDE_APP_CAPABILITY', message:'이 내용은 강한 단계에서도 적용할 수 없습니다.', selected_strength:candidate.selected_strength, required_strength:'unsupported' }];
+    if (requiredRank > availableRank) return [{ client_id:candidate.client_id, domain:candidate.domain, operation:candidate.operation, code:'CONTENT_STRENGTH_LOCKED', message:`이 내용은 ${APP_STRENGTH_LABEL[result.required_strength]} 단계가 필요하지만 현재 사용 가능한 단계는 ${APP_STRENGTH_LABEL[availableStrength]}입니다.`, selected_strength:candidate.selected_strength, required_strength:result.required_strength, available_strength:availableStrength, suggested_strength:null, reason:result.reason }];
+    if (requiredRank > selectedRank) return [{ client_id:candidate.client_id, domain:candidate.domain, operation:candidate.operation, code:'CONTENT_REQUIRES_HIGHER_STRENGTH', message:`이 내용은 ${APP_STRENGTH_LABEL[result.required_strength]} 암시가 필요합니다. 선택 강도를 변경해 주세요.`, selected_strength:candidate.selected_strength, required_strength:result.required_strength, available_strength:availableStrength, suggested_strength:result.required_strength, reason:result.reason }];
+    return [];
+  });
+}
+
+async function verifyStructuredActionValidation(env, gameId, structuredAction) {
+  if (structuredAction?.type !== 'app_transaction') return { ok: true };
+  const semantic = structuredAction.semantic_validation;
+  if (!isPlainObject(semantic) || typeof structuredAction.validation_proof !== 'string' || semantic.game_id !== gameId || semantic.base_turn_count !== structuredAction.base_turn_count) return { ok:false, reason:'missing or mismatched proof' };
+  const actionDigest = await sha256Base64url(stableStringify({ version: structuredAction.version, type: structuredAction.type, base_turn_count: structuredAction.base_turn_count, operations: structuredAction.operations }));
+  if (semantic.action_digest !== actionDigest) return { ok:false, reason:'action digest mismatch' };
+  const results = Array.isArray(semantic.results) ? semantic.results : [];
+  const ids = structuredAction.operations.map(item => item.client_id).filter(Boolean);
+  if (new Set(results.map(item=>item?.client_id)).size !== results.length || results.some(item => !ids.includes(item?.client_id) || !['weak','medium','strong','unsupported'].includes(item?.required_strength))) return { ok:false, reason:'semantic result mismatch' };
+  const payload = { game_id: gameId, base_turn_count: structuredAction.base_turn_count, action_digest: actionDigest, semantic_results: results };
+  return (await verifyAppValidationProof(env, payload, structuredAction.validation_proof)) ? { ok:true } : { ok:false, reason:'signature mismatch' };
+}
+
 // Read-only preflight for the interactive app. It uses the same server-owned
-// commit context that the later commit integration will use, but never calls a
-// mutation RPC or a model.
+// commit context that the later commit integration will use.
 async function handleAppValidate(req, env) {
   const { game_id, structured_action } = await readJson(req);
   if (!game_id || !isPlainObject(structured_action)) return jsonResponse({ error: 'game_id and structured_action required' }, 400);
@@ -352,6 +436,31 @@ async function handleAppValidate(req, env) {
       current_turn_count: stale ? ctx.turn_count : undefined,
       issues: result.issues
     }, result.status);
+  }
+  if (result.canonical_action.type === 'app_transaction') {
+    const candidates = collectSemanticStrengthCandidates(ctx.save, result.canonical_action);
+    let semanticResults = [];
+    try {
+      if (candidates.length) {
+        console.log(JSON.stringify({ event: 'app_strength_validation_requested', game_id, operation_count: candidates.length }));
+        semanticResults = await classifyAppOperationStrengths(env, candidates, ctx.master);
+      }
+    } catch (error) {
+      console.warn(JSON.stringify({ event: 'app_strength_validation_rejected', game_id, issue_codes: ['APP_STRENGTH_VALIDATION_FAILED'] }));
+      return jsonResponse({ error: '암시 강도 확인에 실패했습니다. 잠시 후 다시 적용해 주세요.', error_code: 'APP_STRENGTH_VALIDATION_FAILED' }, 502);
+    }
+    const capability = calculateHypnosisCapability(ctx.save, ctx.master);
+    const issues = semanticStrengthIssues(candidates, semanticResults, ({ '약함':'weak', '중간':'medium', '강함':'strong' })[capability.available_strength] || 'weak');
+    if (issues.length) {
+      console.warn(JSON.stringify({ event: 'app_strength_validation_rejected', game_id, issue_codes: issues.map(issue => issue.code) }));
+      return jsonResponse({ error: '변경사항을 적용할 수 없습니다.', error_code: 'APP_ACTION_INVALID', issues }, 422);
+    }
+    const actionDigest = await sha256Base64url(stableStringify({ version: result.canonical_action.version, type: result.canonical_action.type, base_turn_count: result.canonical_action.base_turn_count, operations: result.canonical_action.operations }));
+    const semantic_validation = { version: 1, game_id, base_turn_count: result.canonical_action.base_turn_count, action_digest: actionDigest, results: semanticResults.map(item => ({ client_id:item.client_id, required_strength:item.required_strength })) };
+    const validation_proof = await signAppValidationProof(env, { game_id, base_turn_count: result.canonical_action.base_turn_count, action_digest: actionDigest, semantic_results: semantic_validation.results });
+    result.canonical_action = { ...result.canonical_action, semantic_validation, validation_proof };
+    const counts = semanticResults.reduce((all, item) => { if (item.required_strength in all) all[item.required_strength] += 1; return all; }, { weak:0, medium:0, strong:0 });
+    console.log(JSON.stringify({ event: 'app_strength_validation_passed', game_id, operation_count: candidates.length, required_strength_counts: counts }));
   }
   console.log(JSON.stringify({ event: 'app_action_validated', type: result.canonical_action.type, game_id, base_turn_count: result.canonical_action.base_turn_count, operation_count: result.summary.total }));
   return jsonResponse({ ok: true, canonical_action: result.canonical_action, display_input: result.display_input, summary: result.summary });
@@ -443,7 +552,7 @@ function buildAppManualPayload(master, save, turnCount = 0) {
   ].map(([id, label, fallback, change_rule]) => ({ id, label, range: '0~100', description: id === 'hypnosis_depth' ? fallback : extractPublicStatDefinition(statDefinitions, label, fallback), change_rule }));
   return { version: 1, title: '최면 어플 사용자 매뉴얼', subtitle: '현재 게임의 룰북과 마지막 저장 상태를 기준으로 표시합니다. 매뉴얼 열람은 턴과 게임 상태에 영향을 주지 않습니다.', status: { level, exp: capability.exp, next_level_exp: capability.next_level_exp, exp_percent: progress, available_strength: capability.available_strength, suggestion_active: capability.active_count, suggestion_max: capability.max_active, suggestion_remaining: capability.remaining_slots, csa_active: capability.csa_active_count, csa_max: capability.csa_max_active, csa_daily_used: capability.csa_daily_used, csa_daily_limit: capability.csa_daily_limit, csa_scope_type: limits.scope_type, csa_scope_label: MANUAL_SCOPE_LABELS[limits.scope_type], next_unlock: unlock.next_unlock }, diagnostics,
     quick_start: ['대상에게 최면 어플 화면을 2초 이상 보여 일반 최면을 시작합니다. 2초 미만이면 적용되지 않습니다.', '개인 암시는 특정 NPC에게 등록하는 지속 효과입니다. 새로 등록하거나 기존 내용을 수정하거나 해제할 수 있습니다.', '상식개변은 특정 NPC가 아니라 지정된 공간 안의 사회적 상식을 변경합니다.', '평범한 대화·명령·말투만으로 저장된 암시나 상식개변은 바뀌지 않습니다. 변경은 반드시 어플 조작으로 처리됩니다.', '범위 초과·슬롯 부족·대상 미확인 등으로 처리되지 않은 시도는 상태·경험치·수치를 바꾸지 않습니다.', '이 매뉴얼을 열고 닫는 행동은 턴을 소비하지 않습니다.'],
-    suggestions: { title: '개인 암시', description: '특정 NPC 한 명에게 지속되는 개인 규칙입니다. 모든 NPC의 개인 암시는 하나의 공용 슬롯 풀을 사용합니다.', rules: ['일반 최면을 통해 대상에게 암시를 등록할 수 있습니다.', '같은 NPC에게 여러 암시를 등록할 수 있지만 전체 슬롯 한도를 함께 사용합니다.', '새 암시는 빈 슬롯을 1개 사용합니다.', '기존 암시 수정은 같은 슬롯을 유지합니다.', '암시 해제는 슬롯을 즉시 비웁니다.', '개인 암시에는 하루 사용 횟수 제한이 없습니다.', '사용자가 약한 암시라고 표현해도 실제 내용이 더 강하면 내용 자체의 강도로 판정합니다.', '현재 사용 가능한 강도를 넘는 요청은 적용되지 않으며 상태와 경험치도 변하지 않습니다.'], tiers },
+    suggestions: { title: '개인 암시', description: '특정 NPC 한 명에게 지속되는 개인 규칙입니다. 모든 NPC의 개인 암시는 하나의 공용 슬롯 풀을 사용합니다.', rules: ['일반 최면을 통해 대상에게 암시를 등록할 수 있습니다.', '같은 NPC에게 여러 암시를 등록할 수 있지만 전체 슬롯 한도를 함께 사용합니다.', '새 암시는 빈 슬롯을 1개 사용합니다.', '기존 암시 수정은 같은 슬롯을 유지합니다.', '암시 해제는 슬롯을 즉시 비웁니다.', '개인 암시에는 하루 사용 횟수 제한이 없습니다.', '최면 어플은 적용 전에 내용 자체에 필요한 최소 강도를 확인합니다. 선택한 강도보다 필요한 강도가 높으면 저장되지 않으며, 현재 해금된 단계 안에서 강도를 변경한 뒤 다시 적용해야 합니다.', '내용이 현재 해금 단계보다 강하거나 강한 단계에서도 지원하지 않는 내용은 어떤 변경사항도 저장하지 않습니다. 강도는 자동으로 변경되지 않습니다.'], tiers },
     common_sense: { title: '상식개변', description: '특정 NPC가 아니라 지정 공간의 사회적 상식 자체를 변경합니다. 범위 안의 인물은 변경된 내용을 원래부터 당연했던 관습으로 받아들입니다.', rules: ['activate는 새 상식개변과 새 슬롯을 만들며 하루 사용 횟수 1회를 소비합니다.', 'update는 기존 슬롯을 유지하면서 내용·강도·범위를 변경하며 하루 사용 횟수 1회를 소비합니다.', 'deactivate는 기존 상식개변을 해제하며 하루 사용 횟수를 소비하지 않습니다.', '활성 슬롯이 가득 차 있어도 기존 상식개변 수정은 가능하지만 하루 사용 횟수가 남아 있어야 합니다.', '직접 해제하지 않은 활성 상식개변은 날짜가 바뀌어도 유지됩니다.', '날짜가 바뀌면 하루 사용 횟수만 초기화됩니다.', '적용 당시 공간 범위는 고정되며 레벨이 올라도 기존 상식개변의 범위가 자동으로 확대되지 않습니다.', '현재 강도나 공간 범위를 넘는 요청은 적용되지 않으며 사용 횟수도 소비하지 않습니다.'], current_scope: { type: limits.scope_type, label: MANUAL_SCOPE_LABELS[limits.scope_type] }, scope_unlocks: [[1, 'Lv.1~3'], [4, 'Lv.4~6'], [7, 'Lv.7~9'], [10, 'Lv.10']].map(([unlockLevel, level_range]) => { const item = getCsaLimits(unlockLevel); return { level_range, scope_type: item.scope_type, scope_label: MANUAL_SCOPE_LABELS[item.scope_type], max_active: item.max_active, daily_limit: item.daily_limit, available: level >= unlockLevel }; }), tiers: csaTiers },
     hypnosis_depth: { title: '최면깊이', description: '최면과 활성 암시가 대상에게 각인된 정도입니다.', rules: ['활성 암시가 실제 행동에 반영된 턴에는 현재 활성 암시 중 가장 강한 단계 기준으로 깊이가 상승합니다.', '약한 암시가 작동하면 +1, 중간 암시는 +2, 강한 암시는 +3입니다.', '활성 암시가 있지만 이번 턴에 실제로 작동하지 않았다면 최면깊이는 변하지 않습니다.', '활성 암시가 하나도 없는 NPC는 정상적으로 저장되는 매 턴마다 최면깊이가 2씩 감소합니다.', '최면깊이는 0 아래로 내려가지 않습니다.', '암시가 모두 사라져 최면깊이가 회복돼도 그동안의 기억은 삭제되지 않습니다.', '평범한 대화, 칭찬, 친밀감만으로 최면깊이는 변하지 않습니다.', '최면저항력은 고정값이며 플레이 중 변하지 않습니다.'] }, stats, unlocks: unlock.unlocks, active_effects: buildManualActiveEffects(master, save), common_failures: [{ title: '일반 최면이 적용되지 않음', reasons: ['어플 화면을 2초 이상 보여주지 않았습니다.', '대상에게 실제로 어플을 사용하지 않고 말이나 행동만 했습니다.'] }, { title: '새 개인 암시를 만들 수 없음', reasons: ['개인 암시 슬롯이 가득 찼습니다.', '요청 내용의 실제 강도가 현재 사용 가능 강도를 넘었습니다.', '등록 대상 NPC를 특정하지 못했습니다.'] }, { title: '기존 암시를 수정하거나 해제할 수 없음', reasons: ['대상 암시를 찾지 못했습니다.', '실제 변경되는 내용이 없습니다.', '암시가 이미 비활성 상태입니다.'] }, { title: '새 상식개변을 만들 수 없음', reasons: ['상식개변 활성 슬롯이 가득 찼습니다.', '오늘 사용 횟수를 모두 사용했습니다.', '요청한 공간 범위가 현재 레벨의 범위를 넘었습니다.', '요청 내용의 실제 강도가 현재 사용 가능 강도를 넘었습니다.'] }, { title: '상식개변 수정이 적용되지 않음', reasons: ['오늘 사용 횟수를 모두 사용했습니다.', '대상 상식개변을 찾지 못했습니다.', '내용·강도·범위가 기존과 동일해 실제 변경이 없습니다.'] }] };
 }
@@ -506,6 +615,18 @@ function buildAppStatePayload(master, save, turnCount = 0) {
 
 const STORY_HEADERS_TIMEOUT_MS = 90000;
 
+function resolveHypnosisAppUiRoute(input, characters = {}) {
+  const text = String(input || '').trim(); if (!text) return null;
+  const excluded = /하지\s*않|하지\s*말|말라고|할까|고민|생각해\s*본다|떠올린다|과거|예전에|말했다|물었다|NPC에게\s*묻|뜻이\s*뭐|무엇인지/.test(text) && !/수정|변경|바꿔|교체|강화|약화/.test(text);
+  const mention = detectExplicitRegisteredNpcMentions(text, characters)?.[0]?.character_id || null;
+  const management = /추가|등록|생성|새로|걸어|건다|적용|수정|변경|바꿔|교체|강화|약화|삭제|제거|해제|취소|끄기|켜기|활성화|비활성화|전부\s*(?:지워|해제)|모두\s*(?:지워|해제)|목록|확인|관리|편집/;
+  if (!excluded && /개인\s*암시|활성\s*암시|암시/.test(text) && management.test(text)) return { tab:'suggestions', character_id:mention, notice: mention ? '해당 NPC의 개인 암시 관리 화면을 엽니다.' : '개인 암시는 최면 어플에서 관리합니다.' };
+  if (!excluded && /상식\s*개변|상식개변|상식\s*변경|개변된\s*상식/.test(text) && management.test(text)) return { tab:'csa', character_id:null, notice:'상식개변은 최면 어플에서 관리합니다.' };
+  if (/최면\s*(?:어플|앱)\s*(?:사용법|매뉴얼)|어플\s*설명|암시\s*단계\s*설명|상식개변\s*사용법/.test(text)) return { tab:'manual', character_id:null, notice:'최면 어플 매뉴얼을 엽니다.' };
+  if (/최면\s*(?:어플|앱)\s*열어|어플\s*열어|앱\s*상태\s*보여/.test(text)) return { tab:'home', character_id:null, notice:'최면 어플을 엽니다.' };
+  return null;
+}
+
 async function handleStory(req, env) {
   const requestId = crypto.randomUUID();
   // regeneration_feedback is only ever sent by the frontend's feedback
@@ -525,8 +646,17 @@ async function handleStory(req, env) {
   const contextMs = Date.now() - contextStart;
 
   const currentTurn = ctx?.turn_count ?? 0;
+  if (structured_action === null) {
+    const appRoute = resolveHypnosisAppUiRoute(player_input, ctx?.master?.characters || {});
+    if (appRoute) return jsonResponse({ error: '암시와 상식개변은 최면 어플에서 관리합니다.', error_code: 'APP_UI_REQUIRED', app_route: appRoute, request_id: requestId }, 409);
+  }
   let structuredPlan = null;
   if (structured_action !== null) {
+    const proof = await verifyStructuredActionValidation(env, game_id, structured_action);
+    if (!proof.ok) {
+      console.warn(JSON.stringify({ event: 'app_validation_proof_rejected', endpoint: '/api/story', game_id, reason: proof.reason }));
+      return jsonResponse({ error: '최면 어플 검증 정보가 올바르지 않습니다. 어플을 다시 열어 적용해 주세요.', error_code: 'APP_VALIDATION_PROOF_INVALID', request_id: requestId }, 422);
+    }
     structuredPlan = planStructuredAction(ctx?.save || {}, ctx?.master || {}, structured_action, { turnNumber: currentTurn + 1, turnCount: currentTurn, today: currentUtcDateString() });
     if (!structuredPlan.ok) return jsonResponse(buildStructuredActionError(structuredPlan, currentTurn), structuredPlan.status);
   }
@@ -854,34 +984,6 @@ function buildDegradedTurnSummary(narrativeText) {
 }
 
 // A degraded turn must never silently no-op an app-mutating player request
-// (creating/strengthening/removing a suggestion, changing a CSA) — those
-// need the real Extract result or a hard failure, never a degraded stand-in.
-// Exception: the narrative already contains a strength-exceeded marker, which
-// means the app action is already deterministically nullified regardless of
-// what Extract would have said, so degraded is safe there.
-// Item 3 safety net (암시 슬롯 서사 정합성): a suggestion-related input with
-// no modify/delete intent keyword is always a request to CREATE a new
-// suggestion, never to change an existing one — used to reject an Extract
-// output that mislabels it as update/deactivate before it ever reaches
-// applySuggestionAction. Explicit update/deactivate requests are untouched.
-const SUGGESTION_RELATED_INPUT_RE = /(?:암시|최면)/;
-const SUGGESTION_MODIFY_INTENT_RE = /(?:수정|변경|교체|강화|삭제|해제|제거|끄기|끈다)/;
-
-function isPotentialAppMutationTurn(playerInput, narrativeText = '') {
-  const narrative = typeof narrativeText === 'string' ? narrativeText : '';
-
-  if (narrative.includes(SUGGESTION_STRENGTH_EXCEEDED_MARKER) || narrative.includes(CSA_STRENGTH_EXCEEDED_MARKER)) {
-    return false;
-  }
-
-  const input = typeof playerInput === 'string' ? playerInput : '';
-
-  const appTarget = /(?:암시|최면|상식\s*개변|상식개변)/i.test(input);
-  const mutationVerb = /(?:건다|걸다|걸어|적용|생성|추가|변경|수정|강화|해제|삭제|끄기|끈다|off|사용|실행)/i.test(input);
-
-  return appTarget && mutationVerb;
-}
-
 // A degraded turn must never silently skip a genuine first direct encounter
 // with a newly-registered NPC — that first-encounter stat write only ever
 // happens once per NPC, so losing it to a degraded fallback would be
@@ -902,8 +1004,6 @@ function canUseDegradedExtract(compatCtx, narrativeText, playerInput) {
 
   if (!isSetupComplete(save)) return false;
 
-  if (isPotentialAppMutationTurn(playerInput, narrativeText)) return false;
-
   if (hasPotentialUnrecordedFirstEncounter(compatCtx, narrativeText, playerInput)) return false;
 
   return true;
@@ -921,8 +1021,6 @@ function buildDegradedExtract(narrativeText, reason = 'EXTRACT_FAILED') {
     npc_stat_changes: {},
     npc_relationship_state: null,
     first_encounter_stats: null,
-    suggestion_action: null,
-    csa_action: null,
     csa_omission: [],
     player_patch: {},
     player_recommendation: null,
@@ -994,6 +1092,11 @@ async function runExtractPipeline(env, { game_id, narrative_text, player_input, 
   const compatCtx = withSetupCompatibility(ctx);
   let structuredPlan = null;
   if (structured_action !== null) {
+    const proof = await verifyStructuredActionValidation(env, game_id, structured_action);
+    if (!proof.ok) {
+      console.warn(JSON.stringify({ event: 'app_validation_proof_rejected', endpoint: '/api/extract', game_id, reason: proof.reason }));
+      return { body: { error: '최면 어플 검증 정보가 올바르지 않습니다. 어플을 다시 열어 적용해 주세요.', error_code: 'APP_VALIDATION_PROOF_INVALID', request_id: requestId }, status: 422 };
+    }
     structuredPlan = planStructuredAction(compatCtx.save || {}, compatCtx.master || {}, structured_action, { turnNumber: nextTurn, turnCount: ctx?.turn_count ?? 0, today: currentUtcDateString() });
     if (!structuredPlan.ok) return { body: buildStructuredActionError(structuredPlan, ctx?.turn_count ?? 0), status: structuredPlan.status };
   }
@@ -1057,8 +1160,6 @@ async function runExtractPipeline(env, { game_id, narrative_text, player_input, 
         choices_repaired: false,
         choices_fallback_used: extractChoicesFromNarrative(narrative_text).length !== 4,
         first_encounter_repaired: false,
-        suggestion_strength_exceeded: narrative_text.includes(SUGGESTION_STRENGTH_EXCEEDED_MARKER),
-        csa_strength_exceeded: narrative_text.includes(CSA_STRENGTH_EXCEEDED_MARKER),
         json_repaired: false,
         content_addition: null,
         validation_warnings: [],
@@ -1075,10 +1176,7 @@ async function runExtractPipeline(env, { game_id, narrative_text, player_input, 
   }
 
   let { extract, jsonRepaired, mindMonitorRepaired, validation, rawText, effectiveWorldState } = firstPass;
-  if (structuredPlan?.canonical_action?.type === 'app_transaction') {
-    extract.suggestion_action = null;
-    extract.csa_action = null;
-  } else if (structuredPlan?.canonical_action?.type === 'find_npc') {
+  if (structuredPlan?.canonical_action?.type === 'find_npc') {
     const target = structuredPlan.plan;
     extract.character_id = target.character_id;
     extract.npcs_present = [...new Set([...(Array.isArray(extract.npcs_present) ? extract.npcs_present : []), target.character_id])];
@@ -1162,36 +1260,6 @@ async function runExtractPipeline(env, { game_id, narrative_text, player_input, 
     }
   }
 
-  // Stage 4-B strength pre-judgment enforcement: Story is instructed
-  // (buildStrengthPreJudgmentSection) to output a fixed literal marker when
-  // it internally determines a suggestion/CSA request exceeds the current
-  // strength ceiling, instead of narrating success. The Worker deterministically
-  // detects that marker in the FINAL narrative text and force-nullifies the
-  // corresponding structured action, regardless of what Extract's own JSON
-  // claims — this is what guarantees Story and Extract can never disagree
-  // about whether this turn's app action actually took effect (item 4), and
-  // it means a strength-exceeded turn can never advance csa_daily_used,
-  // active_suggestions, or npc_stats (items 5/10) since buildSavePatch reads
-  // extract.suggestion_action/csa_action, which are null here.
-  const suggestionStrengthExceeded = finalNarrativeText.includes(SUGGESTION_STRENGTH_EXCEEDED_MARKER);
-  if (suggestionStrengthExceeded) extract.suggestion_action = null;
-  const csaStrengthExceeded = finalNarrativeText.includes(CSA_STRENGTH_EXCEEDED_MARKER);
-  if (csaStrengthExceeded) extract.csa_action = null;
-
-  // Item 3 safety net: a 암시-관련 입력 without modify/delete intent is
-  // always a new-suggestion request — an update/deactivate Extract still
-  // returns for it is never honored (a genuine activate still goes through
-  // applySuggestionAction's own unchanged slot check). Explicit modify/
-  // delete requests are never touched by this.
-  if (
-    isPlainObject(extract.suggestion_action)
-    && ['update', 'deactivate'].includes(extract.suggestion_action.action)
-    && SUGGESTION_RELATED_INPUT_RE.test(player_input || '')
-    && !SUGGESTION_MODIFY_INTENT_RE.test(player_input || '')
-  ) {
-    extract.suggestion_action = null;
-  }
-
   // H1: the NPC narrative contract is fail-open — an unregistered minor
   // NPC, a registered NPC appearing outside their usual ward, or a
   // profession/rank mismatch never blocks the turn, triggers a Story/
@@ -1256,8 +1324,6 @@ async function runExtractPipeline(env, { game_id, narrative_text, player_input, 
       choices_repaired: choicesRepaired,
       choices_fallback_used: choicesFallbackUsed,
       first_encounter_repaired: firstEncounterRepaired,
-      suggestion_strength_exceeded: suggestionStrengthExceeded,
-      csa_strength_exceeded: csaStrengthExceeded,
       json_repaired: jsonRepaired,
       content_addition: null, // superseded by narrative_replacement; kept only for legacy clients
       validation_warnings: narrativeContract.warnings,
@@ -1614,13 +1680,17 @@ async function runCommitPipeline(env, { game_id, turn_number, content: rawConten
   const ctx = withSetupCompatibility(rawCtx);
   let structuredPlan = null;
   if (structured_action !== null) {
+    const proof = await verifyStructuredActionValidation(env, game_id, structured_action);
+    if (!proof.ok) {
+      console.warn(JSON.stringify({ event: 'app_validation_proof_rejected', endpoint: '/api/commit-turn', game_id, reason: proof.reason }));
+      return { body: { error: '최면 어플 검증 정보가 올바르지 않습니다. 어플을 다시 열어 적용해 주세요.', error_code: 'APP_VALIDATION_PROOF_INVALID', request_id: requestId }, status: 422 };
+    }
     structuredPlan = planStructuredAction(ctx?.save || {}, ctx?.master || {}, structured_action, { turnNumber: turn_number, turnCount: ctx?.turn_count ?? 0, today: currentUtcDateString() });
     if (!structuredPlan.ok) return { body: buildStructuredActionError(structuredPlan, ctx?.turn_count ?? 0), status: structuredPlan.status };
   }
   if (turn_number !== (ctx?.turn_count ?? 0) + 1) return { body: { error: 'turn conflict', expected_turn: (ctx?.turn_count ?? 0) + 1, received_turn: turn_number, request_id: requestId }, status: 409 };
   const effectiveWorldStateForCommit = computeEffectiveWorldState(ctx?.save?.world_state, extract.world_state_patch);
   const safeExtract = normalizeRegisteredNpcExtract({ ...extract, is_sexual: extract.is_sexual === true }, ctx?.master?.characters, ctx?.save?.last_character_id, effectiveWorldStateForCommit);
-  if (structuredPlan?.canonical_action?.type === 'app_transaction') { safeExtract.suggestion_action = null; safeExtract.csa_action = null; }
   if (structuredPlan?.canonical_action?.type === 'find_npc') {
     safeExtract.character_id = structuredPlan.plan.character_id;
     safeExtract.npcs_present = [structuredPlan.plan.character_id];
@@ -1716,7 +1786,10 @@ async function runCommitPipeline(env, { game_id, turn_number, content: rawConten
   try {
     const sections = splitTurnContentSections(content);
     turnRecord = {
-      player_action: normalizePlayerActionRecord(rawPlayerAction, player_input, ctx?.save?.last_choices),
+      player_action: {
+        ...normalizePlayerActionRecord(rawPlayerAction, player_input, ctx?.save?.last_choices),
+        ...(structured_action ? { structured_action } : {})
+      },
       mind_monitor: buildMindMonitorRecord(safeExtract, ctx?.master?.characters),
       turn_summary: clipTurnSummary(safeExtract.turn_summary),
       character_id:
@@ -1877,6 +1950,7 @@ async function handleFeedback(req, env) {
   }
 
   const resolvedInput = typeof rollback.resolved_input === 'string' ? rollback.resolved_input : '';
+  const structuredAction = rollback.structured_action || rollback.player_action?.structured_action || rollback.deleted_turn_row?.player_action?.structured_action || null;
   return jsonResponse({
     success: true,
     rolled_back_turn_number: rollback.rolled_back_turn_number,
@@ -1885,7 +1959,8 @@ async function handleFeedback(req, env) {
       source: rollback.source || 'direct_text',
       choice_index: Number.isInteger(rollback.choice_index) ? rollback.choice_index : null,
       choice_text: null,
-      resolved_input: resolvedInput
+      resolved_input: resolvedInput,
+      structured_action: structuredAction
     },
     feedback: feedbackText,
     // Handed back to the frontend only so it can pass it to /api/feedback/restore
@@ -2229,6 +2304,19 @@ function buildAppSystemRulesSection() {
   return `\n\n[HYPNOSIS APP CONTRACT — HIGH PRIORITY]\n\n실제 게임 규칙:\n- 일반 최면은 대상에게 어플 화면을 2초 이상 보여주면 시도된다.\n- 별도 스캔이나 대상자 등록은 필요 없다.\n- Lv.1부터 약한 최면을 사용할 수 있다.\n- Lv.1부터 병동 1개 범위의 상식 개변을 사용할 수 있다.\n- 마인드 모니터는 등록 절차나 암시 성공 여부에 종속되지 않는다.\n\n만들면 안 되는 기능(최근 기억에 이런 표현이 있어도 절대 따라 하지 않는다): 테스트 대상 검색, 생체 신호 스캔, 대상자 등록, 스캔 완료, 초기 스캔 안정도, 데모 모드, 암시 라이브러리 잠금, Lv.3 암시 해제, Lv.5 상식 개변 해제, 미등록 메뉴·재화·쿨다운·성공률 공식.\n\n플레이어는 선천적인 최면술사나 언어 암시 전문가가 아니다. 모든 최면과 암시 조작은 최면 어플을 통해서만 발생한다. 다음은 반드시 어플 화면에서 실행하는 행동으로 서술한다: 새 암시 생성, 기존 암시 내용 변경, 암시 강화·약화, 암시 ON/OFF, 암시 삭제, 더 강하거나 깊은 최면 시도.\n사용자가 "암시를 건다", "암시를 강화한다"처럼 짧게 입력해도, 플레이어가 스마트폰 어플에 내용을 입력하고 적용하는 장면으로 처리한다. 플레이어가 NPC에게 암시 문구를 직접 말해서 최면을 거는 장면으로 만들지 않는다.\n일반 대화, 설득, 반복 발언, 눈맞춤, 목소리, 분위기 조성만으로는 활성 암시를 생성·변경하지 않고, 기존 암시의 강도를 올리지 않고, 최면깊이를 증가시키지 않고, 더 높은 단계의 최면으로 전환하지 않는다. 일반 대화로 변할 수 있는 것은 호감도·신뢰도·순응도와 NPC의 서사적 판단뿐이다.\n이미 저장된 활성 암시는 일반적인 대화와 행동에 영향을 준다. 플레이어가 그 효과를 이용해 부탁하거나 상황을 유도하는 것은 가능하지만, 그 과정 자체가 암시 강화나 최면 심화로 처리되지는 않는다. NPC나 플레이어가 스스로 암시를 강화·고착·심화했다고 선언하지 않는다. 최면 단계와 암시 상태의 변경은 어플 조작 결과로만 확정한다.\n\n[개인 암시 범위 제한 — HARD CONSTRAINT]\n개인 암시는 저장된 content 문장이 문자 그대로 허용하는 반응만 강화한다. 그 문장이 명시하지 않은 행동이나 태도로 확대 해석하지 않는다. 예: content가 "동의하기 쉽다"이면 이는 오직 동의를 더 쉽게 만들 뿐이며, 포옹 허용, 친밀감 자동 상승, 모든 부탁의 무조건 수락으로 확대하지 않는다. 암시 범위 밖의 요청에는 NPC 본래 성격과 판단대로 반응한다.\n어플 조작(새 암시 생성, 강도 변경, 강화) 없이 시간이 흐른다고 암시가 저절로 안정화·고착·강화·심화되지 않는다. 다음 표현으로 암시가 자동으로 깊어졌다고 서술하지 않는다: "완전히 자리 잡았다", "더 깊이 스며들었다", "무의식에 강하게 남았다", 그리고 이와 같은 의미의 자동 강화 표현.`;
 }
 
+function buildHypnosisRuntimeSection() {
+  return `
+
+[HYPNOSIS RUNTIME CONTRACT — HIGH PRIORITY]
+- 일반 최면은 대상에게 최면 어플 화면을 2초 이상 보여주는 행동으로만 성립한다.
+- 저장된 개인 암시와 상식개변의 생성·수정·해제는 Worker가 검증한 structured_action만 처리한다.
+- 일반 대화·설득·반복 발언·눈맞춤·목소리만으로 저장된 효과를 만들거나 바꾸지 않고 최면깊이를 올리지 않는다.
+- 활성 개인 암시는 저장된 content 범위 안에서만 NPC 행동에 영향을 준다.
+- 활성 상식개변은 현재 적용 범위 안에서 원래부터 존재한 사회적 상식으로 취급한다.
+- [3. 선택지]에는 암시·상식개변의 생성·수정·삭제·강화·해제를 제안하지 않는다. 해당 기능은 최면 어플 UI에서 수행한다.
+`;
+}
+
 // Only the current main NPC's core facts, injected as an established-fact
 // block so the model can't drift into a wrong rank/age/relationship once the
 // [게임 설정] block's 2000-char slice truncates master.characters before it
@@ -2434,7 +2522,7 @@ ${JSON.stringify({ rulebook_address: master.rulebook_address }, null, 2)}`;
   const csaPanelData = buildCsaPanelText(save);
   const hypnosisCapability = calculateHypnosisCapability(save, master);
   const hypnosisSummaryText = buildHypnosisStatusPanelData(hypnosisCapability, resolveHypnosisStoryState(save));
-  const playerStatusPanel = `
+  const legacyPlayerStatusPanel = `
 
 [PLAYER STATUS PANEL CONTRACT — HIGHEST PRIORITY FOR SECTION 2]
 [2. 플레이어 상황판]은 단순 키·값 나열표가 아니라 게임 속 최면 어플의 현재 화면처럼 작성한다. 이모지와 짧은 구분을 사용하되, 매 턴 문구와 배치를 기계적으로 복제하지 말고 현재 장면에 맞춰 자연스럽게 구성한다. 길이 상한은 없다 — 활성 최면과 상식 개변이 많으면 상황판도 그만큼 길어지는 것이 정상이다.
@@ -2458,6 +2546,13 @@ ${suggestionPanelData.count ? suggestionPanelData.lines : '없음'}
 [STATUS PANEL DATA — 상식 개변]
 활성 ${csaPanelData.count}개 / 최대 ${csaPanelData.maxActive}개, 오늘 사용 ${csaPanelData.dailyUsed}회 / 한도 ${csaPanelData.dailyLimit}회
 ${csaPanelData.count ? csaPanelData.lines : '없음'}`;
+
+  const playerStatusPanel = `
+
+[PLAYER STATUS PANEL CONTRACT — HIGHEST PRIORITY FOR SECTION 2]
+[2. 플레이어 상황판]은 현재 장면에 맞춘 짧고 읽기 쉬운 최면 어플 화면처럼 작성한다. 플레이어 이름·현재 장소·플레이어의 1인칭 직접 독백(한국어 큰따옴표, 실질 40자 이상)·이번 턴의 실제 변화만 포함한다.
+📱 최면 어플: 활성 효과와 슬롯은 별도 최면 어플 화면에서 확인한다.
+NPC 수치, 활성 개인 암시/상식개변의 전체 내용, 슬롯·일일 사용량, 예상 수치 변화, 턴 번호, 사정·오르가즘 누적값은 출력하지 않는다.`;
 
   // ─── 섹션 5: 컨텍스트 ───
   // 최근 기억: 가장 최근 1개는 최대 5000자, 그 이전 항목은 최대 2500자로 앞·뒤를 모두 보존해 절단한다.
@@ -2495,7 +2590,7 @@ ${recentMemorySlice.map((m, index) => clipHeadTail(sanitizeRecentNarrativeForPro
     ? `\n\n[USER FEEDBACK — APPLY TO THIS NEXT RESPONSE ONLY]\n${feedback.map(item => `- ${typeof item === 'string' ? item : item?.text || ''}`).filter(Boolean).join('\n')}\nThis is not an in-world action. Never narrate it as dialogue or an event; use it only to improve output quality.`
     : '';
   const continuitySection = `\n\n[TURN CONTINUITY CONTRACT]\n- 직전 턴에서 완료된 행동을 다시 실행하지 않는다.\n- 이미 성공한 암시를 다시 시도하지 않는다.\n- NPC가 확정 암시를 매 턴 이유 없이 의심하거나 거부하지 않는다.\n- 현재 장면을 한 단계 앞으로 진행한다.\n- 저장된 확정 사실과 충돌하는 쪽지, 과거 사건, 시간, 인물 관계를 새로 만들지 않는다.\n- 직전 장면에서 벗거나 변경한 복장은 명시적으로 다시 입는 행동이 나오기 전까지 그대로 유지한다. 이미 벗은 옷을 다시 벗거나 현재 입지 않은 옷을 걷어 올리거나 조작하지 않는다.\n- 복장은 캐릭터 기본 외형·복장 프로필보다 최근 장면에서 확정된 상태를 우선하고, [최근 기억]끼리 복장이 충돌하면 가장 최근에 명시된 상태를 따른다. 플레이어와 NPC의 복장은 각각 구분해서 판단한다. [3. 선택지]도 이 복장 상태와 충돌하지 않아야 한다.`;
-  const finalFormatRules = `\n\n[FINAL OUTPUT CONTRACT — HIGHEST PRIORITY]\nThe response body contains exactly three sections: [1. 서사 및 행동], [2. 플레이어 상황판], [3. 선택지]. Never include a mind monitor, NPC stat table, character body information, or turn number in the body. Mind monitor belongs only to npc_emotion extraction and the sidebar UI. The Player Status Panel Contract overrides any legacy display-format text, including whatever [2] format appears inside [최근 기억] from earlier turns — past turns may still show 🎯 접근 대상 or 📌 현재 목표 from an older contract; never copy that old layout, only follow the current Player Status Panel Contract's fields. In normal play, [3] contains exactly four in-world action choices; never include an app-information choice.\nDo not use formulaic first-impression or hypnosis-success calculations.\n출력 직전 최소 확인: [1]은 현재 장면을 실제로 진행하고 모든 직접 대사는 [대사 — AUTHORITATIVE DIALOGUE CONTRACT]을 지킨다. [2]는 Player Status Panel Contract만 따른다. [3]은 일반 플레이에서 정확히 4개의 서로 다른 실제 행동이다. 사용자가 요청하지 않은 영구 암시·상식개변은 새로 만들지 않는다.\n지침이 서로 충돌하면 다음 우선순위를 따른다: 1) 사용자의 최신 입력과 정정 2) 직전 장면의 연속성 3) 등록 캐릭터 설정과 현재 관계 상태 4) 자연스러운 반응과 플레이어 유도 5) 모든 직접 대사의 화자명·연기지시 형식 6) [1] 서사 / [2] 상황판 / [3] 선택지 출력. 길이를 채우기 위해 확정 사실을 깨거나 플레이어 행동을 임의로 추가하지 않는다.\n`;
+  const finalFormatRules = `\n\n[FINAL OUTPUT CONTRACT — HIGHEST PRIORITY]\nThe response body contains exactly three sections: [1. 서사 및 행동], [2. 플레이어 상황판], [3. 선택지]. Never include a mind monitor, NPC stat table, character body information, or turn number in the body. Mind monitor belongs only to npc_emotion extraction and the sidebar UI. The Player Status Panel Contract overrides any legacy display-format text, including whatever [2] format appears inside [최근 기억] from earlier turns — past turns may still show 🎯 접근 대상 or 📌 현재 목표 from an older contract; never copy that old layout, only follow the current Player Status Panel Contract's fields. In normal play, [3] contains exactly four in-world action choices; never include an app-information choice or 개인 암시·상식개변의 생성·수정·삭제·강화·해제 같은 관리 조작. 해당 관리는 최면 어플 UI에서만 한다.\nDo not use formulaic first-impression or hypnosis-success calculations.\n출력 직전 최소 확인: [1]은 현재 장면을 실제로 진행하고 모든 직접 대사는 [대사 — AUTHORITATIVE DIALOGUE CONTRACT]을 지킨다. [2]는 Player Status Panel Contract만 따른다. [3]은 일반 플레이에서 정확히 4개의 서로 다른 실제 행동이다. 사용자가 요청하지 않은 영구 암시·상식개변은 새로 만들지 않는다.\n지침이 서로 충돌하면 다음 우선순위를 따른다: 1) 사용자의 최신 입력과 정정 2) 직전 장면의 연속성 3) 등록 캐릭터 설정과 현재 관계 상태 4) 자연스러운 반응과 플레이어 유도 5) 모든 직접 대사의 화자명·연기지시 형식 6) [1] 서사 / [2] 상황판 / [3] 선택지 출력. 길이를 채우기 위해 확정 사실을 깨거나 플레이어 행동을 임의로 추가하지 않는다.\n`;
   const openingFlow = mode === 'opening'
     ? `\n\n[OPENING PHASE — AFTER PLAYER SETUP]\nThe player setup is confirmed. Generate only the first hospital scene and first NPC encounter now. Do not repeat the app discovery, app feature explanation, player questions, or character recommendation. Never claim that the player has already used the app to change the hospital in the past.\n`
     : '';
@@ -2511,36 +2606,6 @@ ${recentMemorySlice.map((m, index) => clipHeadTail(sanitizeRecentNarrativeForPro
   // a rule stated only once near the top of a long prompt is exactly what
   // let the model invent "add another suggestion"/"go deeper" choices when
   // the slot pool was already full or the level capped the strength tier.
-  const hypnosisCapabilitySection = mode === 'normal' || mode === 'opening'
-    ? buildCurrentHypnosisCapabilitySection(hypnosisCapability)
-    : '';
-  // Stage 4-B: the pre-judgment/blocked-message contract, the per-tier
-  // suggestion behavior boundaries, and the CSA nature/NPC-perception rules
-  // — same gating as hypnosisCapabilitySection since none of this applies
-  // outside actual gameplay turns.
-  const appMutationTurn = isPotentialAppMutationTurn(playerInput);
-  const includeDetailedAppGuidance = (mode === 'normal' || mode === 'opening') && (appMutationTurn || appUsageRequested);
-  const strengthPreJudgmentSection = includeDetailedAppGuidance
-    ? buildStrengthPreJudgmentSection(hypnosisCapability)
-    : '';
-  const suggestionStrengthBoundarySection = includeDetailedAppGuidance
-    ? buildSuggestionStrengthBoundarySection()
-    : '';
-  const csaNatureSection = includeDetailedAppGuidance
-    ? buildCsaNatureSection()
-    : '';
-  const suggestionExampleSection = includeDetailedAppGuidance
-    ? buildSuggestionExampleSection(hypnosisCapability, master)
-    : '';
-  const csaExampleSection = includeDetailedAppGuidance
-    ? buildCsaExampleSection(hypnosisCapability, master)
-    : '';
-  // H3-B item 2: gives the model the id it needs to target an update/
-  // deactivate csa_action against the right entry — internal app-operation
-  // data only, never to be echoed into the narrative or status panel.
-  const activeCsaOperationSection = includeDetailedAppGuidance
-    ? buildActiveCsaOperationSection(save)
-    : '';
   // H1 item 4: unregistered-target/location-ineligible-target are no longer
   // repair-triggering problems in validateFinalChoices, so this reminder no
   // longer forbids naming unregistered minor NPCs in choices — it just
@@ -2563,7 +2628,7 @@ ${recentMemorySlice.map((m, index) => clipHeadTail(sanitizeRecentNarrativeForPro
   // everything above it, including [최근 기억]'s now-stale account of the
   // turn that was just rolled back.
   const regenerationFeedbackSection = buildRegenerationFeedbackSection(regenerationFeedback);
-  const systemPrompt = coreRules + playerGate + modeSection + rulebookSection + openingScenarioSection + appUsageSection + eligibleNpcRosterSection + buildAppSystemRulesSection() + buildHypnosisRecoveryNarrativeRule() + currentSceneSection + npcProfileSection + explicitMentionSection + csaSection + csaNatureSection + suggestionSection + suggestionStrengthBoundarySection + narrativeLengthSection + npcDialogueSection + moanVocalReactionSection + antiRepetitionSection + playerStatusPanel + contextSection + feedbackSection + continuitySection + finalFormatRules + openingFlow + playerSetupReminder + hypnosisCapabilitySection + strengthPreJudgmentSection + suggestionExampleSection + csaExampleSection + activeCsaOperationSection + registeredNpcChoiceReminder + choiceLengthReminder + buildAddressAbbreviationSection() + regenerationFeedbackSection + buildStructuredActionStorySection(structuredPlan);
+  const systemPrompt = coreRules + playerGate + modeSection + rulebookSection + openingScenarioSection + appUsageSection + eligibleNpcRosterSection + buildHypnosisRuntimeSection() + buildHypnosisRecoveryNarrativeRule() + currentSceneSection + npcProfileSection + explicitMentionSection + csaSection + suggestionSection + narrativeLengthSection + npcDialogueSection + moanVocalReactionSection + antiRepetitionSection + playerStatusPanel + contextSection + feedbackSection + continuitySection + finalFormatRules + openingFlow + playerSetupReminder + registeredNpcChoiceReminder + choiceLengthReminder + buildAddressAbbreviationSection() + regenerationFeedbackSection + buildStructuredActionStorySection(structuredPlan);
 
   return {
     mode,
@@ -2660,23 +2725,8 @@ npc_stat_changes만 반환한다. 서사에 숫자가 없어도 대사·행동·
 [FIRST ENCOUNTER CONTRACT]
 저장된 npc_encounters에 현재 NPC(character_id) 기록이 없고 이번이 실제로 처음 직접 조우한 장면일 때만 first_encounter_stats에 호감도·신뢰도를 0~35 사이 정수로 판단해 반환한다. 단순히 배경에 등장했거나 멀리서 본 것만으로는 첫 직접 조우가 아니다 — 직접 대화, 응대, 신체 접촉처럼 명확한 상호작용이 있어야 첫 직접 조우로 판단한다. 공식이나 랜덤 없이, 플레이어의 저장된 외형·복장·직업·말투·현재 태도와 NPC의 성격·가치관·경계심·현재 상황을 근거로 종합적으로 정한다. 제공되지 않은 정보를 지어내지 마라. 두 수치는 같을 필요가 없고 NPC 성격에 따라 결과가 달라져야 한다. 이미 조우한 NPC이거나 처음 만나는 장면이 아니면 first_encounter_stats는 반드시 null이다. 실제로 처음 직접 조우한 장면인데 이 판단을 빠뜨리지 마라 — 반드시 first_encounter_stats를 채워야 한다.
 
-[SUGGESTION ACTION CONTRACT]
-이번 서사에서 플레이어가 최면 어플을 실제로 조작해 암시를 만들거나 바꾸거나 끈 것이 명확히 완료됐을 때만 suggestion_action을 반환한다. action은 activate(새 암시 생성) / update(기존 암시 내용·강도 수정) / deactivate(해제) 중 하나다. strength는 반드시 "약함", "중간", "강함" 중 하나만 쓴다 — 다른 표현은 쓰지 마라.
-- activate: content(암시 내용 문장)와 strength를 채운다. 새 슬롯을 하나 사용하는 행동이다.
-- update: 이미 활성 상태인 암시의 내용이나 강도만 바꾼다. old_content에 그 암시의 기존 내용 문장을 그대로 적어 어떤 암시를 수정하는지 특정한다. 새 content(바뀐 내용, 안 바뀌면 생략)와 strength(바뀐 강도, 안 바뀌면 생략)만 채운다. 슬롯을 추가로 쓰지 않는다.
-- deactivate: content에 해제할 암시의 기존 내용 문장을 그대로 적는다.
-시도·계획·상상·가능성만으로는 저장하지 말고 실패한 최면도 저장하지 마라. 실패·거절·슬롯 부족·범위 초과 암시는 모든 Extract 필드에 실제 효과로 반영하지 마라. 일반 대화·설득·반복 발언·분위기 조성만으로 암시를 활용하거나 암시 효과를 체감한 턴에는 suggestion_action을 반환하지 않는다 — 어플을 실제로 조작하지 않았기 때문이다. activate는 현재 NPC만, 명시한 기존 암시는 update/deactivate에 character_id를 쓴다. 변화가 없으면 suggestion_action은 null이다.
-
 [WORLD STATE PATCH CONTRACT]
 플레이어가 실제로 출발해서 새 장소에 도착했고 장면이 그 새 장소로 전환된 경우, world_state_patch에 building, floor, ward, location_label을 모두 채워서 반환한다. 바뀌지 않은 필드는 이전 저장값의 기존 명칭을 그대로 다시 적고, 실제로 바뀐 필드만 새 값으로 적는다. building/floor/ward는 장소를 설명하는 한국어 명칭으로 적으면 Worker가 표준 ID로 정규화하며, 표준 ID로 정규화되지 않는 값은 무시된다. 이동을 제안하거나 준비만 했을 뿐 아직 도착하지 않았다면 world_state_patch를 채우지 말고 비워둔다. 빈 문자열로 기존 값을 덮어쓰지 마라. 알 수 없는 장소를 지어내지 마라.
-
-[CSA ACTION CONTRACT]
-csa_action.action은 activate(새 상식개변 생성) / update(기존 활성 상식개변의 내용·강도·범위 수정) / deactivate(해제) 중 하나다.
-- activate: 현재 장소 범위 안에서 플레이어가 상식개변을 실제로 새로 성공시켰을 때만 반환한다. content(바뀐 상식 문장), scope_type(ward/floor/building/world 중 현재 상황에 맞는 범위), strength(그 내용이 실제로 요구하는 강도 — "약함", "중간", "강함" 중 하나)를 모두 채운다. scope_id는 채우지 마라. Worker가 현재 world_state로 결정한다. 새 슬롯 하나를 사용하는 행동이다.
-- update: 이미 활성 상태인 상식개변 하나의 내용·강도·범위를 실제로 바꿨을 때만 반환한다. id를 우선 사용해 대상을 특정한다(활성 상식개변의 id는 아래 [ACTIVE CSA ENTRIES]에서 확인한다). id를 모르면 old_content에 그 상식개변의 기존 내용 문장을 그대로 적어 대상을 특정한다. 새 content(바뀐 내용, 안 바뀌면 생략), strength(바뀐 강도, 안 바뀌면 생략), scope_type(바뀐 범위, 안 바뀌면 생략)만 채운다. scope_id는 채우지 마라. 새 슬롯을 추가로 쓰지 않는다.
-- deactivate: 플레이어가 기존 상식개변을 명확히 해제했을 때만 반환한다. 해제 대상의 id를 반드시 채운다.
-시도·계획·상상·가능성만으로는 어떤 action도 저장하지 마라. 변화가 없으면 csa_action은 null이다.
-${buildCsaApplicationCheckSection(save)}
 
 [이미지 선택]
 1. is_sexual 판단: 실제 성행위/삽입/성기노출/오르가즘이 구체적이면 true. 키스/포옹/스킨십/분위기만으로는 false. 애매하면 반드시 false.
@@ -2727,9 +2777,7 @@ ${JSON.stringify(imageCatalog)}
   "player_recommendation": {"name": "", "age": 0, "gender": "", "job": "", "major": "", "rank": "", "height_cm": 0, "weight_kg": 0, "style": "", "background": ""},
   "player_recommendations": [{"id": "preset_1", "slot": "hospital_worker", "name": "", "age": 0, "gender": "남성", "job": "", "major": "", "rank": "", "height_cm": 0, "weight_kg": 0, "penis_length_cm": 0, "style": "", "speech_style": "", "personality": "", "background": "", "starting_location": "", "short_feature": "", "choice_label": "이름 · 직업 형태의 짧은 문구"}],
   "growth_event": "none | minor | standard | major (사건의 의미만 제안, 경험치 숫자는 결정하지 말 것)",
-  "suggestion_action": null,
   "world_state_patch": {"building": "이동 완료 시 기존 또는 새 건물명, 이동 없으면 전체 비움", "floor": "이동 완료 시 기존 또는 새 층 명칭", "ward": "이동 완료 시 기존 또는 새 병동 명칭", "location_label": "이동 완료 시 도착한 새 장소, 이동 없으면 전체 비움"},
-  "csa_action": null,
   "csa_omission": ["조건을 충족했는데도 실행되지 않은 강제 상식개변에 대한 짧은 설명. 누락이 없으면 []"],
   "npc_relationship_state": {"player_ejaculation_count": 0, "npc_orgasm_count": 0},
   "turn_summary": "이번 턴에서 변한 핵심 사실 1~3문장",
@@ -2924,7 +2972,6 @@ function normalizeRegisteredNpcExtract(extract = {}, characters = {}, lastCharac
     normalized.image_id = null;
     normalized.is_sexual = false;
     normalized.first_encounter_stats = null;
-    normalized.suggestion_action = null;
   }
   return normalized;
 }
@@ -2995,13 +3042,6 @@ function buildSavePatch(extract, enginePatch = {}, summaryPlan = null, previousS
   // real character/image — preserve whatever the save already had instead
   // of overwriting it with the degraded stand-in's narrator/null values.
   const degraded = extract?.extract_degraded === true;
-  const bulkIntent = resolveBulkAppDeactivationIntent(playerInput);
-  const bulkSuggestionPatch = bulkIntent.suggestions
-    ? buildBulkSuggestionDeactivationPatch(previousSave)
-    : null;
-  const bulkCsaPatch = bulkIntent.csa
-    ? buildBulkCsaDeactivationPatch(previousSave)
-    : null;
   const patch = {
     last_character_id: degraded ? (previousSave?.last_character_id || 'narrator') : characterId,
     last_image_id: degraded ? (previousSave?.last_image_id ?? null) : (extract.image_id ?? null),
@@ -3011,10 +3051,6 @@ function buildSavePatch(extract, enginePatch = {}, summaryPlan = null, previousS
       ? extract.choices.filter(choice => typeof choice === 'string' && choice.trim())
       : []
   };
-  if (bulkSuggestionPatch) {
-    patch.active_suggestions = bulkSuggestionPatch.active_suggestions;
-    console.log(JSON.stringify({ event: 'bulk_suggestions_deactivated', turn: turnNumber, deactivated_count: bulkSuggestionPatch.deactivated_count }));
-  }
   if (summaryPlan) {
     patch.story_summary_recent100 = summaryPlan.recentSummary;
     patch.recent100_start_turn = summaryPlan.recentStartTurn;
@@ -3029,14 +3065,7 @@ function buildSavePatch(extract, enginePatch = {}, summaryPlan = null, previousS
     const structured = hasStructuredEncounter(previousSave, characterId);
     const legacy = !structured && hasLegacyEncounterEvidence(previousSave, characterId);
     const firstEncounterStats = !structured && !legacy ? normalizeFirstEncounterStats(extract.first_encounter_stats) : null;
-    // A clear all-suggestions command is Worker-owned and wins over any
-    // Extract action, so the same turn can never reactivate one entry.
-    const suggestionPatch = bulkIntent.suggestions
-      ? bulkSuggestionPatch && { active_suggestions: bulkSuggestionPatch.active_suggestions }
-      : applySuggestionAction(previousSave, extract.suggestion_action, characterId, turnNumber);
-    const effectiveActiveSuggestions = suggestionPatch?.active_suggestions
-      ? { ...normalizeLegacyActiveSuggestions(previousSave?.active_suggestions), ...suggestionPatch.active_suggestions }
-      : previousSave?.active_suggestions;
+    const effectiveActiveSuggestions = previousSave?.active_suggestions;
     const hypnosisDepthChange = resolveHypnosisDepthDelta({
       previousDepth: previousSave?.npc_stats?.[characterId]?.최면깊이,
       currentCharacterId: characterId,
@@ -3094,7 +3123,6 @@ function buildSavePatch(extract, enginePatch = {}, summaryPlan = null, previousS
       } };
     }
 
-    if (suggestionPatch) Object.assign(patch, suggestionPatch);
   }
   if (!degraded) {
     const registeredPresent = [...new Set((Array.isArray(extract.npcs_present) ? extract.npcs_present : []).filter(id => typeof id === 'string' && id && id !== 'narrator'))];
@@ -3105,7 +3133,7 @@ function buildSavePatch(extract, enginePatch = {}, summaryPlan = null, previousS
       patch.npc_locations = Object.fromEntries(registeredPresent.map(id => [id, { location_label: locationLabel, ward: mergedWorldState.ward || '', floor: mergedWorldState.floor || '', building: mergedWorldState.building || '', updated_turn: turnNumber }]));
     }
   }
-  if (!degraded) {
+  if (!degraded && structuredPlan?.canonical_action?.type !== 'app_transaction') {
     const recovery = applyGlobalHypnosisDepthRecovery(
       previousSave?.npc_stats,
       patch.active_suggestions
@@ -3175,16 +3203,6 @@ function buildSavePatch(extract, enginePatch = {}, summaryPlan = null, previousS
   // pre-reset value) when deciding whether this turn's own action is within
   // today's limit — csaState (if any) is assigned after and correctly
   // overwrites csaDailyReset's csa_daily_used: 0 with used+1.
-  const csaSaveView = csaDailyReset ? { ...previousSave, ...csaDailyReset } : previousSave;
-  if (bulkCsaPatch) {
-    patch.csa_active = bulkCsaPatch.csa_active;
-    console.log(JSON.stringify({ event: 'bulk_csa_deactivated', turn: turnNumber, deactivated_count: bulkCsaPatch.deactivated_count }));
-  }
-  // A bulk CSA deactivation also wins over Extract, and never consumes a use.
-  const csaState = bulkIntent.csa
-    ? null
-    : applyCsaAction(csaSaveView, extract.csa_action, patch.player_progress.level, turnNumber, mergedWorldState);
-  if (csaState) Object.assign(patch, csaState);
   if (structuredPlan?.canonical_action?.type === 'app_transaction') {
     patch.active_suggestions = structuredPlan.plan.active_suggestions;
     patch.csa_active = structuredPlan.plan.csa_active;
@@ -3318,7 +3336,6 @@ function normalizeExtract(extract) {
   normalized.is_sexual = normalized.is_sexual === true;
   if (typeof normalized.turn_summary !== 'string') normalized.turn_summary = '';
   if (!['none', 'minor', 'standard', 'major'].includes(normalized.growth_event)) normalized.growth_event = 'none';
-  if (!isPlainObject(normalized.csa_action)) normalized.csa_action = null;
   normalized.csa_omission = Array.isArray(normalized.csa_omission)
     ? normalized.csa_omission.filter(item => typeof item === 'string' && item.trim())
     : [];
@@ -3329,7 +3346,6 @@ function normalizeExtract(extract) {
     : [];
   if (!isPlainObject(normalized.npc_relationship_state)) normalized.npc_relationship_state = null;
   if (!isPlainObject(normalized.first_encounter_stats)) normalized.first_encounter_stats = null;
-  if (!isPlainObject(normalized.suggestion_action)) normalized.suggestion_action = null;
   if (!isPlainObject(normalized.world_state_patch)) normalized.world_state_patch = null;
   delete normalized.image_reasoning;
   return normalized;
@@ -3575,9 +3591,8 @@ function buildApplicableCsaSection(save) {
   return `\n\n[CURRENT APPLICABLE COMMON-SENSE CHANGES — HARD CONSTRAINT, NOT REFERENCE INFO]\n\n현재 장소:\n${locationLabel}\n\n적용 중인 상식(강제 규칙):\n${lines}\n\n적용 규칙:\n- 아래 상식은 단순 배경 설정이 아니라 이번 턴 서사에서 실제로 집행해야 하는 강제 규칙이다.\n- 규칙에 조건("~마다", "~할 때", "~하면")이 있으면, 이번 턴 서사 안에서 그 조건이 실제로 발생할 때마다 매번 그 행동을 직접 묘사한다. 예: "1문장을 말할 때마다 볼뽀뽀"라면, 이번 턴에 그 NPC가 문장을 말할 때마다 볼뽀뽀 행동을 실제로 서술한다 — 한 번만 언급하고 넘어가지 않는다.\n- 현재 범위 안에 있고 조건을 충족하는 등록 NPC 전원에게 예외 없이 동일하게 적용한다. 특정 NPC만 봐주거나 조용히 생략하지 않는다.\n- 현재 장면의 NPC와 배경 인물은 위 내용을 당연한 상식으로 받아들인다.\n- 플레이어만 원래 상식과 변경된 상식의 차이를 기억한다.\n- 이미 적용된 상식개변의 성공 여부를 다시 의심하지 마라.\n- NPC가 이유 없이 위화감을 느끼거나 규칙을 부정하지 않게 한다.\n- 현재 범위를 벗어나면 적용하지 않는다.\n- 해제되거나 비활성인 개변은 적용하지 않는다.\n- NPC의 성격은 유지되지만 판단의 전제와 행동은 변경된 상식을 따른다.`;
 }
 
-// H3-B item 2: internal app-operation data (ids) for the model to target an
-// update/deactivate csa_action against the right entry — the id itself must
-// never be echoed into the narrative or the player-facing status panel.
+// Legacy helper retained for saved-data compatibility only; structured app
+// transactions never expose internal IDs to Story or Extract.
 function buildActiveCsaOperationSection(save = {}) {
   const active = (Array.isArray(save?.csa_active) ? save.csa_active : []).filter(item => item?.active);
 
@@ -3765,8 +3780,8 @@ function normalizeStrengthForStorage(value) {
   return typeof value === 'string' && HYPNOSIS_STRENGTH_TIERS.includes(value.trim()) ? value.trim() : null;
 }
 
-// Audited (active_suggestions loss investigation): this function only ever
-// returns a non-null patch when extract.suggestion_action is itself a valid
+// Audited legacy helper: this function only ever
+// returns a non-null patch when its supplied action is valid.
 // activate/update/deactivate object — a normal turn with no action, or an
 // empty/malformed one, returns null here and buildSavePatch then never sets
 // patch.active_suggestions at all, so jsonb_deep_merge leaves the DB's full
@@ -3808,7 +3823,7 @@ function applySuggestionAction(previousSave, action, currentCharacterId, turnNum
     const duplicate = list.some(item => item?.active && normalizeSuggestionContent(item.content) === content);
     if (duplicate) return null;
     const newItem = { id: nextSuggestionId(list, turnNumber), content, strength, created_turn: turnNumber, active: true };
-    console.log(JSON.stringify({ event: 'suggestion_action_applied', action: 'activate', character_id: currentCharacterId, turn: turnNumber, before_count: list.length, after_count: list.length + 1 }));
+    console.log(JSON.stringify({ event: 'legacy_suggestion_mutation_applied', action: 'activate', character_id: currentCharacterId, turn: turnNumber, before_count: list.length, after_count: list.length + 1 }));
     return { active_suggestions: { [targetCharacterId]: [...list, newItem] } };
   }
 
@@ -3825,7 +3840,7 @@ function applySuggestionAction(previousSave, action, currentCharacterId, turnNum
   if (!target) return null;
 
   if (action.action === 'deactivate') {
-    console.log(JSON.stringify({ event: 'suggestion_action_applied', action: 'deactivate', character_id: targetCharacterId, turn: turnNumber, target_id: target.id, active_before: list.filter(i => i.active).length, active_after: list.filter(i => i.active).length - 1 }));
+    console.log(JSON.stringify({ event: 'legacy_suggestion_mutation_applied', action: 'deactivate', character_id: targetCharacterId, turn: turnNumber, target_id: target.id, active_before: list.filter(i => i.active).length, active_after: list.filter(i => i.active).length - 1 }));
     return { active_suggestions: { [targetCharacterId]: list.map(item => item === target ? { ...item, active: false } : item) } };
   }
 
@@ -3838,7 +3853,7 @@ function applySuggestionAction(previousSave, action, currentCharacterId, turnNum
     if (!requestedStrength || hypnosisStrengthRank(requestedStrength) > capability.max_strength_rank) return null;
     newStrength = requestedStrength;
   }
-  console.log(JSON.stringify({ event: 'suggestion_action_applied', action: 'update', character_id: targetCharacterId, turn: turnNumber, target_id: target.id, active_count: list.filter(i => i.active).length }));
+  console.log(JSON.stringify({ event: 'legacy_suggestion_mutation_applied', action: 'update', character_id: targetCharacterId, turn: turnNumber, target_id: target.id, active_count: list.filter(i => i.active).length }));
   return {
     active_suggestions: {
       [targetCharacterId]: list.map(item => item === target ? { ...item, content: newContent, strength: newStrength } : item)
@@ -4295,17 +4310,11 @@ function buildStructuredActionStorySection(structuredPlan) {
 function buildStructuredActionExtractSection(structuredPlan) {
   if (!structuredPlan?.ok) return '';
   if (structuredPlan.canonical_action.type === 'find_npc') return '\n\n이번 턴의 최종 대상과 목적지는 Worker가 확정했다. character_id는 지정 대상이고 npcs_present에는 지정 대상을 포함한다.';
-  return '\n\n이번 턴의 암시·상식개변 상태 변경은 Worker의 확정 structured_action이 담당한다. suggestion_action과 csa_action은 반드시 null로 두고 별도 변경을 추측하지 마라.';
+  return '\n\n이번 턴의 최면 어플 상태 변경은 Worker가 이미 확정했다. 저장 상태를 새로 추론하지 말고 서사에서 실제 발생한 NPC 감정·수치·장면·대사·이미지 정보만 추출한다. 최면깊이의 앱 신규 등록 증가는 Worker가 결정한다.';
 }
 
-// Deterministic anchors the Worker can detect in the finalized narrative
-// text without needing its own separate strength judgment — Story is
-// instructed (buildStrengthPreJudgmentSection) to output this exact literal
-// text when it internally determines a request exceeds the current
-// strength ceiling. handleExtract then force-nullifies suggestion_action/
-// csa_action whenever the marker is present, so Extract's structured output
-// can never disagree with what was actually narrated (stage 4-B item 4:
-// "Worker가 판정 결과를 고정해 양쪽에 주입").
+// Retained legacy marker constants are not injected into Story or Extract;
+// structured UI validation owns current strength decisions.
 const SUGGESTION_STRENGTH_EXCEEDED_MARKER = '[현재 단계의 암시 범위를 초과했습니다.]';
 const CSA_STRENGTH_EXCEEDED_MARKER = '[현재 단계에서 설정할 수 없는 상식입니다.]';
 
@@ -4462,6 +4471,10 @@ function findInfeasibleChoices(choices, capability) {
   const problems = [];
   choices.forEach((choice, choice_index) => {
     if (typeof choice !== 'string' || !choice.trim()) return;
+    if (/(?:새\s*)?암시\s*(?:추가|삭제|수정|강화|약화)|상식\s*개변\s*(?:추가|수정|해제|삭제)/.test(choice)) {
+      problems.push({ choice_index, choice, reason: '암시와 상식개변 관리는 최면 어플 UI에서만 가능함' });
+      return;
+    }
     if (MISLEADING_SUGGESTION_TONE_RE.test(choice)) {
       problems.push({ choice_index, choice, reason: '말투·목소리만으로 저장된 암시가 강화되는 것처럼 표현됨' });
       return;
@@ -5503,11 +5516,8 @@ function resolveSpecialSceneRole(previousSave, extract, projectedStats = {}, app
   const characterId = typeof extract?.character_id === 'string' ? extract.character_id : null;
   if (!characterId || characterId === 'narrator' || extract?.is_sexual === true) return null;
 
-  const action = extract?.suggestion_action;
-  const suggestionActivated = action?.action === 'activate'
-    && (!action.character_id || action.character_id === characterId);
   const hypnosisDelta = Number(appliedChanges?.['최면깊이']?.delta);
-  if (suggestionActivated || (Number.isFinite(hypnosisDelta) && hypnosisDelta > 0)) return 'hypnosis_onset';
+  if (Number.isFinite(hypnosisDelta) && hypnosisDelta > 0) return 'hypnosis_onset';
 
   const previousStats = previousSave?.npc_stats?.[characterId] || {};
   const beforeAffinity = statNumber(previousStats, '호감도');
@@ -5843,7 +5853,6 @@ export {
   applyNpcStatChanges,
   resolveHypnosisDepthDelta,
   getCsaLimits,
-  applyCsaAction,
   isCsaApplicable,
   filterMainNpcDialogue,
   normalizeRelationshipState,
@@ -5872,17 +5881,12 @@ export {
   buildFirstEncounterRepairPrompt,
   repairMissingFirstEncounterStats,
   normalizeLegacyActiveSuggestions,
-  applySuggestionAction,
   buildActiveSuggestionSection,
-  buildActiveSuggestionPanelText,
-  buildCsaPanelText,
   buildApplicableCsaSection,
-  buildActiveCsaOperationSection,
   calculateHypnosisCapability,
   getHypnosisSuggestionLimits,
   hypnosisStrengthRank,
   normalizeStrengthForStorage,
-  buildCurrentHypnosisCapabilitySection,
   resolveHypnosisStoryState,
   buildHypnosisStatusPanelData,
   findInfeasibleChoices,
@@ -5916,9 +5920,6 @@ export {
   findProfessionRankErrors,
   hasRoleWordNearName,
   buildAddressAbbreviationSection,
-  SUGGESTION_STRENGTH_EXCEEDED_MARKER,
-  CSA_STRENGTH_EXCEEDED_MARKER,
-  buildStrengthPreJudgmentSection,
   buildSuggestionStrengthBoundarySection,
   buildCsaNatureSection,
   readRulebookExampleTier,
@@ -5945,7 +5946,6 @@ export {
   createRecoveryBudget,
   consumeRecoveryBudget,
   buildDegradedTurnSummary,
-  isPotentialAppMutationTurn,
   hasPotentialUnrecordedFirstEncounter,
   canUseDegradedExtract,
   buildDegradedExtract,

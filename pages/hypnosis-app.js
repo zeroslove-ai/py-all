@@ -15,6 +15,8 @@ window.hypnosisApp = (() => {
   let restoringHistory = false;
   let validationIssues = [];
   let originalBodyOverflow = '';
+  let requestedCharacterId = null;
+  let appNotice = '';
   const beforeUnloadHandler = event => { if (overlay && operations().length) { event.preventDefault(); event.returnValue = ''; } };
   const el = (tag, className = '', text = '') => {
     const node = document.createElement(tag);
@@ -25,6 +27,22 @@ window.hypnosisApp = (() => {
   const nameFor = (id) => appState?.npcs?.find(npc => npc.character_id === id)?.name || id;
   const copy = value => JSON.parse(JSON.stringify(value || []));
   const normalizeDraftContent = value => String(value || '').trim().replace(/\s+/g, ' ');
+
+  function resolveInputRoute(input, characters = {}) {
+    const text = String(input || '').trim(); if (!text) return null;
+    const negative = /하지\s*않|하지\s*말|말라고|할까|고민|생각해\s*본다|떠올린다|과거|예전에|말했다|물었다|NPC에게\s*묻|뜻이\s*뭐|무엇인지/.test(text) && !/수정|변경|바꿔|교체|강화|약화/.test(text);
+    const names = Object.entries(characters || {}).filter(([, value]) => typeof value?.name === 'string' && value.name.trim());
+    const hit = names.find(([, value]) => text.includes(value.name.trim()));
+    const character_id = hit?.[0] || null;
+    const action = /추가|등록|생성|새로|걸어|건다|적용|수정|변경|바꿔|교체|강화|약화|삭제|제거|해제|취소|끄기|켜기|활성화|비활성화|전부\s*(?:지워|해제)|모두\s*(?:지워|해제)|목록|확인|관리|편집/;
+    const hasSuggestion = /개인\s*암시|활성\s*암시|암시/.test(text);
+    const hasCsa = /상식\s*개변|상식개변|상식\s*변경|개변된\s*상식/.test(text);
+    if (!negative && hasSuggestion && action.test(text)) return { tab:'suggestions', character_id, notice: character_id ? `${names.find(([id])=>id===character_id)?.[1]?.name || ''}의 개인 암시 관리 화면을 열었습니다.` : '개인 암시는 최면 어플에서 관리합니다.' };
+    if (!negative && hasCsa && action.test(text)) return { tab:'csa', character_id:null, notice:'상식개변은 최면 어플에서 관리합니다.' };
+    if (/최면\s*(?:어플|앱)\s*(?:사용법|매뉴얼)|어플\s*설명|암시\s*단계\s*설명|상식개변\s*사용법/.test(text)) return { tab:'manual', character_id:null, notice:'최면 어플 매뉴얼을 열었습니다.' };
+    if (/최면\s*(?:어플|앱)\s*열어|어플\s*열어|앱\s*상태\s*보여/.test(text)) return { tab:'home', character_id:null, notice:'최면 어플을 열었습니다.' };
+    return null;
+  }
 
   function operations() {
     if (!draft) return [];
@@ -50,7 +68,7 @@ window.hypnosisApp = (() => {
   function showDialog(title, message, actions) { const shade=el('div','hypnosis-app-dialog-overlay'); const box=el('div','hypnosis-app-dialog'); box.setAttribute('role','alertdialog'); const messageNode=el('p','',message); messageNode.style.whiteSpace='pre-line'; box.append(el('h3','',title),messageNode); actions.forEach(action=>{const b=el('button','choice-btn',action.label);b.onclick=()=>{shade.remove();action.run();};box.appendChild(b);});shade.appendChild(box);overlay.appendChild(shade);box.querySelector('button')?.focus(); }
   function restoreHistorySentinel() { if (!overlay || historyPushed) return; history.pushState({ ...(history.state||{}), hypnosisApp:historyToken },'',location.href); historyPushed=true; }
   function destroyApp() { if (!overlay) return; document.removeEventListener('keydown', keydownHandler); window.removeEventListener('popstate', popstateHandler); window.removeEventListener('beforeunload', beforeUnloadHandler); if (historyPushed && history.state?.hypnosisApp === historyToken) history.back(); overlay.remove(); overlay=null; appState=null; draft=null; isApplying=false; selectedSuggestionIds.clear(); selectedCsaIds.clear(); validationIssues=[]; historyToken=null; historyPushed=false; opener?.focus?.(); opener=null; document.body.style.overflow=originalBodyOverflow; originalBodyOverflow=''; }
-  function requestClose(reason='close_button') { if (!overlay) return; if (isApplying) return showDialog('확인 중','현재 변경사항을 확인하고 있습니다.',[{label:'확인',run:()=>{}}]); const count=operations().length; if (!count) return destroyApp(); showDialog('미적용 변경사항',`아직 적용하지 않은 변경사항이 ${count}건 있습니다. 적용하시겠습니까?`,[{label:'계속 편집',run:()=>{if(reason==='popstate') restoreHistorySentinel();}},{label:'변경사항 버리기',run:destroyApp},{label:'적용하고 닫기',run:()=>applyDraft(true)}]); }
+  function requestClose(reason='close_button') { if (!overlay) return; if (reason==='popstate') restoreHistorySentinel(); if (isApplying) return showDialog('확인 중','현재 변경사항을 확인하고 있습니다.',[{label:'확인',run:()=>{}}]); const count=operations().length; if (!count) return destroyApp(); showDialog('미적용 변경사항',`아직 적용하지 않은 변경사항이 ${count}건 있습니다. 적용하시겠습니까?`,[{label:'계속 편집',run:()=>{}},{label:'변경사항 버리기',run:destroyApp},{label:'적용하고 닫기',run:()=>applyDraft(true)}]); }
   function forceCloseAfterValidation() { destroyApp(); }
 
   function renderHome(body) {
@@ -110,7 +128,7 @@ window.hypnosisApp = (() => {
     bulk.append(selectedDelete, allDelete); body.appendChild(bulk);
     if (!list?.filter(item => !item._deleted).length) body.append(el('p', '', '현재 활성 항목이 없습니다.'));
     list.forEach(item => {
-      const card = el('article', `hypnosis-app-effect-card${item._deleted ? ' pending-delete' : ''}`); card.dataset.clientId=item._new?item.client_id:`${domain}:${item.id}`;
+      const card = el('article', `hypnosis-app-effect-card${item._deleted ? ' pending-delete' : ''}`); card.dataset.clientId=item._new?item.client_id:`${domain}:${item.id}`; if (item.character_id) card.dataset.characterId=item.character_id;
       const title = domain === 'suggestion' ? `${item.character_name || nameFor(item.character_id)} · ${item.strength_label || item.strength}` : `${item.scope_label || item.scope_type} · ${item.strength_label || item.strength}`;
       const strength = el('select'); (appState.strength_options || []).forEach(meta => { const option=el('option','',meta.label); option.value=meta.id; option.selected=item.strength===meta.id; option.disabled=!meta.available && !option.selected; strength.appendChild(option); });
       const content = el('textarea'); content.value=item.content || ''; content.rows=3; strength.disabled=item._deleted; content.disabled=item._deleted;
@@ -118,7 +136,7 @@ window.hypnosisApp = (() => {
       const check=el('input'); check.type='checkbox'; check.checked=selected.has(item.id || item.client_id); check.disabled=item._deleted; check.onchange=()=>{ const key=item.id||item.client_id; check.checked?selected.add(key):selected.delete(key); renderTab(kind); };
       const remove=el('button','choice-btn',item._deleted?'복구':(item._new?'취소':'해제')); remove.onclick=()=>{ if(item._deleted) item._deleted=false; else if(item._new){ const target=domain==='suggestion'?draft.suggestions:draft.csa; target.splice(target.indexOf(item),1); } else item._deleted=true; selected.delete(item.id||item.client_id); renderTab(kind); };
       if (domain === 'csa') { const scope=el('select'); (appState.scope_options||[]).forEach(meta=>{const option=el('option','',meta.available?meta.label:`${meta.label} · Lv.${meta.unlock_level}`);option.value=meta.id;option.selected=item.scope_type===meta.id;option.disabled=!meta.available&&!option.selected;scope.appendChild(option);}); scope.disabled=item._deleted; scope.onchange=()=>{item.scope_type=scope.value;refreshDraftBar();}; card.appendChild(scope); }
-      const issue=validationIssues.find(entry=>entry.client_id===card.dataset.clientId); if(issue) card.appendChild(el('p','hypnosis-app-error',issue.message||'이 항목을 적용할 수 없습니다.'));
+      const issue=validationIssues.find(entry=>entry.client_id===card.dataset.clientId); if(issue) { card.appendChild(el('p','hypnosis-app-error',[issue.message, issue.reason].filter(Boolean).join(' '))); if(issue.suggested_strength && (appState.strength_options||[]).some(meta=>meta.id===issue.suggested_strength&&meta.available)) { const quick=el('button','choice-btn',`${(appState.strength_options||[]).find(meta=>meta.id===issue.suggested_strength)?.label || issue.suggested_strength}으로 변경`); quick.onclick=()=>{item.strength=issue.suggested_strength; validationIssues=validationIssues.filter(entry=>entry!==issue); renderTab(kind);}; card.appendChild(quick); } }
       card.append(check,el('strong','',title),item._deleted?el('span','pending-badge',domain==='suggestion'?'삭제 예정':'해제 예정'):document.createTextNode(''),strength,content,remove); body.appendChild(card);
     });
   }
@@ -150,12 +168,15 @@ window.hypnosisApp = (() => {
     else if (tab === 'suggestions') renderEffects(body, 'suggestions');
     else if (tab === 'csa') renderEffects(body, 'csa');
     else renderManual(body);
+    if (appNotice) { body.prepend(el('p','hypnosis-app-diagnostic info',appNotice)); appNotice=''; }
+    if (requestedCharacterId) body.querySelector(`[data-character-id="${requestedCharacterId}"]`)?.scrollIntoView({ block:'center' });
     overlay.querySelectorAll('[role="tab"]').forEach(button => button.setAttribute('aria-selected', String(button.dataset.tab === tab)));
     refreshDraftBar();
   }
 
-  async function open(initialTab = 'home') {
-    if (overlay) return;
+  async function open(initialTab = 'home', options = {}) {
+    requestedCharacterId=options.characterId || null; appNotice=options.notice || '';
+    if (overlay) { if (draft) renderTab(initialTab); return; }
     opener = document.activeElement;
     overlay = el('div', 'hypnosis-app-overlay');
     const modal = el('div', 'hypnosis-app-modal'); modal.setAttribute('role', 'dialog'); modal.setAttribute('aria-modal', 'true');
@@ -175,5 +196,5 @@ window.hypnosisApp = (() => {
     try { appState = (await api.appState(state.gameId)).app; draft = { tab: initialTab, originalSuggestions: copy(appState.suggestions), originalCsa: copy(appState.common_sense), suggestions: copy(appState.suggestions), csa: copy(appState.common_sense) }; renderTab(initialTab); }
     catch (error) { const body = overlay.querySelector('.hypnosis-app-body'); body.replaceChildren(el('p', 'hypnosis-app-error', '최면 어플 정보를 불러오지 못했습니다.')); }
   }
-  return { init() {}, open, close: requestClose, isOpen: () => Boolean(overlay), onGameReset: destroyApp };
+  return { init() {}, open, close: requestClose, isOpen: () => Boolean(overlay), onGameReset: destroyApp, resolveInputRoute };
 })();

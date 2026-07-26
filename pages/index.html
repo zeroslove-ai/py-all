@@ -744,7 +744,8 @@
         choiceText: rollback.player_action?.choice_text || null,
         regenerationFeedback: feedbackText,
         expectedTurnNumber: rollback.rolled_back_turn_number - 1,
-        rollbackInfo: { turnNumber: rollback.rolled_back_turn_number, restorePayload: rollback.restore_payload }
+        rollbackInfo: { turnNumber: rollback.rolled_back_turn_number, restorePayload: rollback.restore_payload },
+        structuredAction: rollback.player_action?.structured_action || null
       });
     }
 
@@ -821,12 +822,21 @@
       regenerationFeedback = null, expectedTurnNumber = null, systemStart = false, rollbackInfo = null,
       structuredAction = null
     } = {}) {
+      if (!structuredAction && !regenerationFeedback && !systemStart) {
+        const route = window.hypnosisApp?.resolveInputRoute?.(playerInput, state.context?.master?.characters || {});
+        if (route) {
+          document.getElementById('chat-input').value = '';
+          await window.hypnosisApp.open(route.tab, { characterId: route.character_id, notice: route.notice });
+          return { redirected: true };
+        }
+      }
       const nextTurn = (Number.isInteger(expectedTurnNumber) ? expectedTurnNumber : state.turnCount) + 1;
       const playerAction = { source, raw_input: playerInput, choice_index: choiceIndex, choice_text: choiceText };
       await retryStory({
         input: playerInput, nextTurn, narrative: null, extract: null, mode: null,
         narrativeElement: null, playerAction, regenerationFeedback, systemStart, rollbackInfo, structuredAction
       });
+      return { redirected: false };
     }
 
     async function handleTurnInput(actionMeta = { source: 'direct_text' }) {
@@ -834,11 +844,13 @@
       if (!input || !state.gameId || state.isStreaming) return;
       document.getElementById('chat-input').value = '';
       if (input.startsWith('/')) { await handleCommand(input); return; }
-      ui.addUserMessage(input);
       const meta = actionMeta && typeof actionMeta === 'object' ? actionMeta : { source: 'direct_text' };
       const source = meta.source === 'choice_button'
         ? 'choice_button'
         : (DIRECT_MARKER_INPUT_RE.test(input) ? 'direct_marker' : 'direct_text');
+      const route = window.hypnosisApp?.resolveInputRoute?.(input, state.context?.master?.characters || {});
+      if (route) { await window.hypnosisApp.open(route.tab, { characterId: route.character_id, notice: route.notice }); return; }
+      ui.addUserMessage(input);
       await runTurn({
         playerInput: input, source,
         choiceIndex: Number.isInteger(meta.choice_index) ? meta.choice_index : null,
@@ -913,6 +925,10 @@
       } catch (error) {
         ui.setChoicesEnabled(true);
         if (await handleTurnFailureAsRollback(pending, '피드백 재생성에 실패하여 기존 턴을 복구했습니다.')) return;
+        if (error.details?.error_code === 'APP_UI_REQUIRED' && error.details?.app_route) {
+          await window.hypnosisApp?.open(error.details.app_route.tab, { characterId: error.details.app_route.character_id, notice: error.details.app_route.notice || error.message });
+          return;
+        }
         ui.failCurrentNarrative();
         const code = error.status || 'UNKNOWN';
         const suffix = error.requestId ? ` · 요청 ${error.requestId}` : '';

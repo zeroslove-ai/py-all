@@ -1078,13 +1078,32 @@ async function handleTts(req, env) {
     console.error('TTS Worker service binding missing', { binding: 'TTS_WORKER' });
     return jsonResponse({ error: 'TTS Worker not configured' }, 500);
   }
+
+  // TTS 전용 정규화 — 화면 narrative_text(원본 text/direction 변수)는 절대
+  // 건드리지 않는다. 여기서 만든 값은 Fish Audio 요청에만 쓰인다.
+  const originalText = text.trim();
+  const normalizedText = normalizeTtsText(originalText);
+  if (!hasSpeakableTtsContent(normalizedText)) {
+    return jsonResponse({ error: 'text has no speakable content after normalization' }, 400);
+  }
+  const { direction: normalizedDirection, emotion } = resolveTtsDirection(direction);
+  // 개발 확인용 로그 — 대사 전체가 아니라 원본/정규화 길이와 direction만.
+  console.log(JSON.stringify({
+    event: 'tts_normalize',
+    original_direction: direction.trim(),
+    normalized_direction: normalizedDirection,
+    emotion,
+    original_text_length: originalText.length,
+    normalized_text_length: normalizedText.length
+  }));
+
   const ttsUrl = env.TTS_WORKER_URL || 'https://fancy-dust-7f8c.zeroslove.workers.dev/';
   let res;
   try {
     res = await env.TTS_WORKER.fetch(ttsUrl, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ text: text.trim(), voice_id: voice_id.trim(), direction: direction.trim(), emotion: mapDirection(direction) })
+      body: JSON.stringify({ text: normalizedText, voice_id: voice_id.trim(), direction: normalizedDirection, emotion })
     });
   } catch (error) {
     console.error('TTS Worker request failed', { url: ttsUrl, error: error.message });
@@ -1988,6 +2007,23 @@ function buildAppSystemRulesSection() {
 // [게임 설정] block's 2000-char slice truncates master.characters before it
 // reaches this heroine's entry. Deliberately excludes 은밀정보/신음타입 and
 // every other heroine's profile.
+// V1 신음 성향 분류(A/B/C) 참고용 — 이름이 같은 V1 캐릭터의 신음 성향
+// "분류만" 참고한다. 관계 진행·과거 사건은 절대 가져오지 않으며, 현재 V2
+// 프로필과 현재 서사가 항상 우선한다. 분류에 없는 캐릭터는 이 줄 없이
+// 프로필의 성격·말투만으로 자연스러운 반응을 생성한다.
+const VOCAL_STYLE_BY_NAME = {
+  '임수정': 'VOCAL STYLE: A형(수치심 순응) — 당황·억제·수치심에서 시작해 서서히 무너지되 저항과 혼란을 남긴다.',
+  '배수진': 'VOCAL STYLE: A형(수치심 순응) — 당황·억제·수치심에서 시작해 서서히 무너지되 저항과 혼란을 남긴다.',
+  '박소현': 'VOCAL STYLE: A형(수치심 순응) — 당황·억제·수치심에서 시작해 서서히 무너지되 저항과 혼란을 남긴다.',
+  '최유리': 'VOCAL STYLE: B형(적극 쾌감) — 놀람과 쾌감을 비교적 솔직하고 밝게 드러내되 관계 수준을 넘지 않는다.',
+  '윤아름': 'VOCAL STYLE: B형(적극 쾌감) — 놀람과 쾌감을 비교적 솔직하고 밝게 드러내되 관계 수준을 넘지 않는다.',
+  '한소영': 'VOCAL STYLE: C형(의무+쾌감) — 억제·합리화에서 시작해 실제 자극 수준만큼만 흔들린다.',
+  '강세라': 'VOCAL STYLE: C형(의무+쾌감) — 억제·합리화에서 시작해 실제 자극 수준만큼만 흔들린다.',
+  '김지은': 'VOCAL STYLE: C형(의무+쾌감) — 억제·합리화에서 시작해 실제 자극 수준만큼만 흔들린다.',
+  '서지아': 'VOCAL STYLE: C형(의무+쾌감) — 억제·합리화에서 시작해 실제 자극 수준만큼만 흔들린다.',
+  '한세아': 'VOCAL STYLE: C형(의무+쾌감) — 억제·합리화에서 시작해 실제 자극 수준만큼만 흔들린다.'
+};
+
 function buildCurrentNpcProfileSection(save = {}, characters = {}) {
   const characterId = save?.last_character_id;
   if (!characterId || characterId === 'narrator') return '';
@@ -2026,6 +2062,9 @@ function buildCurrentNpcProfileSection(save = {}, characters = {}) {
   pushField('숨겨진설정(비노출 참고용)', '숨겨진설정');
   pushField('관찰 가능 특징', '외형');
   pushField('체형', '체형');
+  // 현재 NPC 1줄만 — 전체 V1 목록은 절대 프롬프트에 넣지 않는다.
+  const vocalStyleLine = VOCAL_STYLE_BY_NAME[name];
+  if (vocalStyleLine) lines.push(vocalStyleLine);
 
   return `\n\n[CURRENT NPC PROFILE — ESTABLISHED FACT]\n\n${lines.join('\n')}\n\n규칙:\n- 위 정보는 최근 기억·선택지·요약에 섞인 잘못된 이름, 나이, 직급, 말투보다 우선한다.\n- 소속이 간호사인데 근거 없이 실장·과장·수간호사 등으로 승격시키지 않는다.\n- 직종·부서·직급이 위에 적혀 있으면 그 값을 그대로 유지한다. 근거 없이 다른 직종·부서·직급으로 바꾸거나 승격·강등시키지 않는다.\n- 숨겨진설정과 취향은 행동 일관성에만 사용하고 NPC가 직접 고백하거나 플레이어가 아는 사실처럼 노출하지 않는다.\n- 플레이어가 잘못된 호칭을 사용하면 NPC 성격에 맞게 자연스럽게 정정하거나 호칭을 흘려넘길 수 있지만, 서술자와 선택지는 잘못된 직급을 확정 사실로 반복하지 않는다.`;
 }
@@ -2078,6 +2117,10 @@ function buildNpcDialogueMinimumSection() {
   return `\n\n[NPC DIALOGUE MINIMUM CONTRACT]\n\n- 등록 NPC가 실제 장면에 있고 플레이어와 대화·상호작용하는 일반 턴이라면 의미 있는 NPC 발언을 최소 3회 포함한다. 형식은 [대사 — AUTHORITATIVE DIALOGUE CONTRACT]과 동일하다.\n- "의미 있는 발언"은 다음 중 하나를 새로 수행해야 한다: 입력에 직접 답변 / 새 정보 제공 / 질문 또는 확인 / 결정·수락·거절·조건 제시 / 감정이나 관계 변화 표현 / 행동을 시작하거나 중단시키는 말 / 다른 NPC와의 실제 상호작용.\n- 각 NPC 발언 사이에는 새로운 행동·정보·결정·관계 변화 중 하나가 있어야 한다. 한 문장을 세 조각으로 나누거나 같은 의미를 반복해서 3회를 채우는 것은 금지한다.\n- 다음 경우에는 최소 3회를 강제하지 않는다: NPC가 없는 narrator 장면 / 플레이어가 말없이 관찰만 하겠다고 명시한 장면 / NPC가 잠들었거나 의식을 잃었거나 말할 수 없는 장면 / 대사보다 즉각적인 물리 행동이 중심이고 발언 3회가 부자연스러운 순간 / 재진입 모드 / player_setup 모드. 다만 NPC가 있는 일반 대화 장면에서 단순히 짧게 끝내기 위해 이 예외를 쓰지 않는다.\n- 여러 NPC가 등장하면 장면 전체 등록 NPC 발언 합계가 최소 3회이면 되고, NPC마다 3회씩 강제하지 않는다. 메인 NPC가 대화의 중심을 유지하고, 다른 NPC의 짧은 발언만으로 메인 NPC를 자동 전환하지 않는 기존 계약을 유지한다.\n- 플레이어가 입력하지 않은 새 플레이어 발언을 임의로 만들어 대화 횟수를 채우지 않는다. 플레이어 입력은 이미 발생한 말 또는 행동으로 취급하고, 이후 NPC 반응과 장면 전개만 쓴다.`;
 }
 
+function buildMoanVocalReactionSection() {
+  return `\n\n[MOAN AND VOCAL REACTION CONTRACT]\n\n- 신음은 캐릭터의 성격·말투·현재 감정·실제 자극 수준에 맞게 쓴다. 신음 유형은 표현 성향일 뿐 캐릭터의 행동이나 관계를 강제로 결정하지 않는다.\n- 초기·중기·강한 반응은 이번 서사에서 실제로 일어난 자극 수준에 따라서만 고른다. 절정이나 강한 쾌감이 실제로 없었다면 강한 신음을 쓰지 않는다.\n- 짧은 신음과 정상 대사를 섞고, 모든 대사를 신음으로 채우지 않는다. 같은 음절을 한 턴 안에서, 그리고 직전 턴과 반복하지 않는다.\n- 신음 때문에 캐릭터 고유의 말투가 사라지지 않게 한다. 일시적 신체 반응을 사랑·영구 복종·완전한 욕망으로 자동 확정하지 않고, 갈등·혼란·수치심·자기합리화가 남아 있으면 그대로 유지한다.\n- 현재 관계에서 성립하지 않은 "주인님"/"여보"/"사랑해"/소유 표현을 자동 생성하지 않는다.\n- 하트·이모지·장식 기호를 쓰지 않는다. "아아아아아아"처럼 같은 음절을 과도하게 늘이지 않는다. 신음 음절은 보통 1~4음절 단위로 제한하고, 한 발화에서 신음만 길게 이어가지 않는다.\n- 신음에도 말줄임표는 최대 \`..\`까지만 쓴다. 모든 신음·감탄도 반드시 '화자명 (짧은 연기지시): "대사"' 형식을 따른다 — 화자명 없는 단독 감탄은 금지한다.\n- 평범한 대화나 업무 보고 장면에서는 매 발화마다 신음을 넣지 않는다. 신체 자극이 없거나 약하면 생략할 수 있다. 같은 NPC가 연속된 2개 이상의 발화를 모두 신음으로 시작하지 않는다.\n정상: 한소영 (숨을 짧게 삼키며): "읏.. 잠시만요."\n비정상: "으으으으으으으으응……!" / 한소영: "아아앙! 주인님!"`;
+}
+
 function buildAntiRepetitionSection() {
   return `\n\n[ANTI-REPETITION NARRATIVE CONTRACT]\n\n- 최근 기억 3턴과 같은 문장 구조와 동작을 연속 반복하지 않는다.\n- '암시가 작동 중이다'를 해설로 반복하지 말고, 선택·행동·말투·자기합리화로 보여준다.\n- 다음 표현을 매 턴 습관적으로 재사용하지 않는다: '눈동자가 흔들렸다', '손가락을 만지작거렸다', '살짝 붉어졌다', '경계와 호기심이 섞였다', '무의식적으로 반응했다'.\n- 표정만 바꾸고 끝내지 말고 공간 사용, 자세 변화, 소도구, 실제 행동, 질문, 결정, 정보 공개를 다양하게 조합한다.\n- 직전 턴에서 이미 끝난 손 내밀기, 자리 이동, 입장, 암시 성공을 다시 실행하지 않는다.`;
 }
@@ -2116,8 +2159,10 @@ function buildStoryPrompt(ctx, playerInput, currentTurn, feedback = [], regenera
 [금지] 이미지(![), 오디오(<audio), URL(http), HTML 태그를 절대 쓰지 마라. 이건 렌더러가 처리한다.
 [순서] 출력 순서: [1. 서사 및 행동] [2. 플레이어 상황판] [3. 선택지]. 마인드 모니터는 본문에 절대 출력하지 않는다. 선택지는 항상 맨 마지막.
 [대사 — AUTHORITATIVE DIALOGUE CONTRACT] [1. 서사 및 행동] 안의 모든 직접 대사는 반드시 '화자명 (짧은 연기지시): “대사”' 이 한 가지 형식으로만 쓴다. NPC는 캐릭터명, 플레이어는 플레이어 이름을 화자명으로 쓰고, 괄호 안 연기지시는 짧고 구체적으로 반드시 포함한다. 이름 없는 따옴표 대사는 금지한다 — 신음, 숨소리, 짧은 감탄도 직접 발화라면 같은 형식을 적용한다. 서술문 속 인용이나 문서 문구의 인용만 예외다. 화자명을 마크다운 굵게(**)로 감싸지 않는다(Extract/TTS 파서와 동일 계약). 자연스러운 소설체보다 이 화자 형식이 우선한다. [최근 기억]에 화자명 없이 따옴표만 있는 옛 대사가 남아 있어도 그 형식을 절대 모방하지 말고, 이번 턴의 모든 대사는 항상 위 형식만 따른다.
-예: 강세라 (숨을 얕게 몰아쉬며): “……감사관님……”
+예: 강세라 (숨을 얕게 몰아쉬며): “하아.. 감사관님.”
 예: 박도훈 (차분하게 압박하며): “계속 보고하세요.”
+[ELLIPSIS AND PAUSE CONTRACT] 말줄임표는 반드시 마침표 2개(..)만 쓴다. 말줄임표 …, ……, ………, 마침표 3개 이상 연속(... , ....)은 쓰지 않는다. 대사의 시작과 끝을 습관적으로 ..로 감싸지 않고, 한 문장 안에서 단어마다 ..로 끊지 않는다. 망설임·숨 고르기·말이 실제로 끊기는 지점에만 제한적으로 쓰고, 업무 보고·정보 전달·평범한 대화는 쉼표·마침표·물음표·느낌표 위주의 정상적인 문장 리듬으로 쓴다. [최근 기억]에 …나 과도한 말줄임표가 남아 있어도 절대 모방하지 않는다. 신음과 짧은 감탄에서도 말줄임표는 최대 ..까지만 허용한다.
+잘못: “……오늘……3병동……야간……근무입니다……” / 권장: “오늘 3병동 야간 근무 일정입니다.”
 [사용자 정정 우선] 사용자가 직전 장면의 상태·복장·위치·행동 결과를 직접 정정하면, 그 입력을 현재 장면의 최우선 사실로 취급한다. 직전 서사·요약·저장 기억이 사용자 정정과 충돌하면 사용자 정정을 우선하고, "실제로는 그렇지 않았다"거나 "사용자가 착각했다"고 임의로 반박하지 않는다. 정정은 현재 장면에 자연스럽게 반영하고 과거 전체를 다시 서술하지 않는다.
 [등록 상호작용 NPC] 마인드 모니터·NPC 수치·이미지·관계 기록처럼 영구 저장되는 상태를 가질 수 있는 NPC는 master.characters의 등록 히로인뿐이다. 미등록 의사·간호사·환자·보호자·직원 같은 단역 NPC도 이름과 대사를 자유롭게 가질 수 있고, 먼저 말을 걸거나 선택지/현재 접근 대상이 될 수 있다 — 다만 그 단역에게는 수치·이미지·관계 기록 같은 영구 상태를 만들지 않는다. 외형만 보고 heroine ID를 추측하지 마라 — 실제로 등장한 등록 히로인에게만 붙인다.
 [모니터] 매턴 [1.표면의식]/[2.잠재의식] 각 100~200자, 대화체로 작성.`;
@@ -2217,6 +2262,7 @@ ${recentMemorySlice.map((m, index) => clipHeadTail(m.content || '', index === re
   const suggestionSection = buildActiveSuggestionSection(save, master.characters || {});
   const narrativeLengthSection = buildNarrativeLengthSection();
   const npcDialogueSection = buildNpcDialogueMinimumSection();
+  const moanVocalReactionSection = buildMoanVocalReactionSection();
   const antiRepetitionSection = buildAntiRepetitionSection();
   const feedbackSection = Array.isArray(feedback) && feedback.length
     ? `\n\n[USER FEEDBACK — APPLY TO THIS NEXT RESPONSE ONLY]\n${feedback.map(item => `- ${typeof item === 'string' ? item : item?.text || ''}`).filter(Boolean).join('\n')}\nThis is not an in-world action. Never narrate it as dialogue or an event; use it only to improve output quality.`
@@ -2290,7 +2336,7 @@ ${recentMemorySlice.map((m, index) => clipHeadTail(m.content || '', index === re
   // everything above it, including [최근 기억]'s now-stale account of the
   // turn that was just rolled back.
   const regenerationFeedbackSection = buildRegenerationFeedbackSection(regenerationFeedback);
-  const systemPrompt = coreRules + playerGate + modeSection + rulebookSection + openingScenarioSection + appUsageSection + eligibleNpcRosterSection + buildAppSystemRulesSection() + currentSceneSection + npcProfileSection + explicitMentionSection + csaSection + csaNatureSection + suggestionSection + suggestionStrengthBoundarySection + narrativeLengthSection + npcDialogueSection + antiRepetitionSection + playerStatusPanel + contextSection + feedbackSection + continuitySection + finalFormatRules + openingFlow + playerSetupReminder + hypnosisCapabilitySection + strengthPreJudgmentSection + suggestionExampleSection + csaExampleSection + activeCsaOperationSection + registeredNpcChoiceReminder + choiceLengthReminder + buildAddressAbbreviationSection() + regenerationFeedbackSection;
+  const systemPrompt = coreRules + playerGate + modeSection + rulebookSection + openingScenarioSection + appUsageSection + eligibleNpcRosterSection + buildAppSystemRulesSection() + currentSceneSection + npcProfileSection + explicitMentionSection + csaSection + csaNatureSection + suggestionSection + suggestionStrengthBoundarySection + narrativeLengthSection + npcDialogueSection + moanVocalReactionSection + antiRepetitionSection + playerStatusPanel + contextSection + feedbackSection + continuitySection + finalFormatRules + openingFlow + playerSetupReminder + hypnosisCapabilitySection + strengthPreJudgmentSection + suggestionExampleSection + csaExampleSection + activeCsaOperationSection + registeredNpcChoiceReminder + choiceLengthReminder + buildAddressAbbreviationSection() + regenerationFeedbackSection;
 
   return {
     mode,
@@ -2848,13 +2894,77 @@ function buildSavePatch(extract, enginePatch = {}, summaryPlan = null, previousS
   return patch;
 }
 
+// Priority order per the TTS de-musicalization pass: a compound direction
+// ("차분하게, 그러나 여전히 숨이 약간 가쁘게") must collapse to exactly one
+// core tone instead of being forwarded whole — sad/눈물 outranks everything
+// else, down to a plain neutral fallback. Narrative connector phrases
+// ("이어서", "마무리하며", "간신히") never match any of these and correctly
+// fall through to neutral. No singing/musical category exists here (checked
+// — the deployed TTS Worker doesn't consume `emotion` at all currently, see
+// handleTts), so there is nothing to exclude, but emotion is defensively
+// clamped away from any such value below just in case that ever changes.
 function mapDirection(direction = '') {
+  if (/울먹|눈물|흐느끼|서럽/.test(direction)) return 'sad';
   if (/속삭|작게|귓속말/.test(direction)) return 'whisper';
-  if (/울먹|떨리는|눈물/.test(direction)) return 'sad';
-  if (/화난|날카롭게|소리치/.test(direction)) return 'angry';
-  if (/웃으며|밝게|활기차게/.test(direction)) return 'happy';
-  if (/당황|긴장|머뭇/.test(direction)) return 'nervous';
+  if (/떨리는|떨림|긴장|당황|머뭇/.test(direction)) return 'nervous';
+  if (/화난|분노|날카롭게|소리치/.test(direction)) return 'angry';
+  if (/웃으며|밝게|활기차게|신나/.test(direction)) return 'happy';
+  if (/차분|침착|평온|담담/.test(direction)) return 'calm';
   return 'neutral';
+}
+
+const TTS_CORE_DIRECTION_PHRASE = {
+  sad: '울먹이며',
+  whisper: '속삭이며',
+  nervous: '긴장하며',
+  angry: '분노하며',
+  happy: '밝게',
+  calm: '차분하게',
+  neutral: '담담하게'
+};
+
+// Collapses a possibly-compound Story direction ("차분하게, 그러나 여전히
+// 숨이 약간 가쁘게") into exactly one stable tone before it ever reaches
+// Fish Audio — never the raw compound text.
+function resolveTtsDirection(rawDirection) {
+  let emotion = mapDirection(rawDirection);
+  // Defensive only — no singing/musical category is ever produced above,
+  // but guard against a future mapDirection edit accidentally adding one
+  // that a normal (non-requested) line could land on.
+  if (emotion === 'singing' || emotion === 'musical' || emotion === 'song') emotion = 'neutral';
+  return { emotion, direction: TTS_CORE_DIRECTION_PHRASE[emotion] || TTS_CORE_DIRECTION_PHRASE.neutral };
+}
+
+// TTS-only text normalization — the screen narrative_text is never touched;
+// this only shapes what gets sent to Fish Audio. Excess ellipsis is what
+// Fish Audio's s2.1-pro-free model reads as long pauses + pitch swings per
+// word (the actual cause of the "singing" delivery), so every ellipsis run
+// is removed here, not merely capped.
+const TTS_ELLIPSIS_RUN_RE = /[.…]{2,}/g;
+const TTS_DASH_RUN_RE = /[—–\-]{2,}/g;
+
+function normalizeTtsText(rawText) {
+  let text = typeof rawText === 'string' ? rawText : '';
+  // 연속 대시(——, --)는 짧은 쉼(쉼표)으로.
+  text = text.replace(TTS_DASH_RUN_RE, ', ');
+  // 문장 시작을 감싸는 말줄임표는 화면 연출일 뿐이므로 그대로 제거한다.
+  text = text.replace(/^[.…]{2,}\s*/, '');
+  // 문장 끝을 감싸는 말줄임표는 자연스러운 마침표 하나로.
+  text = text.replace(/\s*[.…]{2,}\s*$/, '.');
+  // 남은 단어 사이 말줄임표 반복은 자연스러운 쉼표로 — TTS가 과도한 정지·
+  // 피치 변화로 해석할 말줄임표 문자를 남기지 않는다. 신음·감탄 음절
+  // 자체(읏, 앗, 하아 등)는 그대로 유지된다.
+  text = text.replace(TTS_ELLIPSIS_RUN_RE, ', ');
+  text = text.replace(/\s{2,}/g, ' ');
+  text = text.replace(/,\s*,/g, ',');
+  text = text.replace(/,\s*\./g, '.');
+  return text.trim();
+}
+
+// 구두점·공백만 남는 발화는 TTS 요청 자체를 하지 않는다 — 신음/감탄 음절은
+// 실제 글자이므로 이 검사에서 항상 살아남는다.
+function hasSpeakableTtsContent(text) {
+  return /[^\s.,!?~\-–—…]/u.test(text || '');
 }
 
 function normalizeExtract(extract) {

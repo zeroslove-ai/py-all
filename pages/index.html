@@ -812,13 +812,14 @@
     // default to null) and only ever populated by runFeedbackRegeneration().
     async function runTurn({
       playerInput, source = 'direct_text', choiceIndex = null, choiceText = null,
-      regenerationFeedback = null, expectedTurnNumber = null, systemStart = false, rollbackInfo = null
+      regenerationFeedback = null, expectedTurnNumber = null, systemStart = false, rollbackInfo = null,
+      structuredAction = null
     } = {}) {
       const nextTurn = (Number.isInteger(expectedTurnNumber) ? expectedTurnNumber : state.turnCount) + 1;
       const playerAction = { source, raw_input: playerInput, choice_index: choiceIndex, choice_text: choiceText };
       await retryStory({
         input: playerInput, nextTurn, narrative: null, extract: null, mode: null,
-        narrativeElement: null, playerAction, regenerationFeedback, systemStart, rollbackInfo
+        narrativeElement: null, playerAction, regenerationFeedback, systemStart, rollbackInfo, structuredAction
       });
     }
 
@@ -836,6 +837,16 @@
         playerInput: input, source,
         choiceIndex: Number.isInteger(meta.choice_index) ? meta.choice_index : null,
         choiceText: typeof meta.choice_text === 'string' ? meta.choice_text : null
+      });
+    }
+
+    async function runStructuredAction(structuredAction, displayInput) {
+      if (!structuredAction || !displayInput || state.isStreaming) return;
+      ui.addUserMessage(displayInput);
+      await runTurn({
+        playerInput: displayInput,
+        source: structuredAction.type === 'find_npc' ? 'find_npc' : 'app_ui',
+        structuredAction
       });
     }
 
@@ -880,7 +891,7 @@
         // wait for this instead).
         const { networkDone, renderDone } = stream.story(
           state.gameId, pending.input, state.turnCount, chunk => ui.appendNarrative(chunk),
-          getFeedback(), pending.regenerationFeedback || null
+          getFeedback(), pending.regenerationFeedback || null, pending.structuredAction || null
         );
         pending.renderDone = renderDone;
         const result = await networkDone;
@@ -926,7 +937,7 @@
       try {
         // Started as soon as the network text is ready — runs concurrently
         // with the still-typing display queue, not after it.
-        const result = await api.extract(state.gameId, pending.narrative, pending.nextTurn, pending.input);
+        const result = await api.extract(state.gameId, pending.narrative, pending.nextTurn, pending.input, pending.structuredAction || null);
         console.info('[extract-timing]', result.timing);
         pending.extract = result.extract;
         pending.extract.extract_degraded = result.extract_degraded === true;
@@ -986,7 +997,7 @@
       try {
         // Runs immediately after Extract, in parallel with the still-typing
         // display queue — only the DOM updates below wait for renderDone.
-        const saved = await api.commitTurn(state.gameId, pending.nextTurn, pending.narrative, pending.extract, pending.mode === 'opening' ? { opening_started: true } : {}, pending.input, pending.playerAction);
+        const saved = await api.commitTurn(state.gameId, pending.nextTurn, pending.narrative, pending.extract, pending.mode === 'opening' ? { opening_started: true } : {}, pending.input, pending.playerAction, pending.structuredAction || null);
         state.turnCount = saved.turn_count; ui.updateMeta(null, state.turnCount);
         pending.timing = { ...(pending.timing || {}), commit: saved.timing };
         if (saved.npc_stats) pending.extract.npc_stats = saved.npc_stats;
@@ -1216,6 +1227,7 @@
     window.resumeGame = resumeGame;
     window.showAppManual = showAppManual;
     window.showAppInfo = showAppManual;
+    window.runHypnosisStructuredAction = runStructuredAction;
     window.showResetModal = showResetModal;
     window.showFeedbackModal = showFeedbackModal;
 

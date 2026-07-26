@@ -58,7 +58,7 @@ const stream = {
   // concurrently with the still-typing display; callers touching the DOM
   // (finalizing the narrative element, revealing choices) must await
   // renderDone so they never cut the animation short.
-  story(gameId, playerInput, turnCount, onChunk, feedback = [], regenerationFeedback = null) {
+  story(gameId, playerInput, turnCount, onChunk, feedback = [], regenerationFeedback = null, structuredAction = null) {
     const overallStart = Date.now();
     let resolveNetworkDone, rejectNetworkDone;
     let resolveRenderDone, rejectRenderDone;
@@ -77,7 +77,8 @@ const stream = {
             player_input: playerInput,
             turn_count: turnCount,
             feedback,
-            regeneration_feedback: regenerationFeedback
+            regeneration_feedback: regenerationFeedback,
+            structured_action: structuredAction
           })
         });
         fetchHeadersMs = Date.now() - overallStart;
@@ -85,9 +86,12 @@ const stream = {
 
         if (!res.ok) {
           const text = await res.text();
-          const error = new Error(`story failed: ${res.status} ${text}`);
+          let details = {};
+          try { details = JSON.parse(text); } catch { /* legacy text response */ }
+          const error = new Error(details.error || `story failed: ${res.status} ${text}`);
           error.status = res.status;
           error.requestId = requestId;
+          error.details = details;
           throw error;
         }
         if (!res.body) throw new Error('ReadableStream not supported');

@@ -40,13 +40,27 @@ const api = {
     return readApiResponse(res, 'app-manual');
   },
 
+  async appState(gameId) {
+    const res = await fetch(`${API_BASE}/api/app-state`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ game_id: gameId })
+    });
+    return readApiResponse(res, 'app-state');
+  },
+
+  async validateAppAction(gameId, structuredAction) {
+    const res = await fetch(`${API_BASE}/api/app-validate`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ game_id: gameId, structured_action: structuredAction })
+    });
+    return readApiResponse(res, 'app-validate');
+  },
+
   // ─── 2. 서사 생성 (SSE) — stream.js에서 직접 호출 ───
   // story()는 stream.js의 streamStory()가 담당
 
   // ─── 3. 상태 추출 ───
   // extract·request_id·timing을 모두 담은 전체 응답을 반환한다. 호출부에서
   // result.extract로 실제 값을, result.timing으로 [extract-timing] 로그를 남긴다.
-  async extract(gameId, narrativeText, turnCount, playerInput = '') {
+  async extract(gameId, narrativeText, turnCount, playerInput = '', structuredAction = null) {
     const res = await fetch(`${API_BASE}/api/extract`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -54,7 +68,8 @@ const api = {
         game_id: gameId,
         narrative_text: narrativeText,
         player_input: playerInput,
-        turn_count: turnCount
+        turn_count: turnCount,
+        structured_action: structuredAction
       })
     });
     return readApiResponse(res, 'extract');
@@ -92,7 +107,7 @@ const api = {
   // ─── 7. 진행 상태 갱신 ───
   // ─── 8. 턴 전체 커밋 ───
   // DB의 save_turn/set_save는 Worker가 순서대로 호출하고 브라우저는 한 번만 요청한다.
-  async commitTurn(gameId, turnNumber, content, extract, enginePatch = {}, playerInput = '', playerAction = null) {
+  async commitTurn(gameId, turnNumber, content, extract, enginePatch = {}, playerInput = '', playerAction = null, structuredAction = null) {
     const res = await fetch(`${API_BASE}/api/commit-turn`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -103,7 +118,8 @@ const api = {
         extract,
         engine_patch: enginePatch,
         player_input: playerInput,
-        player_action: playerAction
+        player_action: playerAction,
+        structured_action: structuredAction
       })
     });
     return readApiResponse(res, 'commit-turn');

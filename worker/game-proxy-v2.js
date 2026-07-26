@@ -2412,7 +2412,7 @@ npc_stat_changes만 반환한다. 서사에 숫자가 없어도 대사·행동·
 - activate: content(암시 내용 문장)와 strength를 채운다. 새 슬롯을 하나 사용하는 행동이다.
 - update: 이미 활성 상태인 암시의 내용이나 강도만 바꾼다. old_content에 그 암시의 기존 내용 문장을 그대로 적어 어떤 암시를 수정하는지 특정한다. 새 content(바뀐 내용, 안 바뀌면 생략)와 strength(바뀐 강도, 안 바뀌면 생략)만 채운다. 슬롯을 추가로 쓰지 않는다.
 - deactivate: content에 해제할 암시의 기존 내용 문장을 그대로 적는다.
-시도·계획·상상·가능성만으로는 저장하지 말고 실패한 최면도 저장하지 마라. 일반 대화·설득·반복 발언·분위기 조성만으로 암시를 활용하거나 암시 효과를 체감한 턴에는 suggestion_action을 반환하지 않는다 — 어플을 실제로 조작하지 않았기 때문이다. 대상은 반드시 현재 NPC(character_id)여야 한다. 변화가 없으면 suggestion_action은 null이다.
+시도·계획·상상·가능성만으로는 저장하지 말고 실패한 최면도 저장하지 마라. 실패·거절·슬롯 부족·범위 초과 암시는 모든 Extract 필드에 실제 효과로 반영하지 마라. 일반 대화·설득·반복 발언·분위기 조성만으로 암시를 활용하거나 암시 효과를 체감한 턴에는 suggestion_action을 반환하지 않는다 — 어플을 실제로 조작하지 않았기 때문이다. activate는 현재 NPC만, 명시한 기존 암시는 update/deactivate에 character_id를 쓴다. 변화가 없으면 suggestion_action은 null이다.
 
 [WORLD STATE PATCH CONTRACT]
 플레이어가 실제로 출발해서 새 장소에 도착했고 장면이 그 새 장소로 전환된 경우, world_state_patch에 building, floor, ward, location_label을 모두 채워서 반환한다. 바뀌지 않은 필드는 이전 저장값의 기존 명칭을 그대로 다시 적고, 실제로 바뀐 필드만 새 값으로 적는다. building/floor/ward는 장소를 설명하는 한국어 명칭으로 적으면 Worker가 표준 ID로 정규화하며, 표준 ID로 정규화되지 않는 값은 무시된다. 이동을 제안하거나 준비만 했을 뿐 아직 도착하지 않았다면 world_state_patch를 채우지 말고 비워둔다. 빈 문자열로 기존 값을 덮어쓰지 마라. 알 수 없는 장소를 지어내지 마라.
@@ -2742,6 +2742,13 @@ function buildSavePatch(extract, enginePatch = {}, summaryPlan = null, previousS
   // real character/image — preserve whatever the save already had instead
   // of overwriting it with the degraded stand-in's narrator/null values.
   const degraded = extract?.extract_degraded === true;
+  const bulkIntent = resolveBulkAppDeactivationIntent(playerInput);
+  const bulkSuggestionPatch = bulkIntent.suggestions
+    ? buildBulkSuggestionDeactivationPatch(previousSave)
+    : null;
+  const bulkCsaPatch = bulkIntent.csa
+    ? buildBulkCsaDeactivationPatch(previousSave)
+    : null;
   const patch = {
     last_character_id: degraded ? (previousSave?.last_character_id || 'narrator') : characterId,
     last_image_id: degraded ? (previousSave?.last_image_id ?? null) : (extract.image_id ?? null),
@@ -2751,6 +2758,10 @@ function buildSavePatch(extract, enginePatch = {}, summaryPlan = null, previousS
       ? extract.choices.filter(choice => typeof choice === 'string' && choice.trim())
       : []
   };
+  if (bulkSuggestionPatch) {
+    patch.active_suggestions = bulkSuggestionPatch.active_suggestions;
+    console.log(JSON.stringify({ event: 'bulk_suggestions_deactivated', turn: turnNumber, deactivated_count: bulkSuggestionPatch.deactivated_count }));
+  }
   if (summaryPlan) {
     patch.story_summary_recent100 = summaryPlan.recentSummary;
     patch.recent100_start_turn = summaryPlan.recentStartTurn;
@@ -2765,7 +2776,11 @@ function buildSavePatch(extract, enginePatch = {}, summaryPlan = null, previousS
     const structured = hasStructuredEncounter(previousSave, characterId);
     const legacy = !structured && hasLegacyEncounterEvidence(previousSave, characterId);
     const firstEncounterStats = !structured && !legacy ? normalizeFirstEncounterStats(extract.first_encounter_stats) : null;
-    const suggestionPatch = applySuggestionAction(previousSave, extract.suggestion_action, characterId, turnNumber);
+    // A clear all-suggestions command is Worker-owned and wins over any
+    // Extract action, so the same turn can never reactivate one entry.
+    const suggestionPatch = bulkIntent.suggestions
+      ? bulkSuggestionPatch && { active_suggestions: bulkSuggestionPatch.active_suggestions }
+      : applySuggestionAction(previousSave, extract.suggestion_action, characterId, turnNumber);
     const effectiveActiveSuggestions = suggestionPatch?.active_suggestions
       ? { ...normalizeLegacyActiveSuggestions(previousSave?.active_suggestions), ...suggestionPatch.active_suggestions }
       : previousSave?.active_suggestions;
@@ -2892,7 +2907,14 @@ function buildSavePatch(extract, enginePatch = {}, summaryPlan = null, previousS
   // today's limit — csaState (if any) is assigned after and correctly
   // overwrites csaDailyReset's csa_daily_used: 0 with used+1.
   const csaSaveView = csaDailyReset ? { ...previousSave, ...csaDailyReset } : previousSave;
-  const csaState = applyCsaAction(csaSaveView, extract.csa_action, patch.player_progress.level, turnNumber, mergedWorldState);
+  if (bulkCsaPatch) {
+    patch.csa_active = bulkCsaPatch.csa_active;
+    console.log(JSON.stringify({ event: 'bulk_csa_deactivated', turn: turnNumber, deactivated_count: bulkCsaPatch.deactivated_count }));
+  }
+  // A bulk CSA deactivation also wins over Extract, and never consumes a use.
+  const csaState = bulkIntent.csa
+    ? null
+    : applyCsaAction(csaSaveView, extract.csa_action, patch.player_progress.level, turnNumber, mergedWorldState);
   if (csaState) Object.assign(patch, csaState);
   return patch;
 }
@@ -3386,6 +3408,52 @@ function normalizeLegacyActiveSuggestions(value) {
   return isPlainObject(value) ? value : {};
 }
 
+// Kept deliberately separate from normal suggestion intent parsing: this only
+// recognizes an unambiguous, imperative request to deactivate every currently
+// active app effect. Questions and negated instructions must never mutate save
+// state, regardless of what Extract returns.
+function resolveBulkAppDeactivationIntent(playerInput = '') {
+  const input = typeof playerInput === 'string' ? playerInput.trim() : '';
+  if (!input || /(?:삭제|해제|지우|없애|비활성화|끈다?|끄기)(?:\s*지)?\s*(?:하지\s*)?(?:않|마|말)/.test(input)) {
+    return { suggestions: false, csa: false };
+  }
+  if (/[?？]|(?:삭제|해제|지우|없애|비활성화|끈다?|끄기)(?:할까|하는\s*방법|해야\s*하나)/.test(input)) {
+    return { suggestions: false, csa: false };
+  }
+  const isBulk = /(?:모두|모든|전부|전체|싹|현재\s*활성)/.test(input);
+  const isDeactivation = /(?:삭제|해제|비활성화|지우|없애|끈다?|끄기)/.test(input);
+  if (!isBulk || !isDeactivation) return { suggestions: false, csa: false };
+  return {
+    suggestions: /암시/.test(input),
+    csa: /상식\s*개변/.test(input)
+  };
+}
+
+function buildBulkSuggestionDeactivationPatch(previousSave = {}) {
+  const previous = normalizeLegacyActiveSuggestions(previousSave?.active_suggestions);
+  let deactivatedCount = 0;
+  const activeSuggestions = Object.fromEntries(Object.entries(previous).map(([characterId, list]) => {
+    if (!Array.isArray(list)) return [characterId, list];
+    return [characterId, list.map(item => {
+      if (!item?.active) return item;
+      deactivatedCount += 1;
+      return { ...item, active: false };
+    })];
+  }));
+  return deactivatedCount ? { active_suggestions: activeSuggestions, deactivated_count: deactivatedCount } : null;
+}
+
+function buildBulkCsaDeactivationPatch(previousSave = {}) {
+  const previous = Array.isArray(previousSave?.csa_active) ? previousSave.csa_active : [];
+  let deactivatedCount = 0;
+  const csa_active = previous.map(item => {
+    if (!item?.active) return item;
+    deactivatedCount += 1;
+    return { ...item, active: false };
+  });
+  return deactivatedCount ? { csa_active, deactivated_count: deactivatedCount } : null;
+}
+
 function normalizeSuggestionContent(value) {
   return typeof value === 'string' ? value.trim().replace(/\s+/g, ' ') : '';
 }
@@ -3419,10 +3487,16 @@ function applySuggestionAction(previousSave, action, currentCharacterId, turnNum
   if (!isPlainObject(action) || !['activate', 'update', 'deactivate'].includes(action.action)) return null;
   if (!currentCharacterId || currentCharacterId === 'narrator') return null;
   const actionCharacterId = typeof action.character_id === 'string' ? action.character_id : null;
-  if (actionCharacterId && actionCharacterId !== currentCharacterId) return null;
-
   const previousMap = normalizeLegacyActiveSuggestions(previousSave?.active_suggestions);
-  const list = Array.isArray(previousMap[currentCharacterId]) ? previousMap[currentCharacterId] : [];
+  // Creating a new suggestion remains strictly local to the on-screen NPC.
+  // Editing or deactivating an existing saved suggestion may explicitly target
+  // another NPC, but only when that NPC actually has a stored suggestion list.
+  if (action.action === 'activate' && actionCharacterId && actionCharacterId !== currentCharacterId) return null;
+  const targetCharacterId = action.action === 'activate'
+    ? currentCharacterId
+    : (actionCharacterId || currentCharacterId);
+  const list = Array.isArray(previousMap[targetCharacterId]) ? previousMap[targetCharacterId] : [];
+  if (action.action !== 'activate' && actionCharacterId && !Array.isArray(previousMap[targetCharacterId])) return null;
   const capability = calculateHypnosisCapability(previousSave);
 
   if (action.action === 'activate') {
@@ -3441,7 +3515,7 @@ function applySuggestionAction(previousSave, action, currentCharacterId, turnNum
     if (duplicate) return null;
     const newItem = { id: nextSuggestionId(list, turnNumber), content, strength, created_turn: turnNumber, active: true };
     console.log(JSON.stringify({ event: 'suggestion_action_applied', action: 'activate', character_id: currentCharacterId, turn: turnNumber, before_count: list.length, after_count: list.length + 1 }));
-    return { active_suggestions: { [currentCharacterId]: [...list, newItem] } };
+    return { active_suggestions: { [targetCharacterId]: [...list, newItem] } };
   }
 
   // 'update' and 'deactivate' both locate an existing entry by id (preferred)
@@ -3457,8 +3531,8 @@ function applySuggestionAction(previousSave, action, currentCharacterId, turnNum
   if (!target) return null;
 
   if (action.action === 'deactivate') {
-    console.log(JSON.stringify({ event: 'suggestion_action_applied', action: 'deactivate', character_id: currentCharacterId, turn: turnNumber, target_id: target.id, active_before: list.filter(i => i.active).length, active_after: list.filter(i => i.active).length - 1 }));
-    return { active_suggestions: { [currentCharacterId]: list.map(item => item === target ? { ...item, active: false } : item) } };
+    console.log(JSON.stringify({ event: 'suggestion_action_applied', action: 'deactivate', character_id: targetCharacterId, turn: turnNumber, target_id: target.id, active_before: list.filter(i => i.active).length, active_after: list.filter(i => i.active).length - 1 }));
+    return { active_suggestions: { [targetCharacterId]: list.map(item => item === target ? { ...item, active: false } : item) } };
   }
 
   // 'update': never consumes a new slot, and content changes are optional —
@@ -3470,10 +3544,10 @@ function applySuggestionAction(previousSave, action, currentCharacterId, turnNum
     if (!requestedStrength || hypnosisStrengthRank(requestedStrength) > capability.max_strength_rank) return null;
     newStrength = requestedStrength;
   }
-  console.log(JSON.stringify({ event: 'suggestion_action_applied', action: 'update', character_id: currentCharacterId, turn: turnNumber, target_id: target.id, active_count: list.filter(i => i.active).length }));
+  console.log(JSON.stringify({ event: 'suggestion_action_applied', action: 'update', character_id: targetCharacterId, turn: turnNumber, target_id: target.id, active_count: list.filter(i => i.active).length }));
   return {
     active_suggestions: {
-      [currentCharacterId]: list.map(item => item === target ? { ...item, content: newContent, strength: newStrength } : item)
+      [targetCharacterId]: list.map(item => item === target ? { ...item, content: newContent, strength: newStrength } : item)
     }
   };
 }
@@ -3806,6 +3880,7 @@ function buildHypnosisStatusPanelData(capability, hypnosisState = {}) {
 // a single blanket "can go deeper" flag can't make that distinction.
 const SLOT_FULL_FORBIDDEN_PHRASES = ['새 암시', '추가 암시', '중첩 암시', '또 다른 암시'];
 const GENERIC_INCREASE_FORBIDDEN_PHRASES = ['강화', '한 단계 올린다', '한 단계 올려'];
+const MISLEADING_SUGGESTION_TONE_RE = /(?:암시를?\s*(?:강화|심화|활성화)(?:하는|시키는)?\s*(?:듯한|것처럼)?\s*(?:말투|목소리|어조)|암시가\s*깊어지는\s*것처럼\s*목소리|(?:말투|목소리|어조).{0,20}암시.{0,15}(?:강화|심화|활성화|깊어지))/;
 const TIER_NAME_FORBIDDEN_PHRASES = [
   { phrases: ['중간 최면'], allowedWhen: capability => capability.can_use_medium },
   { phrases: ['강한 최면'], allowedWhen: capability => capability.can_use_strong },
@@ -3819,6 +3894,10 @@ function findInfeasibleChoices(choices, capability) {
   const problems = [];
   choices.forEach((choice, choice_index) => {
     if (typeof choice !== 'string' || !choice.trim()) return;
+    if (MISLEADING_SUGGESTION_TONE_RE.test(choice)) {
+      problems.push({ choice_index, choice, reason: '말투·목소리만으로 저장된 암시가 강화되는 것처럼 표현됨' });
+      return;
+    }
     if (!capability.can_create_suggestion) {
       const hit = SLOT_FULL_FORBIDDEN_PHRASES.find(phrase => choice.includes(phrase));
       if (hit) { problems.push({ choice_index, choice, reason: `암시 슬롯이 가득 찼는데 "${hit}" 표현이 포함됨` }); return; }

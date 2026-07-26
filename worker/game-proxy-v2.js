@@ -636,6 +636,14 @@ function buildDegradedTurnSummary(narrativeText) {
 // Exception: the narrative already contains a strength-exceeded marker, which
 // means the app action is already deterministically nullified regardless of
 // what Extract would have said, so degraded is safe there.
+// Item 3 safety net (암시 슬롯 서사 정합성): a suggestion-related input with
+// no modify/delete intent keyword is always a request to CREATE a new
+// suggestion, never to change an existing one — used to reject an Extract
+// output that mislabels it as update/deactivate before it ever reaches
+// applySuggestionAction. Explicit update/deactivate requests are untouched.
+const SUGGESTION_RELATED_INPUT_RE = /(?:암시|최면)/;
+const SUGGESTION_MODIFY_INTENT_RE = /(?:수정|변경|교체|강화|삭제|해제|제거|끄기|끈다)/;
+
 function isPotentialAppMutationTurn(playerInput, narrativeText = '') {
   const narrative = typeof narrativeText === 'string' ? narrativeText : '';
 
@@ -929,6 +937,20 @@ async function runExtractPipeline(env, { game_id, narrative_text, player_input, 
   if (suggestionStrengthExceeded) extract.suggestion_action = null;
   const csaStrengthExceeded = finalNarrativeText.includes(CSA_STRENGTH_EXCEEDED_MARKER);
   if (csaStrengthExceeded) extract.csa_action = null;
+
+  // Item 3 safety net: a 암시-관련 입력 without modify/delete intent is
+  // always a new-suggestion request — an update/deactivate Extract still
+  // returns for it is never honored (a genuine activate still goes through
+  // applySuggestionAction's own unchanged slot check). Explicit modify/
+  // delete requests are never touched by this.
+  if (
+    isPlainObject(extract.suggestion_action)
+    && ['update', 'deactivate'].includes(extract.suggestion_action.action)
+    && SUGGESTION_RELATED_INPUT_RE.test(player_input || '')
+    && !SUGGESTION_MODIFY_INTENT_RE.test(player_input || '')
+  ) {
+    extract.suggestion_action = null;
+  }
 
   // H1: the NPC narrative contract is fail-open — an unregistered minor
   // NPC, a registered NPC appearing outside their usual ward, or a
@@ -3442,7 +3464,7 @@ function buildActiveSuggestionSection(save, characters = {}) {
     const lines = list.map(item => `- ${item.content}\n  강도: ${item.strength}\n  적용 턴: ${item.created_turn}`).join('\n');
     return `${name}(${characterId})\n${lines}`;
   }).join('\n\n');
-  return `\n\n[ACTIVE PERSONAL SUGGESTIONS — ESTABLISHED FACTS]\n\n${blocks}\n\n규칙:\n- 위 암시는 각 NPC에게 이미 성공해 활성 상태다.\n- 성공 여부를 다시 의심하거나 같은 암시를 다시 거는 장면을 만들지 않는다.\n- 해당 NPC는 암시 범위 안의 요청을 자기 성격에 맞게 자연스럽게 따른다.\n- 암시 범위를 벗어난 무조건 복종으로 확대하지 않는다.\n- 다른 NPC에게 잘못 적용하지 않는다.\n\n[금지 표현]\n- 암시가 먹힌 것 같다\n- 암시가 제대로 적용됐는지 모르겠다\n- 다시 걸어봐야겠다\n- 효과를 확인해야겠다\n- 아까 최면이 성공했는지 확실하지 않다`;
+  return `\n\n[ACTIVE PERSONAL SUGGESTIONS — ESTABLISHED FACTS]\n\n${blocks}\n\n규칙:\n- 위 암시는 각 NPC에게 이미 성공해 활성 상태다.\n- 성공 여부를 다시 의심하거나 같은 암시를 다시 거는 장면을 만들지 않는다.\n- 해당 NPC는 암시 범위 안의 요청을 자기 성격에 맞게 자연스럽게 따른다.\n- 암시 범위를 벗어난 무조건 복종으로 확대하지 않는다.\n- 다른 NPC에게 잘못 적용하지 않는다.\n- 활성 암시 슬롯이 가득 찼으면 신규 암시는 반드시 실패한다.\n- 사용자가 명시적으로 삭제·해제·수정·교체하지 않은 기존 암시는 절대 변경하지 않는다.\n- 대상 NPC에게 기존 활성 암시가 없으면 기존 암시 수정으로 처리하지 않는다.\n- 실패한 암시의 효과나 신체 반응을 발생시키지 않는다.\n\n[금지 표현]\n- 암시가 먹힌 것 같다\n- 암시가 제대로 적용됐는지 모르겠다\n- 다시 걸어봐야겠다\n- 효과를 확인해야겠다\n- 아까 최면이 성공했는지 확실하지 않다`;
 }
 
 // Pre-formats every currently active personal suggestion, grouped by real

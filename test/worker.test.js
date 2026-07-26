@@ -7001,3 +7001,220 @@ test('PROMPT-DIET E: representative normal play is at least 20% shorter than its
   const reduction = legacyEquivalentLength - normalLength;
   assert.equal(reduction / legacyEquivalentLength >= 0.2, true);
 });
+
+// ─────────────────────────────────────────────
+// 암시 슬롯 서사 정합성 핫픽스 (109턴 재현)
+// ─────────────────────────────────────────────
+
+test('SUGGESTION-SLOT 1: Story prompt states the slot-full/no-unauthorized-change suggestion rules in the existing ACTIVE PERSONAL SUGGESTIONS block (no new section)', () => {
+  const characters = { heroine1: { name: '한소영' }, heroine2: { name: '강세라' } };
+  const save = {
+    last_character_id: 'heroine1',
+    player_progress: { level: 3 },
+    active_suggestions: {
+      heroine1: [{ id: 'suggestion_50_1', content: '한소영 암시', strength: '약함', created_turn: 50, active: true }],
+      heroine2: [{ id: 'suggestion_60_1', content: '강세라 암시', strength: '약함', created_turn: 60, active: true }]
+    }
+  };
+  const prompt = buildStoryPrompt({ master: { characters }, save, recent_memories: [] }, '배수진에게 암시를 입력한다', 108);
+  const content = prompt.messages[0].content;
+  const section = content.slice(content.indexOf('[ACTIVE PERSONAL SUGGESTIONS'), content.indexOf('[금지 표현]'));
+  assert.match(section, /활성 암시 슬롯이 가득 찼으면 신규 암시는 반드시 실패한다/);
+  assert.match(section, /사용자가 명시적으로 삭제·해제·수정·교체하지 않은 기존 암시는 절대 변경하지 않는다/);
+  assert.match(section, /대상 NPC에게 기존 활성 암시가 없으면 기존 암시 수정으로 처리하지 않는다/);
+  assert.match(section, /실패한 암시의 효과나 신체 반응을 발생시키지 않는다/);
+});
+
+test('SUGGESTION-SLOT 2: the always-on status panel (not a new duplicate line) already reports the exact server-computed slot counts', () => {
+  const characters = { heroine1: { name: '한소영' }, heroine2: { name: '강세라' } };
+  const save = {
+    last_character_id: 'heroine1',
+    player_progress: { level: 3 },
+    active_suggestions: {
+      heroine1: [{ id: 'suggestion_50_1', content: '한소영 암시', strength: '약함', created_turn: 50, active: true }],
+      heroine2: [{ id: 'suggestion_60_1', content: '강세라 암시', strength: '약함', created_turn: 60, active: true }]
+    }
+  };
+  const capability = calculateHypnosisCapability(save, {});
+  assert.equal(capability.active_count, 2);
+  assert.equal(capability.max_active, 2);
+  assert.equal(capability.remaining_slots, 0);
+  const prompt = buildStoryPrompt({ master: { characters }, save, recent_memories: [] }, '배수진에게 암시를 입력한다', 108);
+  assert.match(prompt.messages[0].content, /암시 슬롯: 활성 2 \/ 최대 2 · 남은 슬롯 0/);
+  // Only one occurrence — confirms no duplicate slot-status line was added.
+  const occurrences = (prompt.messages[0].content.match(/암시 슬롯: 활성 \d+ \/ 최대 \d+/g) || []).length;
+  assert.equal(occurrences, 1);
+});
+
+test('SUGGESTION-SLOT 3 (109턴 재현): full slots (2/2), a no-modify-intent request for an NPC with no existing suggestion — Extract mislabeling it as update is forced to null', async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (url) => {
+    const requestUrl = String(url);
+    if (requestUrl.includes('/rpc/get_extract_context')) {
+      return new Response(JSON.stringify({
+        turn_count: 108,
+        master: { characters: { heroine1: { name: '한소영' }, heroine2: { name: '강세라' }, heroine3: { name: '배수진' } } },
+        save: {
+          player: { name: '금태양', job: '간호사' }, player_setup: { status: 'complete' }, opening_started: true,
+          last_character_id: 'heroine3',
+          player_progress: { level: 3 },
+          active_suggestions: {
+            heroine1: [{ id: 'suggestion_50_1', content: '한소영 암시', strength: '약함', created_turn: 50, active: true }],
+            heroine2: [{ id: 'suggestion_60_1', content: '강세라 암시', strength: '약함', created_turn: 60, active: true }]
+          }
+        }
+      }), { headers: { 'content-type': 'application/json' } });
+    }
+    if (requestUrl.includes('/rpc/get_image_catalog_for_characters')) {
+      return new Response(JSON.stringify([]), { headers: { 'content-type': 'application/json' } });
+    }
+    if (requestUrl.includes('api.deepseek.com')) {
+      // Extract mistakenly claims this is an update to an existing suggestion —
+      // 배수진 has none. The safety net must force this to null regardless.
+      return new Response(JSON.stringify({
+        choices: [{ message: { content: JSON.stringify({
+          character_id: 'heroine3', npcs_present: ['heroine3'],
+          suggestion_action: { action: 'update', character_id: 'heroine3', old_content: '아무거나', content: '배수진 새 암시', strength: '약함' },
+          choices: ['다시 시도한다', '기다린다', '자리를 뜬다', '대화한다']
+        }) }, finish_reason: 'stop' }]
+      }), { headers: { 'content-type': 'application/json' } });
+    }
+    throw new Error(`unexpected fetch: ${requestUrl}`);
+  };
+  try {
+    const response = await worker.fetch(apiRequest('/api/extract', {
+      game_id: 'test-game', narrative_text: '배수진에게 새로운 암시를 입력하려 한다.', player_input: '배수진에게 암시를 입력한다'
+    }), { DEEPSEEK_API_KEY: 'test' });
+    assert.equal(response.status, 200);
+    const body = await response.json();
+    assert.equal(body.extract.suggestion_action, null);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('SUGGESTION-SLOT 4: a genuine activate with room in the slots is untouched by the new safety net', async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (url) => {
+    const requestUrl = String(url);
+    if (requestUrl.includes('/rpc/get_extract_context')) {
+      return new Response(JSON.stringify({
+        turn_count: 108,
+        master: { characters: { heroine1: { name: '한소영' }, heroine3: { name: '배수진' } } },
+        save: {
+          player: { name: '금태양', job: '간호사' }, player_setup: { status: 'complete' }, opening_started: true,
+          last_character_id: 'heroine3',
+          player_progress: { level: 3 },
+          active_suggestions: {
+            heroine1: [{ id: 'suggestion_50_1', content: '한소영 암시', strength: '약함', created_turn: 50, active: true }]
+          }
+        }
+      }), { headers: { 'content-type': 'application/json' } });
+    }
+    if (requestUrl.includes('/rpc/get_image_catalog_for_characters')) {
+      return new Response(JSON.stringify([]), { headers: { 'content-type': 'application/json' } });
+    }
+    if (requestUrl.includes('api.deepseek.com')) {
+      return new Response(JSON.stringify({
+        choices: [{ message: { content: JSON.stringify({
+          character_id: 'heroine3', npcs_present: ['heroine3'],
+          suggestion_action: { action: 'activate', character_id: 'heroine3', content: '배수진 새 암시', strength: '약함' },
+          choices: ['다시 시도한다', '기다린다', '자리를 뜬다', '대화한다']
+        }) }, finish_reason: 'stop' }]
+      }), { headers: { 'content-type': 'application/json' } });
+    }
+    throw new Error(`unexpected fetch: ${requestUrl}`);
+  };
+  try {
+    const response = await worker.fetch(apiRequest('/api/extract', {
+      game_id: 'test-game', narrative_text: '배수진에게 새로운 암시를 입력한다.', player_input: '배수진에게 암시를 입력한다'
+    }), { DEEPSEEK_API_KEY: 'test' });
+    assert.equal(response.status, 200);
+    const body = await response.json();
+    assert.deepEqual(body.extract.suggestion_action, { action: 'activate', character_id: 'heroine3', content: '배수진 새 암시', strength: '약함' });
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('SUGGESTION-SLOT 5: an explicit "수정" (modify) request is never nulled by the safety net even though it returns update', async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (url) => {
+    const requestUrl = String(url);
+    if (requestUrl.includes('/rpc/get_extract_context')) {
+      return new Response(JSON.stringify({
+        turn_count: 60,
+        master: { characters: { heroine1: { name: '한소영' } } },
+        save: {
+          player: { name: '금태양', job: '간호사' }, player_setup: { status: 'complete' }, opening_started: true,
+          last_character_id: 'heroine1', player_progress: { level: 3 },
+          active_suggestions: { heroine1: [{ id: 'suggestion_50_1', content: '한소영 암시', strength: '약함', created_turn: 50, active: true }] }
+        }
+      }), { headers: { 'content-type': 'application/json' } });
+    }
+    if (requestUrl.includes('/rpc/get_image_catalog_for_characters')) {
+      return new Response(JSON.stringify([]), { headers: { 'content-type': 'application/json' } });
+    }
+    if (requestUrl.includes('api.deepseek.com')) {
+      return new Response(JSON.stringify({
+        choices: [{ message: { content: JSON.stringify({
+          character_id: 'heroine1', npcs_present: ['heroine1'],
+          suggestion_action: { action: 'update', character_id: 'heroine1', id: 'suggestion_50_1', content: '수정된 암시', strength: '중간' },
+          choices: ['다시 시도한다', '기다린다', '자리를 뜬다', '대화한다']
+        }) }, finish_reason: 'stop' }]
+      }), { headers: { 'content-type': 'application/json' } });
+    }
+    throw new Error(`unexpected fetch: ${requestUrl}`);
+  };
+  try {
+    const response = await worker.fetch(apiRequest('/api/extract', {
+      game_id: 'test-game', narrative_text: '한소영의 암시 내용을 수정한다.', player_input: '한소영의 암시를 수정한다'
+    }), { DEEPSEEK_API_KEY: 'test' });
+    assert.equal(response.status, 200);
+    const body = await response.json();
+    assert.deepEqual(body.extract.suggestion_action, { action: 'update', character_id: 'heroine1', id: 'suggestion_50_1', content: '수정된 암시', strength: '중간' });
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('SUGGESTION-SLOT 6: an explicit "해제" (deactivate) request is never nulled by the safety net', async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (url) => {
+    const requestUrl = String(url);
+    if (requestUrl.includes('/rpc/get_extract_context')) {
+      return new Response(JSON.stringify({
+        turn_count: 60,
+        master: { characters: { heroine1: { name: '한소영' } } },
+        save: {
+          player: { name: '금태양', job: '간호사' }, player_setup: { status: 'complete' }, opening_started: true,
+          last_character_id: 'heroine1', player_progress: { level: 3 },
+          active_suggestions: { heroine1: [{ id: 'suggestion_50_1', content: '한소영 암시', strength: '약함', created_turn: 50, active: true }] }
+        }
+      }), { headers: { 'content-type': 'application/json' } });
+    }
+    if (requestUrl.includes('/rpc/get_image_catalog_for_characters')) {
+      return new Response(JSON.stringify([]), { headers: { 'content-type': 'application/json' } });
+    }
+    if (requestUrl.includes('api.deepseek.com')) {
+      return new Response(JSON.stringify({
+        choices: [{ message: { content: JSON.stringify({
+          character_id: 'heroine1', npcs_present: ['heroine1'],
+          suggestion_action: { action: 'deactivate', character_id: 'heroine1', id: 'suggestion_50_1' },
+          choices: ['다시 시도한다', '기다린다', '자리를 뜬다', '대화한다']
+        }) }, finish_reason: 'stop' }]
+      }), { headers: { 'content-type': 'application/json' } });
+    }
+    throw new Error(`unexpected fetch: ${requestUrl}`);
+  };
+  try {
+    const response = await worker.fetch(apiRequest('/api/extract', {
+      game_id: 'test-game', narrative_text: '한소영의 암시를 해제한다.', player_input: '한소영의 암시를 해제한다'
+    }), { DEEPSEEK_API_KEY: 'test' });
+    assert.equal(response.status, 200);
+    const body = await response.json();
+    assert.deepEqual(body.extract.suggestion_action, { action: 'deactivate', character_id: 'heroine1', id: 'suggestion_50_1' });
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});

@@ -6843,6 +6843,24 @@ test('STORY-RULES 4: story, extract and TTS share one dialogue-format contract',
   assert.match(workerSource, /형식은 \[대사 — AUTHORITATIVE DIALOGUE CONTRACT\]과 동일하다/);
 });
 
+test('VOCAL DENSITY: one compact staged contract preserves density, variety, and dialogue minimums', () => {
+  const workerSource = readFileSync(new URL('../worker/game-proxy-v2.js', import.meta.url), 'utf8');
+  assert.match(STORY_PROMPT, /none\/mild\/aroused\/near_climax\/climax\/afterglow/);
+  assert.match(STORY_PROMPT, /mild: 발성·호흡 1~2단위/);
+  assert.match(STORY_PROMPT, /aroused: 3~5단위/);
+  assert.match(STORY_PROMPT, /near_climax: 발성·호흡 5~8단위/);
+  assert.match(STORY_PROMPT, /climax: 직전 → 절정 순간 → 직후의 3단계/);
+  assert.match(STORY_PROMPT, /발성·호흡 8~12단위, NPC 대사 블록 4개 이상, 신체 반응 4개 이상/);
+  assert.match(STORY_PROMPT, /afterglow: 잔여 발성·호흡 2~4단위, NPC 대사 블록 2개 이상/);
+  assert.match(STORY_PROMPT, /VOCAL STYLE A\/B\/C는 발성량을 줄이는 규칙이 아니라 표현 방식/);
+  assert.match(STORY_PROMPT, /같은 신음 문자열을 한 턴이나 직전 턴과 반복하지 않는다/);
+  assert.match(STORY_PROMPT, /신음과 정상 대사·끊어진 말을 섞고/);
+  assert.match(STORY_PROMPT, /\[NPC DIALOGUE MINIMUM CONTRACT\]/);
+  assert.equal((workerSource.match(/\[MOAN AND VOCAL REACTION CONTRACT\]/g) || []).length, 1);
+  assert.doesNotMatch(STORY_PROMPT, /정상: 한소영/);
+  assert.doesNotMatch(STORY_PROMPT, /초기·중기·강한 반응/);
+});
+
 test('STORY-RULES 5: no new strength gate blocks ordinary play synergy', () => {
   const workerSource = readFileSync(new URL('../worker/game-proxy-v2.js', import.meta.url), 'utf8');
   // strength_exceeded는 기존 suggestion/CSA 전용 마커 4건만 존재해야 한다 (신규 일반 행동 강도 차단기 없음)

@@ -566,7 +566,7 @@ test('hypnosis depth is Worker-owned: strongest active suggestion executes once,
   assert.deepEqual(resolveHypnosisDepthDelta({ previousDepth: 10, currentCharacterId: 'heroine1', activeSuggestions: active('강함'), hypnosisReason: '활성 암시 실제 수행', extractDegraded: false }), { delta: 3, reason: '활성 암시 수행' });
   assert.deepEqual(resolveHypnosisDepthDelta({ previousDepth: 10, currentCharacterId: 'heroine1', activeSuggestions: { heroine1: [{ active: true, strength: '약함' }, { active: true, strength: '강함' }] }, hypnosisReason: '활성 암시 실제 수행', extractDegraded: false }), { delta: 3, reason: '활성 암시 수행' });
   assert.deepEqual(resolveHypnosisDepthDelta({ previousDepth: 10, currentCharacterId: 'heroine1', activeSuggestions: active('강함'), hypnosisReason: '활성 암시 미수행', extractDegraded: false }), { delta: 0, reason: '활성 암시 유지' });
-  assert.deepEqual(resolveHypnosisDepthDelta({ previousDepth: 12, currentCharacterId: 'heroine1', activeSuggestions: {}, hypnosisReason: '활성 암시 실제 수행', extractDegraded: false }), { delta: -1, reason: '암시 해제 후 자연 회복' });
+  assert.deepEqual(resolveHypnosisDepthDelta({ previousDepth: 12, currentCharacterId: 'heroine1', activeSuggestions: {}, hypnosisReason: '활성 암시 실제 수행', extractDegraded: false }), { delta: 0, reason: '최면 영향 없음' });
   assert.deepEqual(resolveHypnosisDepthDelta({ previousDepth: 0, currentCharacterId: 'heroine1', activeSuggestions: {}, hypnosisReason: '활성 암시 없음', extractDegraded: false }), { delta: 0, reason: '최면 영향 없음' });
   assert.deepEqual(resolveHypnosisDepthDelta({ previousDepth: 12, currentCharacterId: 'narrator', activeSuggestions: active('강함'), hypnosisReason: '활성 암시 실제 수행', extractDegraded: false }), { delta: 0, reason: '최면 영향 없음' });
   assert.deepEqual(resolveHypnosisDepthDelta({ previousDepth: 12, currentCharacterId: 'heroine1', activeSuggestions: active('강함'), hypnosisReason: '활성 암시 실제 수행', extractDegraded: true }), { delta: 0, reason: '최면 영향 없음' });
@@ -584,6 +584,33 @@ test('buildSavePatch ignores Extract hypnosis delta and uses the Worker result',
   assert.equal(patch.npc_stats.heroine1.최면깊이, 12);
   assert.deepEqual(patch.npc_stat_changes.heroine1.최면깊이, { delta: 2, reason: '활성 암시 수행' });
   assert.equal(patch.npc_stats.heroine1.최면저항력, 65);
+});
+
+test('buildSavePatch recovers every saved NPC without active suggestions by two, including off-screen NPCs', () => {
+  const previousSave = {
+    npc_stats: {
+      heroine1: { 최면깊이: 12 },
+      heroine2: { 최면깊이: 1 },
+      heroine3: { 최면깊이: 7 },
+      narrator: { 최면깊이: 9 }
+    },
+    active_suggestions: { heroine3: [{ id: 's3', active: true, strength: '약함', content: '유지' }] }
+  };
+  const patch = buildSavePatch({ character_id: 'heroine3', npc_stat_changes: { 최면깊이: { delta: 5, reason: '활성 암시 미수행' } } }, {}, null, previousSave, 20);
+  assert.equal(patch.npc_stats.heroine1.최면깊이, 10);
+  assert.deepEqual(patch.npc_stat_changes.heroine1.최면깊이, { delta: -2, reason: '암시 해제 후 자연 회복' });
+  assert.equal(patch.npc_stats.heroine2.최면깊이, 0);
+  assert.deepEqual(patch.npc_stat_changes.heroine2.최면깊이, { delta: -1, reason: '암시 해제 후 자연 회복' });
+  assert.equal(patch.npc_stats.heroine3.최면깊이, 7);
+  assert.equal(patch.npc_stats.narrator, undefined);
+});
+
+test('degraded Extract bypasses global hypnosis recovery', () => {
+  const patch = buildSavePatch(buildDegradedExtract('서사', 'EXTRACT_FAILED'), {}, null, {
+    npc_stats: { heroine1: { 최면깊이: 12 } }
+  }, 20);
+  assert.equal('npc_stats' in patch, false);
+  assert.equal('npc_stat_changes' in patch, false);
 });
 
 test('NPC obedience is capped at three without a hypnosis-depth event', () => {
@@ -4123,6 +4150,7 @@ test('Story and Extract prompts keep hypnosis progression compact and Worker-own
   const extract = buildExtractPrompt('한소영이 요청을 받아들인다.', '계속', { master: {}, save }, [], 6);
   assert.match(story, /현재 NPC 최면 상태: 깊이 12 · 활성 암시 1개 · 활성화/);
   assert.match(story, /실제 수행 효과는 최면깊이에 누적될 수 있으나/);
+  assert.match(story, /활성 개인 암시가 모두 사라지면 최면깊이는 매 턴 빠르게 회복하지만 기억은 지워지지 않는다/);
   assert.match(extract, /최면깊이 delta는 Worker가 결정하므로 항상 0을 반환/);
   assert.match(extract, /활성 암시 실제 수행/);
   assert.match(extract, /등록·시도·계획만으로 수행 처리하지 않는다/);

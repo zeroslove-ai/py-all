@@ -2311,7 +2311,7 @@ ${recentMemorySlice.map((m, index) => clipHeadTail(sanitizeRecentNarrativeForPro
   // everything above it, including [최근 기억]'s now-stale account of the
   // turn that was just rolled back.
   const regenerationFeedbackSection = buildRegenerationFeedbackSection(regenerationFeedback);
-  const systemPrompt = coreRules + playerGate + modeSection + rulebookSection + openingScenarioSection + appUsageSection + eligibleNpcRosterSection + buildAppSystemRulesSection() + currentSceneSection + npcProfileSection + explicitMentionSection + csaSection + csaNatureSection + suggestionSection + suggestionStrengthBoundarySection + narrativeLengthSection + npcDialogueSection + moanVocalReactionSection + antiRepetitionSection + playerStatusPanel + contextSection + feedbackSection + continuitySection + finalFormatRules + openingFlow + playerSetupReminder + hypnosisCapabilitySection + strengthPreJudgmentSection + suggestionExampleSection + csaExampleSection + activeCsaOperationSection + registeredNpcChoiceReminder + choiceLengthReminder + buildAddressAbbreviationSection() + regenerationFeedbackSection;
+  const systemPrompt = coreRules + playerGate + modeSection + rulebookSection + openingScenarioSection + appUsageSection + eligibleNpcRosterSection + buildAppSystemRulesSection() + buildHypnosisRecoveryNarrativeRule() + currentSceneSection + npcProfileSection + explicitMentionSection + csaSection + csaNatureSection + suggestionSection + suggestionStrengthBoundarySection + narrativeLengthSection + npcDialogueSection + moanVocalReactionSection + antiRepetitionSection + playerStatusPanel + contextSection + feedbackSection + continuitySection + finalFormatRules + openingFlow + playerSetupReminder + hypnosisCapabilitySection + strengthPreJudgmentSection + suggestionExampleSection + csaExampleSection + activeCsaOperationSection + registeredNpcChoiceReminder + choiceLengthReminder + buildAddressAbbreviationSection() + regenerationFeedbackSection;
 
   return {
     mode,
@@ -2820,6 +2820,20 @@ function buildSavePatch(extract, enginePatch = {}, summaryPlan = null, previousS
     }
 
     if (suggestionPatch) Object.assign(patch, suggestionPatch);
+  }
+  if (!degraded) {
+    const recovery = applyGlobalHypnosisDepthRecovery(
+      previousSave?.npc_stats,
+      patch.active_suggestions
+        ? { ...normalizeLegacyActiveSuggestions(previousSave?.active_suggestions), ...patch.active_suggestions }
+        : previousSave?.active_suggestions,
+      patch.npc_stats,
+      patch.npc_stat_changes
+    );
+    if (recovery.changed) {
+      patch.npc_stats = recovery.stats;
+      patch.npc_stat_changes = recovery.changes;
+    }
   }
   const setupComplete = isSetupComplete(previousSave);
   if (!setupComplete) {
@@ -3549,13 +3563,38 @@ function resolveHypnosisDepthDelta({ previousDepth, currentCharacterId, activeSu
     ? suggestions[currentCharacterId].filter(item => item?.active)
     : [];
   if (!active.length) {
-    return depth > 0
-      ? { delta: -1, reason: '암시 해제 후 자연 회복' }
-      : { delta: 0, reason: '최면 영향 없음' };
+    return { delta: 0, reason: '최면 영향 없음' };
   }
   if (hypnosisReason !== '활성 암시 실제 수행') return { delta: 0, reason: '활성 암시 유지' };
   const strongestRank = active.reduce((max, item) => Math.max(max, hypnosisStrengthRank(item?.strength)), 0);
   return { delta: Math.min(3, strongestRank + 1), reason: '활성 암시 수행' };
+}
+
+function applyGlobalHypnosisDepthRecovery(previousNpcStats, activeSuggestions, currentStats = {}, currentChanges = {}) {
+  const stats = isPlainObject(currentStats) ? { ...currentStats } : {};
+  const changes = isPlainObject(currentChanges) ? { ...currentChanges } : {};
+  const suggestions = normalizeLegacyActiveSuggestions(activeSuggestions);
+  let changed = false;
+  for (const [characterId, previous] of Object.entries(isPlainObject(previousNpcStats) ? previousNpcStats : {})) {
+    if (characterId === 'narrator' || !isPlainObject(previous)) continue;
+    const active = Array.isArray(suggestions[characterId]) && suggestions[characterId].some(item => item?.active);
+    if (active) continue;
+    const base = isPlainObject(stats[characterId]) ? stats[characterId] : previous;
+    const depth = Math.max(0, Math.min(100, Number(base?.최면깊이) || 0));
+    if (depth <= 0) continue;
+    const nextDepth = Math.max(0, depth - 2);
+    stats[characterId] = { ...base, 최면깊이: nextDepth };
+    changes[characterId] = {
+      ...(isPlainObject(changes[characterId]) ? changes[characterId] : {}),
+      최면깊이: { delta: nextDepth - depth, reason: '암시 해제 후 자연 회복' }
+    };
+    changed = true;
+  }
+  return { stats, changes, changed };
+}
+
+function buildHypnosisRecoveryNarrativeRule() {
+  return `\n- 활성 개인 암시가 모두 사라지면 최면깊이는 매 턴 빠르게 회복하지만 기억은 지워지지 않는다. 남은 깊이에 맞는 심리 표현은 자연스럽게 판단한다.`;
 }
 
 // Strength and slot-count are deliberately separate growth axes (stage

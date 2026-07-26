@@ -512,7 +512,7 @@ async function handleStory(req, env) {
   // rollback+regenerate flow (never a normal turn) — it injects the
   // highest-priority regeneration-only block; `feedback` (the array) keeps
   // its existing, unrelated "apply to next response" meaning.
-  const { game_id, player_input, feedback = [], regeneration_feedback = null } = await readJson(req);
+  const { game_id, player_input, feedback = [], regeneration_feedback = null, structured_action = null } = await readJson(req);
   if (!game_id) return jsonResponse({ error: 'game_id required', request_id: requestId }, 400);
 
   const contextStart = Date.now();
@@ -525,9 +525,14 @@ async function handleStory(req, env) {
   const contextMs = Date.now() - contextStart;
 
   const currentTurn = ctx?.turn_count ?? 0;
-  const resolvedPlayerInput = resolveMarkerChoiceInput(player_input, ctx?.save?.last_choices);
+  let structuredPlan = null;
+  if (structured_action !== null) {
+    structuredPlan = planStructuredAction(ctx?.save || {}, ctx?.master || {}, structured_action, { turnNumber: currentTurn + 1, turnCount: currentTurn, today: currentUtcDateString() });
+    if (!structuredPlan.ok) return jsonResponse(buildStructuredActionError(structuredPlan, currentTurn), structuredPlan.status);
+  }
+  const resolvedPlayerInput = structuredPlan?.ok ? structuredPlan.display_input : resolveMarkerChoiceInput(player_input, ctx?.save?.last_choices);
   const promptStart = Date.now();
-  const prompt = buildStoryPrompt(ctx, resolvedPlayerInput, currentTurn, feedback, regeneration_feedback);
+  const prompt = buildStoryPrompt(ctx, resolvedPlayerInput, currentTurn, feedback, regeneration_feedback, structuredPlan);
   const promptMs = Date.now() - promptStart;
 
   let deepseekRes;
@@ -676,10 +681,10 @@ async function repairRawJsonOutput(env, rawText) {
 // eligibility, and mind-monitor validation+repair. Factored out so the CSA-
 // omission fix (item 7) can re-run the exact same pipeline once against a
 // corrected narrative without duplicating any of this logic.
-async function performExtractionPass(env, { narrativeText, playerInput, compatCtx, shortlistedImages, nextTurn, requestId, recoveryBudget, maxAttempts = 1 }) {
+async function performExtractionPass(env, { narrativeText, playerInput, compatCtx, shortlistedImages, nextTurn, requestId, recoveryBudget, maxAttempts = 1, structuredPlan = null }) {
   const timing = {};
   const tPrompt = Date.now();
-  const prompt = buildExtractPrompt(narrativeText, playerInput, compatCtx, shortlistedImages, nextTurn);
+  const prompt = buildExtractPrompt(narrativeText, playerInput, compatCtx, shortlistedImages, nextTurn, structuredPlan) + buildStructuredActionExtractSection(structuredPlan);
   timing.prompt_build_ms = Date.now() - tPrompt;
 
   let result;
@@ -935,11 +940,11 @@ function buildDegradedExtract(narrativeText, reason = 'EXTRACT_FAILED') {
 
 async function handleExtract(req, env) {
   const requestId = crypto.randomUUID();
-  const { game_id, narrative_text, player_input } = await readJson(req);
+  const { game_id, narrative_text, player_input, structured_action = null } = await readJson(req);
   if (!game_id || !narrative_text) {
     return jsonResponse({ error: 'game_id and narrative_text required', request_id: requestId }, 400);
   }
-  const result = await runExtractPipeline(env, { game_id, narrative_text, player_input, requestId });
+  const result = await runExtractPipeline(env, { game_id, narrative_text, player_input, structured_action, requestId });
   return jsonResponse(result.body, result.status);
 }
 
@@ -947,7 +952,7 @@ async function handleExtract(req, env) {
 // the exact same Extract pipeline (image shortlist, degraded fallback, CSA
 // narrative-integrity repair, choice normalization) in-process, without a
 // second HTTP round-trip or a duplicated copy of this logic.
-async function runExtractPipeline(env, { game_id, narrative_text, player_input, requestId }) {
+async function runExtractPipeline(env, { game_id, narrative_text, player_input, structured_action = null, requestId }) {
   const timing = {};
   const totalStart = Date.now();
 
@@ -987,6 +992,11 @@ async function runExtractPipeline(env, { game_id, narrative_text, player_input, 
 
   const nextTurn = (ctx?.turn_count ?? 0) + 1;
   const compatCtx = withSetupCompatibility(ctx);
+  let structuredPlan = null;
+  if (structured_action !== null) {
+    structuredPlan = planStructuredAction(compatCtx.save || {}, compatCtx.master || {}, structured_action, { turnNumber: nextTurn, turnCount: ctx?.turn_count ?? 0, today: currentUtcDateString() });
+    if (!structuredPlan.ok) return { body: buildStructuredActionError(structuredPlan, ctx?.turn_count ?? 0), status: structuredPlan.status };
+  }
 
   const shortlistByCharacter = {};
   for (const img of shortlistedImages) {
@@ -1006,11 +1016,13 @@ async function runExtractPipeline(env, { game_id, narrative_text, player_input, 
   // narrative-only save instead of hard-failing when Extract's own final
   // JSON generation fails outright.
   const recoveryBudget = createRecoveryBudget();
-  const degradedAllowed = canUseDegradedExtract(compatCtx, narrative_text, player_input);
+  const degradedAllowed = structuredPlan?.canonical_action?.type === 'app_transaction'
+    ? isSetupComplete(compatCtx.save)
+    : (structuredPlan ? false : canUseDegradedExtract(compatCtx, narrative_text, player_input));
 
   const firstPass = await performExtractionPass(env, {
     narrativeText: narrative_text, playerInput: player_input, compatCtx, shortlistedImages, nextTurn, requestId,
-    recoveryBudget, maxAttempts: degradedAllowed ? 1 : 2
+    recoveryBudget, maxAttempts: degradedAllowed ? 1 : 2, structuredPlan
   });
   Object.assign(timing, firstPass.timing);
   if (!firstPass.ok) {
@@ -1063,6 +1075,16 @@ async function runExtractPipeline(env, { game_id, narrative_text, player_input, 
   }
 
   let { extract, jsonRepaired, mindMonitorRepaired, validation, rawText, effectiveWorldState } = firstPass;
+  if (structuredPlan?.canonical_action?.type === 'app_transaction') {
+    extract.suggestion_action = null;
+    extract.csa_action = null;
+  } else if (structuredPlan?.canonical_action?.type === 'find_npc') {
+    const target = structuredPlan.plan;
+    extract.character_id = target.character_id;
+    extract.npcs_present = [...new Set([...(Array.isArray(extract.npcs_present) ? extract.npcs_present : []), target.character_id])];
+    extract.world_state_patch = { ...target.target_world_state };
+    effectiveWorldState = { ...effectiveWorldState, ...target.target_world_state };
+  }
   const characters = compatCtx?.master?.characters || {};
   const playerName = typeof compatCtx?.save?.player?.name === 'string' ? compatCtx.save.player.name.trim() : '';
   // Guards the name+role heuristics below against matching a fragment of
@@ -1559,7 +1581,7 @@ async function handleHistory(req, env) {
 
 async function handleCommitTurn(req, env) {
   const requestId = crypto.randomUUID();
-  const { game_id, turn_number, content: rawContent, extract, engine_patch, player_input = '', player_action: rawPlayerAction } = await readJson(req);
+  const { game_id, turn_number, content: rawContent, extract, engine_patch, player_input = '', player_action: rawPlayerAction, structured_action = null } = await readJson(req);
   if (!game_id || !Number.isInteger(turn_number) || !rawContent) {
     return jsonResponse({
       error: 'game_id, integer turn_number, content and extract required',
@@ -1570,7 +1592,7 @@ async function handleCommitTurn(req, env) {
     return jsonResponse({ error: 'extract must be a non-null JSON object', request_id: requestId }, 400);
   }
   const result = await runCommitPipeline(env, {
-    game_id, turn_number, content: rawContent, extract, engine_patch, player_input, player_action: rawPlayerAction, requestId
+    game_id, turn_number, content: rawContent, extract, engine_patch, player_input, player_action: rawPlayerAction, structured_action, requestId
   });
   return jsonResponse(result.body, result.status);
 }
@@ -1579,7 +1601,7 @@ async function handleCommitTurn(req, env) {
 // commit the replacement turn through the exact same logic (image scene-role
 // resolution, turn_record building, pre_turn_save_snapshot) without a second
 // HTTP round-trip or a duplicated copy of this pipeline.
-async function runCommitPipeline(env, { game_id, turn_number, content: rawContent, extract, engine_patch, player_input = '', player_action: rawPlayerAction, requestId }) {
+async function runCommitPipeline(env, { game_id, turn_number, content: rawContent, extract, engine_patch, player_input = '', player_action: rawPlayerAction, structured_action = null, requestId }) {
   const timing = {};
   const totalStart = Date.now();
   // Names and dialogue text are preserved — only the ** bold markers
@@ -1590,8 +1612,20 @@ async function runCommitPipeline(env, { game_id, turn_number, content: rawConten
   const rawCtx = await supabaseRpc(env, 'get_commit_context', { p_game_id: game_id });
   timing.commit_context_ms = Date.now() - t0;
   const ctx = withSetupCompatibility(rawCtx);
+  let structuredPlan = null;
+  if (structured_action !== null) {
+    structuredPlan = planStructuredAction(ctx?.save || {}, ctx?.master || {}, structured_action, { turnNumber: turn_number, turnCount: ctx?.turn_count ?? 0, today: currentUtcDateString() });
+    if (!structuredPlan.ok) return { body: buildStructuredActionError(structuredPlan, ctx?.turn_count ?? 0), status: structuredPlan.status };
+  }
+  if (turn_number !== (ctx?.turn_count ?? 0) + 1) return { body: { error: 'turn conflict', expected_turn: (ctx?.turn_count ?? 0) + 1, received_turn: turn_number, request_id: requestId }, status: 409 };
   const effectiveWorldStateForCommit = computeEffectiveWorldState(ctx?.save?.world_state, extract.world_state_patch);
   const safeExtract = normalizeRegisteredNpcExtract({ ...extract, is_sexual: extract.is_sexual === true }, ctx?.master?.characters, ctx?.save?.last_character_id, effectiveWorldStateForCommit);
+  if (structuredPlan?.canonical_action?.type === 'app_transaction') { safeExtract.suggestion_action = null; safeExtract.csa_action = null; }
+  if (structuredPlan?.canonical_action?.type === 'find_npc') {
+    safeExtract.character_id = structuredPlan.plan.character_id;
+    safeExtract.npcs_present = [structuredPlan.plan.character_id];
+    safeExtract.world_state_patch = { ...structuredPlan.plan.target_world_state };
+  }
   if (Array.isArray(safeExtract.choices)) safeExtract.choices = safeExtract.choices.map(stripBoldMarkers);
 
   const t1 = Date.now();
@@ -1622,7 +1656,7 @@ async function runCommitPipeline(env, { game_id, turn_number, content: rawConten
       console.warn(JSON.stringify({ event: 'recent100_summary_fail_open', endpoint: '/api/commit-turn', request_id: requestId, error: error.message }));
     }
   }
-  const patch = buildSavePatch(safeExtract, engine_patch, summaryPlan, ctx?.save || {}, turn_number, player_input);
+  const patch = buildSavePatch(safeExtract, engine_patch, summaryPlan, ctx?.save || {}, turn_number, player_input, currentUtcDateString(), structuredPlan);
   // Reserved key (same convention as _turn_record) — commit_turn's SQL
   // strips this before merging into game_save.data and instead persists it
   // into this turn's own game_memories.pre_turn_save_snapshot column. Lets
@@ -2328,7 +2362,7 @@ function buildRegenerationFeedbackSection(regenerationFeedback) {
   return `\n\n[USER FEEDBACK — HIGHEST PRIORITY FOR REGENERATION]\n- 아래 피드백은 직전 생성 결과의 오류를 바로잡기 위한 사용자 정정이다.\n- 피드백 내용을 이번 턴의 최우선 사실로 적용한다.\n- 이전에 생성됐다가 취소된 마지막 턴의 내용은 존재하지 않는 것으로 취급한다.\n- 원래 플레이어 행동은 유지하되, 피드백과 충돌하는 묘사는 만들지 않는다.\n\n[피드백 내용]\n${text}`;
 }
 
-function buildStoryPrompt(ctx, playerInput, currentTurn, feedback = [], regenerationFeedback = null) {
+function buildStoryPrompt(ctx, playerInput, currentTurn, feedback = [], regenerationFeedback = null, structuredPlan = null) {
   ctx = withSetupCompatibility(ctx);
   const master = ctx?.master || {};
   const save = ctx?.save || {};
@@ -2529,7 +2563,7 @@ ${recentMemorySlice.map((m, index) => clipHeadTail(sanitizeRecentNarrativeForPro
   // everything above it, including [최근 기억]'s now-stale account of the
   // turn that was just rolled back.
   const regenerationFeedbackSection = buildRegenerationFeedbackSection(regenerationFeedback);
-  const systemPrompt = coreRules + playerGate + modeSection + rulebookSection + openingScenarioSection + appUsageSection + eligibleNpcRosterSection + buildAppSystemRulesSection() + buildHypnosisRecoveryNarrativeRule() + currentSceneSection + npcProfileSection + explicitMentionSection + csaSection + csaNatureSection + suggestionSection + suggestionStrengthBoundarySection + narrativeLengthSection + npcDialogueSection + moanVocalReactionSection + antiRepetitionSection + playerStatusPanel + contextSection + feedbackSection + continuitySection + finalFormatRules + openingFlow + playerSetupReminder + hypnosisCapabilitySection + strengthPreJudgmentSection + suggestionExampleSection + csaExampleSection + activeCsaOperationSection + registeredNpcChoiceReminder + choiceLengthReminder + buildAddressAbbreviationSection() + regenerationFeedbackSection;
+  const systemPrompt = coreRules + playerGate + modeSection + rulebookSection + openingScenarioSection + appUsageSection + eligibleNpcRosterSection + buildAppSystemRulesSection() + buildHypnosisRecoveryNarrativeRule() + currentSceneSection + npcProfileSection + explicitMentionSection + csaSection + csaNatureSection + suggestionSection + suggestionStrengthBoundarySection + narrativeLengthSection + npcDialogueSection + moanVocalReactionSection + antiRepetitionSection + playerStatusPanel + contextSection + feedbackSection + continuitySection + finalFormatRules + openingFlow + playerSetupReminder + hypnosisCapabilitySection + strengthPreJudgmentSection + suggestionExampleSection + csaExampleSection + activeCsaOperationSection + registeredNpcChoiceReminder + choiceLengthReminder + buildAddressAbbreviationSection() + regenerationFeedbackSection + buildStructuredActionStorySection(structuredPlan);
 
   return {
     mode,
@@ -2555,7 +2589,7 @@ function buildCsaApplicationCheckSection(save) {
   return `\n\n[CSA APPLICATION CHECK CONTRACT]\n다음은 이번 턴에 실제로 집행되어야 했던 강제 상식개변 규칙이다. 방금 서사를 다시 확인해, 아래 규칙 중 조건("~마다", "~할 때", "~하면" 등)을 충족하는 상황이 실제로 있었는데도 그 행동이 실행되지 않은 규칙이 있으면 csa_omission에 짧게 설명해 넣는다. 조건이 발생하지 않았거나 정상적으로 실행됐다면 넣지 않는다.\n${lines}`;
 }
 
-function buildExtractPrompt(narrativeText, playerInput, ctx, images, turnCount) {
+function buildExtractPrompt(narrativeText, playerInput, ctx, images, turnCount, structuredPlan = null) {
   const master = ctx?.master || {};
   const save = ctx?.save || {};
 
@@ -2953,7 +2987,7 @@ function applyMindMonitorRepeatCheck(validationResult, emotion, previousEmotion)
   return validationResult;
 }
 
-function buildSavePatch(extract, enginePatch = {}, summaryPlan = null, previousSave = {}, turnNumber = 0, playerInput = '', today = currentUtcDateString()) {
+function buildSavePatch(extract, enginePatch = {}, summaryPlan = null, previousSave = {}, turnNumber = 0, playerInput = '', today = currentUtcDateString(), structuredPlan = null) {
   const characterId = typeof extract.character_id === 'string'
     ? extract.character_id
     : null;
@@ -3151,6 +3185,30 @@ function buildSavePatch(extract, enginePatch = {}, summaryPlan = null, previousS
     ? null
     : applyCsaAction(csaSaveView, extract.csa_action, patch.player_progress.level, turnNumber, mergedWorldState);
   if (csaState) Object.assign(patch, csaState);
+  if (structuredPlan?.canonical_action?.type === 'app_transaction') {
+    patch.active_suggestions = structuredPlan.plan.active_suggestions;
+    patch.csa_active = structuredPlan.plan.csa_active;
+    patch.csa_daily_used = structuredPlan.plan.csa_daily_used;
+    const recovery = applyGlobalHypnosisDepthRecovery(previousSave?.npc_stats, patch.active_suggestions, patch.npc_stats, patch.npc_stat_changes);
+    if (recovery.changed) { patch.npc_stats = recovery.stats; patch.npc_stat_changes = recovery.changes; }
+    const activation = structuredPlan.plan.suggestion_activations
+      .filter(item => item.character_id === characterId)
+      .sort((a, b) => hypnosisStrengthRank(b.strength) - hypnosisStrengthRank(a.strength))[0];
+    if (activation && characterId && characterId !== 'narrator') {
+      const increase = ({ weak: 1, medium: 2, strong: 3 })[activation.strength] || 0;
+      const before = Number(patch.npc_stats?.[characterId]?.최면깊이 ?? previousSave?.npc_stats?.[characterId]?.최면깊이) || 0;
+      const after = Math.min(100, Math.max(0, before + increase));
+      patch.npc_stats = { ...(patch.npc_stats || {}), [characterId]: { ...(patch.npc_stats?.[characterId] || previousSave?.npc_stats?.[characterId] || {}), 최면깊이: after } };
+      patch.npc_stat_changes = { ...(patch.npc_stat_changes || {}), [characterId]: { ...(patch.npc_stat_changes?.[characterId] || {}), 최면깊이: { delta: after - before, reason: '최면 어플 신규 암시 적용' } } };
+    }
+  } else if (structuredPlan?.canonical_action?.type === 'find_npc') {
+    const target = structuredPlan.plan;
+    patch.world_state = { ...target.target_world_state };
+    patch.player_location = target.target_location_label;
+    patch.last_character_id = target.character_id;
+    patch.last_npcs_present = [target.character_id];
+    patch.npc_locations = { [target.character_id]: { ...target.target_world_state, updated_turn: turnNumber } };
+  }
   return patch;
 }
 
@@ -4208,6 +4266,36 @@ function planStructuredAction(previousSave, master, rawAction, context = {}) {
   if (action.base_turn_count !== context.turnCount) return { ok: false, status: 409, error_code: 'APP_STALE_STATE', issues: [appIssue(action, 'APP_STALE_STATE', '최면 어플을 연 뒤 게임 상태가 변경되었습니다.')] };
   if (action.type === 'find_npc') return planFindNpcAction(previousSave, master, action, context);
   return planAppTransaction(previousSave, master, action, context);
+}
+
+function buildStructuredActionError(result, currentTurn = null) {
+  const stale = result?.error_code === 'APP_STALE_STATE';
+  return {
+    error: stale ? '최면 어플을 연 뒤 게임 상태가 변경되었습니다.' : '최면 어플의 변경사항을 적용하지 못했습니다.',
+    error_code: stale ? 'APP_STALE_STATE' : 'APP_ACTION_INVALID',
+    current_turn_count: stale && Number.isInteger(currentTurn) ? currentTurn : undefined,
+    issues: Array.isArray(result?.issues) ? result.issues : []
+  };
+}
+
+function buildStructuredActionStorySection(structuredPlan) {
+  if (!structuredPlan?.ok) return '';
+  const action = structuredPlan.canonical_action;
+  if (action.type === 'find_npc') {
+    const target = structuredPlan.plan;
+    return `\n\n[CONFIRMED NPC FIND ACTION — HARD CONSTRAINT]\n최면 어플 위치 추적 결과 대상은 ${target.character_name}, 위치는 ${target.target_location_label}이다. 플레이어가 이번 턴 안에 그 장소로 이동해 대상과 마주친다. 대상·목적지를 바꾸거나 찾지 못했다고 처리하지 마라.`;
+  }
+  const lines = action.operations.map(operation => {
+    if (operation.domain === 'suggestion') return `- 개인 암시 ${operation.operation}: ${operation.character_id}`;
+    return `- 상식개변 ${operation.operation}: ${operation.scope_type || '기존 범위'}`;
+  }).join('\n');
+  return `\n\n[CONFIRMED HYPNOSIS APP TRANSACTION — HARD CONSTRAINT]\n아래 조작은 Worker 검증을 통과했다. 대상·개수·내용·강도와 성공 여부를 바꾸지 말고 조작 과정과 장면 직후 흐름만 자연스럽게 서술한다. 현재 장면에 없는 NPC의 원격 수정·해제에는 즉각적인 신체 반응이나 대사를 창작하지 마라.\n${lines}`;
+}
+
+function buildStructuredActionExtractSection(structuredPlan) {
+  if (!structuredPlan?.ok) return '';
+  if (structuredPlan.canonical_action.type === 'find_npc') return '\n\n이번 턴의 최종 대상과 목적지는 Worker가 확정했다. character_id는 지정 대상이고 npcs_present에는 지정 대상을 포함한다.';
+  return '\n\n이번 턴의 암시·상식개변 상태 변경은 Worker의 확정 structured_action이 담당한다. suggestion_action과 csa_action은 반드시 null로 두고 별도 변경을 추측하지 마라.';
 }
 
 // Deterministic anchors the Worker can detect in the finalized narrative

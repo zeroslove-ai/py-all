@@ -124,6 +124,20 @@ const api = {
     return readApiResponse(res, 'reset');
   },
 
+  // ─── 9-2. 마지막 턴 롤백 + 피드백 재생성 ───
+  async feedback(gameId, feedbackText, expectedTurnNumber = null) {
+    const res = await fetch(`${API_BASE}/api/feedback`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        game_id: gameId,
+        feedback: feedbackText,
+        expected_turn_number: Number.isInteger(expectedTurnNumber) ? expectedTurnNumber : null
+      })
+    });
+    return readApiResponse(res, 'feedback');
+  },
+
   // ─── 10. API 버전 조회 — 배포 확인용, 앱 초기화 시 1회만 호출 ───
   async version() {
     const res = await fetch(`${API_BASE}/api/version`);

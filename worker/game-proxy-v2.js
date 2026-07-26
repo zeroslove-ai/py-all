@@ -36,6 +36,7 @@ export default {
         case '/api/history':  return await handleHistory(req, env);
         case '/api/version': return handleVersion(env);
         case '/api/reset':      return await handleReset(req, env);
+        case '/api/feedback':   return await handleFeedback(req, env);
         default:
           return jsonResponse({ error: 'Not Found' }, 404);
       }
@@ -353,6 +354,44 @@ async function handleStory(req, env) {
       'Server-Timing': `context;dur=${contextMs}, prompt;dur=${promptMs}, upstream;dur=${upstreamMs}`
     }
   });
+}
+
+// /api/feedback's regeneration needs the full narrative text in one Worker-
+// side call (never streamed to a client) — same prompt/model as normal
+// Story, just stream:false so the complete completion comes back in a
+// single response instead of an SSE body the caller would have to consume.
+async function generateStoryNarrativeOnce(env, game_id, playerInput, regenerationFeedback, requestId) {
+  const ctx = await supabaseRpc(env, 'get_story_context', { p_game_id: game_id, p_recent_count: 5 });
+  const currentTurn = ctx?.turn_count ?? 0;
+  const resolvedPlayerInput = resolveMarkerChoiceInput(playerInput, ctx?.save?.last_choices);
+  const prompt = buildStoryPrompt(ctx, resolvedPlayerInput, currentTurn, [], regenerationFeedback);
+
+  const res = await fetchWithTimeout('https://api.deepseek.com/v1/chat/completions', {
+    method: 'POST',
+    headers: {
+      'Authorization': `Bearer ${env.DEEPSEEK_API_KEY}`,
+      'Content-Type': 'application/json'
+    },
+    body: JSON.stringify({
+      model: 'deepseek-v4-flash',
+      thinking: { type: 'disabled' },
+      messages: prompt.messages,
+      stream: false,
+      max_tokens: 5000
+    })
+  }, STORY_HEADERS_TIMEOUT_MS);
+
+  if (!res.ok) {
+    const text = await res.text();
+    throw new Error(`DeepSeek error: ${res.status} ${text.slice(0, 300)}`);
+  }
+  const data = await res.json();
+  const text = data?.choices?.[0]?.message?.content;
+  if (typeof text !== 'string' || !text.trim()) {
+    throw new Error('DeepSeek returned empty content');
+  }
+  console.log(JSON.stringify({ event: 'gamebuilder_timing', endpoint: '/api/feedback', request_id: requestId, game_id, phase: 'story_regenerate' }));
+  return { text, mode: prompt.mode };
 }
 
 // ─────────────────────────────────────────────
@@ -703,12 +742,21 @@ function buildDegradedExtract(narrativeText, reason = 'EXTRACT_FAILED') {
 
 async function handleExtract(req, env) {
   const requestId = crypto.randomUUID();
-  const timing = {};
-  const totalStart = Date.now();
   const { game_id, narrative_text, player_input } = await readJson(req);
   if (!game_id || !narrative_text) {
     return jsonResponse({ error: 'game_id and narrative_text required', request_id: requestId }, 400);
   }
+  const result = await runExtractPipeline(env, { game_id, narrative_text, player_input, requestId });
+  return jsonResponse(result.body, result.status);
+}
+
+// Factored out of handleExtract so /api/feedback's regeneration flow can run
+// the exact same Extract pipeline (image shortlist, degraded fallback, CSA
+// narrative-integrity repair, choice normalization) in-process, without a
+// second HTTP round-trip or a duplicated copy of this logic.
+async function runExtractPipeline(env, { game_id, narrative_text, player_input, requestId }) {
+  const timing = {};
+  const totalStart = Date.now();
 
   let ctx;
   try {
@@ -716,7 +764,7 @@ async function handleExtract(req, env) {
     ctx = await supabaseRpc(env, 'get_extract_context', { p_game_id: game_id });
     timing.context_rpc_ms = Date.now() - t0;
   } catch (error) {
-    return jsonResponse({ error: error.message, error_code: 'SUPABASE_ERROR', request_id: requestId }, 502);
+    return { body: { error: error.message, error_code: 'SUPABASE_ERROR', request_id: requestId }, status: 502 };
   }
 
   const candidateIds = detectRegisteredCharacterIds(narrative_text, player_input, ctx?.master?.characters, ctx?.save?.last_character_id);
@@ -774,7 +822,7 @@ async function handleExtract(req, env) {
   Object.assign(timing, firstPass.timing);
   if (!firstPass.ok) {
     if (!degradedAllowed) {
-      return jsonResponse(firstPass.response, firstPass.status);
+      return { body: firstPass.response, status: firstPass.status };
     }
 
     const degradedReason = firstPass.response?.error_code || 'EXTRACT_FAILED';
@@ -791,31 +839,34 @@ async function handleExtract(req, env) {
       reason: degradedReason
     }));
 
-    return jsonResponse({
-      extract: degradedExtract,
-      extract_degraded: true,
-      extract_degraded_reason: degradedReason,
-      narrative_replacement: null,
-      request_id: requestId,
-      raw: '',
-      mind_monitor_retried: false,
-      mind_monitor_errors: [],
-      choices_repaired: false,
-      choices_fallback_used: extractChoicesFromNarrative(narrative_text).length !== 4,
-      first_encounter_repaired: false,
-      suggestion_strength_exceeded: narrative_text.includes(SUGGESTION_STRENGTH_EXCEEDED_MARKER),
-      csa_strength_exceeded: narrative_text.includes(CSA_STRENGTH_EXCEEDED_MARKER),
-      json_repaired: false,
-      content_addition: null,
-      validation_warnings: [],
-      choice_validation_warnings: [],
-      csa_meta_awareness_detected: false,
-      csa_meta_awareness_repaired: false,
-      csa_meta_awareness_fields: [],
-      recovery_used: recoveryBudget.used,
-      recovery_kind: recoveryBudget.kind,
-      timing
-    });
+    return {
+      body: {
+        extract: degradedExtract,
+        extract_degraded: true,
+        extract_degraded_reason: degradedReason,
+        narrative_replacement: null,
+        request_id: requestId,
+        raw: '',
+        mind_monitor_retried: false,
+        mind_monitor_errors: [],
+        choices_repaired: false,
+        choices_fallback_used: extractChoicesFromNarrative(narrative_text).length !== 4,
+        first_encounter_repaired: false,
+        suggestion_strength_exceeded: narrative_text.includes(SUGGESTION_STRENGTH_EXCEEDED_MARKER),
+        csa_strength_exceeded: narrative_text.includes(CSA_STRENGTH_EXCEEDED_MARKER),
+        json_repaired: false,
+        content_addition: null,
+        validation_warnings: [],
+        choice_validation_warnings: [],
+        csa_meta_awareness_detected: false,
+        csa_meta_awareness_repaired: false,
+        csa_meta_awareness_fields: [],
+        recovery_used: recoveryBudget.used,
+        recovery_kind: recoveryBudget.kind,
+        timing
+      },
+      status: 200
+    };
   }
 
   let { extract, jsonRepaired, mindMonitorRepaired, validation, rawText, effectiveWorldState } = firstPass;
@@ -963,31 +1014,34 @@ async function handleExtract(req, env) {
 
   console.log(JSON.stringify({ event: 'gamebuilder_timing', endpoint: '/api/extract', request_id: requestId, game_id, turn_number: nextTurn, timing }));
 
-  return jsonResponse({
-    extract,
-    extract_degraded: false,
-    extract_degraded_reason: null,
-    narrative_replacement: narrativeReplacement,
-    request_id: requestId,
-    raw: (rawText || '').slice(0, 200),
-    mind_monitor_retried: mindMonitorRepaired,
-    mind_monitor_errors: validation.ok ? [] : validation.errors,
-    choices_repaired: choicesRepaired,
-    choices_fallback_used: choicesFallbackUsed,
-    first_encounter_repaired: firstEncounterRepaired,
-    suggestion_strength_exceeded: suggestionStrengthExceeded,
-    csa_strength_exceeded: csaStrengthExceeded,
-    json_repaired: jsonRepaired,
-    content_addition: null, // superseded by narrative_replacement; kept only for legacy clients
-    validation_warnings: narrativeContract.warnings,
-    choice_validation_warnings: choiceValidationWarnings,
-    csa_meta_awareness_detected: csaMetaAwarenessDetected,
-    csa_meta_awareness_repaired: csaMetaAwarenessRepaired,
-    csa_meta_awareness_fields: csaMetaAwarenessFields,
-    recovery_used: recoveryBudget.used,
-    recovery_kind: recoveryBudget.kind,
-    timing
-  });
+  return {
+    body: {
+      extract,
+      extract_degraded: false,
+      extract_degraded_reason: null,
+      narrative_replacement: narrativeReplacement,
+      request_id: requestId,
+      raw: (rawText || '').slice(0, 200),
+      mind_monitor_retried: mindMonitorRepaired,
+      mind_monitor_errors: validation.ok ? [] : validation.errors,
+      choices_repaired: choicesRepaired,
+      choices_fallback_used: choicesFallbackUsed,
+      first_encounter_repaired: firstEncounterRepaired,
+      suggestion_strength_exceeded: suggestionStrengthExceeded,
+      csa_strength_exceeded: csaStrengthExceeded,
+      json_repaired: jsonRepaired,
+      content_addition: null, // superseded by narrative_replacement; kept only for legacy clients
+      validation_warnings: narrativeContract.warnings,
+      choice_validation_warnings: choiceValidationWarnings,
+      csa_meta_awareness_detected: csaMetaAwarenessDetected,
+      csa_meta_awareness_repaired: csaMetaAwarenessRepaired,
+      csa_meta_awareness_fields: csaMetaAwarenessFields,
+      recovery_used: recoveryBudget.used,
+      recovery_kind: recoveryBudget.kind,
+      timing
+    },
+    status: 200
+  };
 }
 
 // ─────────────────────────────────────────────
@@ -1279,8 +1333,6 @@ async function handleHistory(req, env) {
 
 async function handleCommitTurn(req, env) {
   const requestId = crypto.randomUUID();
-  const timing = {};
-  const totalStart = Date.now();
   const { game_id, turn_number, content: rawContent, extract, engine_patch, player_input = '', player_action: rawPlayerAction } = await readJson(req);
   if (!game_id || !Number.isInteger(turn_number) || !rawContent) {
     return jsonResponse({
@@ -1291,6 +1343,19 @@ async function handleCommitTurn(req, env) {
   if (!isPlainObject(extract)) {
     return jsonResponse({ error: 'extract must be a non-null JSON object', request_id: requestId }, 400);
   }
+  const result = await runCommitPipeline(env, {
+    game_id, turn_number, content: rawContent, extract, engine_patch, player_input, player_action: rawPlayerAction, requestId
+  });
+  return jsonResponse(result.body, result.status);
+}
+
+// Factored out of handleCommitTurn so /api/feedback's regeneration flow can
+// commit the replacement turn through the exact same logic (image scene-role
+// resolution, turn_record building, pre_turn_save_snapshot) without a second
+// HTTP round-trip or a duplicated copy of this pipeline.
+async function runCommitPipeline(env, { game_id, turn_number, content: rawContent, extract, engine_patch, player_input = '', player_action: rawPlayerAction, requestId }) {
+  const timing = {};
+  const totalStart = Date.now();
   // Names and dialogue text are preserved — only the ** bold markers
   // themselves are removed before anything is persisted.
   const content = stripBoldMarkers(rawContent);
@@ -1332,6 +1397,12 @@ async function handleCommitTurn(req, env) {
     }
   }
   const patch = buildSavePatch(safeExtract, engine_patch, summaryPlan, ctx?.save || {}, turn_number, player_input);
+  // Reserved key (same convention as _turn_record) — commit_turn's SQL
+  // strips this before merging into game_save.data and instead persists it
+  // into this turn's own game_memories.pre_turn_save_snapshot column. Lets
+  // /api/feedback later restore game_save.data to exactly this state without
+  // hand-reconstructing it from individual patch fields.
+  patch._pre_turn_snapshot = ctx?.save || {};
 
   // H2 item 11: a degraded turn never has a real image decision to make —
   // skip scene-role/shortlist resolution entirely and just keep whatever
@@ -1426,13 +1497,16 @@ async function handleCommitTurn(req, env) {
   console.log(JSON.stringify({ event: 'gamebuilder_timing', endpoint: '/api/commit-turn', request_id: requestId, game_id, turn_number, timing }));
 
   if (result?.status === 'conflict') {
-    return jsonResponse({
-      error: 'turn conflict',
-      expected_turn: result.expected_turn,
-      received_turn: turn_number,
-      reason: result.reason,
-      request_id: requestId
-    }, 409);
+    return {
+      body: {
+        error: 'turn conflict',
+        expected_turn: result.expected_turn,
+        received_turn: turn_number,
+        reason: result.reason,
+        request_id: requestId
+      },
+      status: 409
+    };
   }
   // The fields the frontend's "어플 정보" panel and player-status display
   // actually read — a subset of `patch`, not the whole thing (which also
@@ -1445,18 +1519,21 @@ async function handleCommitTurn(req, env) {
     if (key in patch) statePatch[key] = patch[key];
   }
 
-  return jsonResponse({
-    ok: true,
-    turn_count: result?.turn_count ?? turn_number,
-    replay: result?.status === 'replay',
-    image_id: safeExtract.image_id ?? null,
-    image_scene_role: imageSceneRole,
-    npc_stats: patch.npc_stats?.[safeExtract.character_id] || null,
-    npc_stat_changes: patch.npc_stat_changes?.[safeExtract.character_id] || null,
-    state_patch: statePatch,
-    request_id: requestId,
-    timing
-  });
+  return {
+    body: {
+      ok: true,
+      turn_count: result?.turn_count ?? turn_number,
+      replay: result?.status === 'replay',
+      image_id: safeExtract.image_id ?? null,
+      image_scene_role: imageSceneRole,
+      npc_stats: patch.npc_stats?.[safeExtract.character_id] || null,
+      npc_stat_changes: patch.npc_stat_changes?.[safeExtract.character_id] || null,
+      state_patch: statePatch,
+      request_id: requestId,
+      timing
+    },
+    status: 200
+  };
 }
 
 function handleVersion(env) {
@@ -1473,6 +1550,128 @@ async function handleReset(req, env) {
   if (!game_id) return jsonResponse({ error: 'game_id required' }, 400);
   await supabaseRpc(env, 'reset_game_progress', { p_game_id: game_id });
   return jsonResponse({ ok: true });
+}
+
+// ─────────────────────────────────────────────
+// /api/feedback — 마지막 확정 턴 롤백 + 피드백 반영 재생성
+// ─────────────────────────────────────────────
+
+// Best-effort recovery only — if this itself fails there is nothing further
+// to fall back to, so the failure is just logged (never thrown) and the
+// caller's own error response to the user already says the honest thing
+// ("재생성에 실패했습니다"), not a false claim that recovery succeeded.
+async function restoreTurnAfterFeedbackFailure(env, { game_id, turn_number, previous_save_data, deleted_turn_row, requestId }) {
+  try {
+    await supabaseRpc(env, 'restore_turn_after_feedback_failure', {
+      p_game_id: game_id,
+      p_turn_number: turn_number,
+      p_save_data: previous_save_data,
+      p_turn_row: deleted_turn_row
+    });
+    return true;
+  } catch (error) {
+    console.error('Feedback restore-after-failure ALSO failed:', { request_id: requestId, game_id, turn_number, error: error.message });
+    return false;
+  }
+}
+
+async function handleFeedback(req, env) {
+  const requestId = crypto.randomUUID();
+  const { game_id, feedback, expected_turn_number } = await readJson(req);
+  if (!game_id || typeof feedback !== 'string' || !feedback.trim()) {
+    return jsonResponse({ error: 'game_id and feedback required', request_id: requestId }, 400);
+  }
+  const feedbackText = feedback.trim();
+
+  // 동시 실행 방지: 프론트가 마지막으로 본 turn_count와 현재 값이 다르면
+  // 롤백을 시작하지 않고 거절한다. 새 분산 락 없이 조회 시점 비교만 한다.
+  if (Number.isInteger(expected_turn_number)) {
+    let currentCtx;
+    try {
+      currentCtx = await supabaseRpc(env, 'get_commit_context', { p_game_id: game_id });
+    } catch (error) {
+      return jsonResponse({ error: error.message, error_code: 'SUPABASE_ERROR', request_id: requestId }, 502);
+    }
+    if ((currentCtx?.turn_count ?? 0) !== expected_turn_number) {
+      return jsonResponse({ error: '진행 상태가 변경되었습니다. 화면을 새로 불러온 뒤 다시 시도해 주세요.', request_id: requestId }, 409);
+    }
+  }
+
+  let rollback;
+  try {
+    rollback = await supabaseRpc(env, 'rollback_latest_turn_for_feedback', { p_game_id: game_id });
+  } catch (error) {
+    return jsonResponse({ error: error.message, error_code: 'SUPABASE_ERROR', request_id: requestId }, 502);
+  }
+
+  if (!rollback?.success) {
+    const message = rollback?.reason === 'no_snapshot'
+      ? '이 턴은 피드백 재생성을 지원하지 않습니다.'
+      : '되돌릴 턴이 없습니다.';
+    return jsonResponse({ error: message, error_code: 'FEEDBACK_NO_SNAPSHOT', request_id: requestId }, 409);
+  }
+
+  const turnNumber = rollback.rolled_back_turn_number;
+  const resolvedInput = typeof rollback.resolved_input === 'string' ? rollback.resolved_input : '';
+  const restoreCtx = {
+    game_id, turn_number: turnNumber,
+    previous_save_data: rollback.previous_save_data,
+    deleted_turn_row: rollback.deleted_turn_row,
+    requestId
+  };
+
+  let narrativeText;
+  let storyMode;
+  try {
+    const generated = await generateStoryNarrativeOnce(env, game_id, resolvedInput, feedbackText, requestId);
+    narrativeText = generated.text;
+    storyMode = generated.mode;
+  } catch (error) {
+    await restoreTurnAfterFeedbackFailure(env, restoreCtx);
+    console.error('Feedback story regeneration failed:', { request_id: requestId, game_id, error: error.message });
+    return jsonResponse({ error: '피드백 재생성에 실패하여 기존 턴을 복구했습니다.', error_code: 'FEEDBACK_STORY_FAILED', request_id: requestId }, 502);
+  }
+
+  const extractResult = await runExtractPipeline(env, { game_id, narrative_text: narrativeText, player_input: resolvedInput, requestId });
+  if (extractResult.status >= 400) {
+    await restoreTurnAfterFeedbackFailure(env, restoreCtx);
+    console.error('Feedback extract failed:', { request_id: requestId, game_id, response: extractResult.body });
+    return jsonResponse({ error: '피드백 재생성에 실패하여 기존 턴을 복구했습니다.', error_code: 'FEEDBACK_EXTRACT_FAILED', request_id: requestId }, 502);
+  }
+
+  const playerAction = {
+    source: rollback.source || 'direct_text',
+    raw_input: resolvedInput,
+    resolved_input: resolvedInput,
+    choice_index: Number.isInteger(rollback.choice_index) ? rollback.choice_index : null,
+    choice_text: null
+  };
+
+  const commitResult = await runCommitPipeline(env, {
+    game_id,
+    turn_number: turnNumber,
+    content: narrativeText,
+    extract: extractResult.body.extract,
+    engine_patch: storyMode === 'opening' ? { opening_started: true } : {},
+    player_input: resolvedInput,
+    player_action: playerAction,
+    requestId
+  });
+
+  if (commitResult.status >= 400 || commitResult.body?.error) {
+    await restoreTurnAfterFeedbackFailure(env, restoreCtx);
+    console.error('Feedback commit failed:', { request_id: requestId, game_id, response: commitResult.body });
+    return jsonResponse({ error: '피드백 재생성에 실패하여 기존 턴을 복구했습니다.', error_code: 'FEEDBACK_COMMIT_FAILED', request_id: requestId }, 502);
+  }
+
+  return jsonResponse({
+    ...commitResult.body,
+    narrative_text: narrativeText,
+    extract: extractResult.body.extract,
+    choices: extractResult.body.extract?.choices || [],
+    narrative_replacement: extractResult.body.narrative_replacement,
+    request_id: requestId
+  });
 }
 
 // ═════════════════════════════════════════════
@@ -1883,7 +2082,17 @@ function buildAntiRepetitionSection() {
   return `\n\n[ANTI-REPETITION NARRATIVE CONTRACT]\n\n- 최근 기억 3턴과 같은 문장 구조와 동작을 연속 반복하지 않는다.\n- '암시가 작동 중이다'를 해설로 반복하지 말고, 선택·행동·말투·자기합리화로 보여준다.\n- 다음 표현을 매 턴 습관적으로 재사용하지 않는다: '눈동자가 흔들렸다', '손가락을 만지작거렸다', '살짝 붉어졌다', '경계와 호기심이 섞였다', '무의식적으로 반응했다'.\n- 표정만 바꾸고 끝내지 말고 공간 사용, 자세 변화, 소도구, 실제 행동, 질문, 결정, 정보 공개를 다양하게 조합한다.\n- 직전 턴에서 이미 끝난 손 내밀기, 자리 이동, 입장, 암시 성공을 다시 실행하지 않는다.`;
 }
 
-function buildStoryPrompt(ctx, playerInput, currentTurn, feedback = []) {
+// Only ever populated by /api/feedback's rollback+regenerate flow — never
+// by the normal /api/story call, and never confused with the pre-existing
+// `feedback` array param above (that one applies to the NEXT normal turn;
+// this one rewrites the turn that was just rolled back).
+function buildRegenerationFeedbackSection(regenerationFeedback) {
+  const text = typeof regenerationFeedback === 'string' ? regenerationFeedback.trim() : '';
+  if (!text) return '';
+  return `\n\n[USER FEEDBACK — HIGHEST PRIORITY FOR REGENERATION]\n- 아래 피드백은 직전 생성 결과의 오류를 바로잡기 위한 사용자 정정이다.\n- 피드백 내용을 이번 턴의 최우선 사실로 적용한다.\n- 이전에 생성됐다가 취소된 마지막 턴의 내용은 존재하지 않는 것으로 취급한다.\n- 원래 플레이어 행동은 유지하되, 피드백과 충돌하는 묘사는 만들지 않는다.\n\n[피드백 내용]\n${text}`;
+}
+
+function buildStoryPrompt(ctx, playerInput, currentTurn, feedback = [], regenerationFeedback = null) {
   ctx = withSetupCompatibility(ctx);
   const master = ctx?.master || {};
   const save = ctx?.save || {};
@@ -2076,7 +2285,12 @@ ${recentMemorySlice.map((m, index) => clipHeadTail(m.content || '', index === re
     ? `\n\n[REMINDER — CHOICE LENGTH]\n[3. 선택지]의 각 문장은 35~80자를 목표로 하고 120자를 넘기지 않는다. 화면 버튼에 그대로 표시되므로 지나치게 길게 쓰지 않는다.\n`
     : '';
   const eligibleNpcRosterSection = buildEligibleNpcRosterSection(save.world_state, master.characters || {});
-  const systemPrompt = coreRules + playerGate + modeSection + rulebookSection + openingScenarioSection + appUsageSection + eligibleNpcRosterSection + buildAppSystemRulesSection() + currentSceneSection + npcProfileSection + explicitMentionSection + csaSection + csaNatureSection + suggestionSection + suggestionStrengthBoundarySection + narrativeLengthSection + npcDialogueSection + antiRepetitionSection + playerStatusPanel + contextSection + feedbackSection + continuitySection + finalFormatRules + openingFlow + playerSetupReminder + hypnosisCapabilitySection + strengthPreJudgmentSection + suggestionExampleSection + csaExampleSection + activeCsaOperationSection + registeredNpcChoiceReminder + choiceLengthReminder + buildAddressAbbreviationSection();
+  // Placed at the very end (same recency-favoring position as
+  // playerSetupReminder/hypnosisCapabilitySection) since it must outweigh
+  // everything above it, including [최근 기억]'s now-stale account of the
+  // turn that was just rolled back.
+  const regenerationFeedbackSection = buildRegenerationFeedbackSection(regenerationFeedback);
+  const systemPrompt = coreRules + playerGate + modeSection + rulebookSection + openingScenarioSection + appUsageSection + eligibleNpcRosterSection + buildAppSystemRulesSection() + currentSceneSection + npcProfileSection + explicitMentionSection + csaSection + csaNatureSection + suggestionSection + suggestionStrengthBoundarySection + narrativeLengthSection + npcDialogueSection + antiRepetitionSection + playerStatusPanel + contextSection + feedbackSection + continuitySection + finalFormatRules + openingFlow + playerSetupReminder + hypnosisCapabilitySection + strengthPreJudgmentSection + suggestionExampleSection + csaExampleSection + activeCsaOperationSection + registeredNpcChoiceReminder + choiceLengthReminder + buildAddressAbbreviationSection() + regenerationFeedbackSection;
 
   return {
     mode,

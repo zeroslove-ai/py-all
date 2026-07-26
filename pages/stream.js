@@ -4,7 +4,7 @@
 // A backed-up queue (e.g. after a backgrounded tab) never speeds up the
 // visible typing; it only means the background branch below flushes it
 // immediately while the tab isn't visible anyway.
-const STREAM_RENDER_INTERVAL_MS = 8;
+const STREAM_RENDER_INTERVAL_MS = 10;
 const STREAM_RENDER_CHARS_PER_TICK = 1;
 
 // Collapses any run of 3+ '.'/'…' characters down to exactly '..' — the

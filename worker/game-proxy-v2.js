@@ -25,6 +25,7 @@ export default {
     try {
       switch (url.pathname) {
         case '/api/context':     return await handleContext(req, env);
+        case '/api/app-manual': return await handleAppManual(req, env);
         case '/api/story':      return await handleStory(req, env);
         case '/api/extract':    return await handleExtract(req, env);
         case '/api/image':      return await handleImage(req, env);
@@ -280,6 +281,118 @@ async function handleContext(req, env) {
     image_catalog: imageCatalog,
     turn_count: ctx?.turn_count ?? 0
   });
+}
+
+// Read-only manual endpoint: deliberately queries only the master/save rows,
+// never invokes an RPC, model, memory, image, or mutation path.
+async function handleAppManual(req, env) {
+  const { game_id } = await readJson(req);
+  if (!game_id) return jsonResponse({ error: 'game_id required' }, 400);
+  let masterRows;
+  let saveRows;
+  try {
+    [masterRows, saveRows] = await Promise.all([
+      supabaseGet(env, 'game_master', `game_id=eq.${encodeURIComponent(game_id)}&select=data`),
+      supabaseGet(env, 'game_save', `game_id=eq.${encodeURIComponent(game_id)}&select=turn_count,data`)
+    ]);
+  } catch (error) {
+    return jsonResponse({ error: error.message, error_code: 'SUPABASE_ERROR' }, 502);
+  }
+  const master = masterRows?.[0]?.data;
+  const saveRow = saveRows?.[0];
+  if (!isPlainObject(master) || !isPlainObject(saveRow?.data)) return jsonResponse({ error: 'game master or save not found' }, 404);
+  return jsonResponse({ manual: buildAppManualPayload(master, saveRow.data, saveRow.turn_count) });
+}
+
+const MANUAL_SCOPE_LABELS = { ward: '병동', floor: '해당 층 전체', building: '건물 전체', world: '전 세계' };
+const MANUAL_TIER_META = [
+  ['weak', '약함', 1, '가벼운 호의, 경계 완화, 일상적인 부탁처럼 기존 성격과 크게 충돌하지 않는 변화를 다룹니다.'],
+  ['medium', '중간', 3, '친밀한 접촉, 우선순위 변화, 개인적인 비밀 공유처럼 관계와 행동을 지속적으로 바꾸는 변화를 다룹니다.'],
+  ['strong', '강함', 5, '중요한 판단, 의무, 인간관계와 장기 목표까지 플레이어 중심으로 바꾸는 강한 변화를 다룹니다.']
+];
+
+function normalizeManualExamples(rawExamples, allowedRank) {
+  const items = Array.isArray(rawExamples) ? rawExamples : [];
+  const result = [];
+  const seen = new Set();
+  for (const item of items) {
+    const text = typeof item?.text === 'string' ? item.text.trim().slice(0, 300) : '';
+    if (text && !seen.has(text) && result.length < 20) { seen.add(text); result.push(text); }
+  }
+  return allowedRank ? result : [];
+}
+
+function extractPublicStatDefinition(statDefinitions, statName, fallback) {
+  const raw = isPlainObject(statDefinitions) ? statDefinitions[statName] : null;
+  const text = typeof raw === 'string' ? raw : (typeof raw?.description === 'string' ? raw.description : (typeof raw?.text === 'string' ? raw.text : ''));
+  const first = text.trim().split(/(?<=[.!?])\s/)[0];
+  return first || fallback;
+}
+
+function buildManualUnlockMilestones(level) {
+  const milestones = [
+    [1, ['약한 암시 사용 가능', '개인 암시 슬롯 1개', '상식개변 범위 병동', '상식개변 활성·하루 한도 1개']],
+    [3, ['중간 암시 사용 가능', '개인 암시 슬롯 2개']],
+    [4, ['상식개변 범위 해당 층 전체', '상식개변 활성·하루 한도 2개']],
+    [5, ['강한 암시 사용 가능', '개인 암시 슬롯 3개']],
+    [7, ['상식개변 범위 건물 전체', '상식개변 활성·하루 한도 3개']],
+    [8, ['개인 암시 슬롯 4개']],
+    [10, ['상식개변 범위 전 세계', '상식개변 활성·하루 한도 4개']]
+  ];
+  const next = milestones.find(([unlockLevel]) => unlockLevel > level);
+  const nextText = {
+    3: '중간 암시와 개인 암시 슬롯 2개가 해금됩니다.', 4: '상식개변 범위가 해당 층 전체로 확대되고 활성 슬롯이 2개로 증가합니다.',
+    5: '강한 암시와 개인 암시 슬롯 3개가 해금됩니다.', 7: '상식개변 범위가 건물 전체로 확대되고 활성 슬롯이 3개로 증가합니다.',
+    8: '개인 암시 슬롯이 4개로 증가합니다.', 10: '상식개변 범위가 전 세계로 확대되고 활성 슬롯이 4개로 증가합니다.'
+  };
+  return { unlocks: milestones.map(([unlockLevel, items]) => ({ level: unlockLevel, items })), next_unlock: next ? { level: next[0], text: nextText[next[0]] } : null };
+}
+
+function buildManualActiveEffects(master, save) {
+  const characters = isPlainObject(master?.characters) ? master.characters : {};
+  const suggestions = [];
+  for (const characterId of Object.keys(normalizeLegacyActiveSuggestions(save?.active_suggestions)).sort()) {
+    const list = normalizeLegacyActiveSuggestions(save.active_suggestions)[characterId];
+    if (!Array.isArray(list)) continue;
+    list.filter(item => item?.active).forEach(item => suggestions.push({ character_id: characterId, character_name: characters?.[characterId]?.name || characters?.[characterId]?.['이름'] || '알 수 없는 대상', strength: item.strength || '약함', content: typeof item.content === 'string' ? item.content : '' }));
+  }
+  const common_sense = (Array.isArray(save?.csa_active) ? save.csa_active : []).filter(item => item?.active).map(item => ({ strength: item.strength || '약함', scope_label: item.scope_label || '현재 범위', content: typeof item.content === 'string' ? item.content : '' }));
+  return { suggestions, common_sense };
+}
+
+function buildAppManualPayload(master, save, turnCount = 0) {
+  const capability = calculateHypnosisCapability(save, master);
+  const level = capability.current_level;
+  const limits = getCsaLimits(level);
+  const unlock = buildManualUnlockMilestones(level);
+  const progress = level >= 10 ? 100 : Math.max(0, Math.min(100, Math.round(capability.exp / capability.next_level_exp * 100)));
+  const system = isPlainObject(master?.rulebook_game_system) ? master.rulebook_game_system : {};
+  const tierRank = hypnosisStrengthRank(capability.available_strength);
+  const tiers = MANUAL_TIER_META.map(([id, label, unlockLevel, description]) => ({ id, label, unlock_level: unlockLevel, available: level >= unlockLevel, description, examples: normalizeManualExamples(system?.suggestion_examples?.[id], tierRank >= hypnosisStrengthRank(label)) }));
+  const csaTiers = MANUAL_TIER_META.map(([id, label, unlockLevel]) => ({ id, label, unlock_level: unlockLevel, available: level >= unlockLevel, examples: normalizeManualExamples(system?.csa_examples?.[id], tierRank >= hypnosisStrengthRank(label)) }));
+  const diagnostics = [];
+  diagnostics.push(capability.remaining_slots > 0
+    ? { type: 'success', text: `새 개인 암시를 ${capability.remaining_slots}개 더 등록할 수 있습니다.` }
+    : { type: 'warning', text: `개인 암시 슬롯이 ${capability.active_count}/${capability.max_active}로 가득 찼습니다. 기존 암시를 수정하거나 해제해야 새 암시를 등록할 수 있습니다.` });
+  const remainingCsaSlots = Math.max(0, capability.csa_max_active - capability.csa_active_count);
+  const remainingDaily = Math.max(0, capability.csa_daily_limit - capability.csa_daily_used);
+  if (remainingCsaSlots > 0 && remainingDaily > 0) diagnostics.push({ type: 'success', text: `새 상식개변을 등록할 수 있습니다. 남은 슬롯 ${remainingCsaSlots}개 · 오늘 남은 사용 ${remainingDaily}회.` });
+  if (remainingCsaSlots === 0) diagnostics.push({ type: 'warning', text: `상식개변 활성 슬롯이 ${capability.csa_active_count}/${capability.csa_max_active}로 가득 찼습니다. 기존 개변을 수정하거나 해제할 수 있습니다.` });
+  if (remainingDaily === 0) diagnostics.push({ type: 'warning', text: '오늘 상식개변 사용 횟수를 모두 사용했습니다. 해제는 가능하지만 신규 등록과 수정은 다음 초기화 전까지 사용할 수 없습니다.' });
+  diagnostics.push(unlock.next_unlock ? { type: 'info', text: `다음 기능 해금: Lv.${unlock.next_unlock.level} · ${unlock.next_unlock.text}` } : { type: 'info', text: '현재 최면 어플의 모든 기능이 해금되었습니다.' });
+  const statDefinitions = system?.stat_definitions || master?.stat_definitions;
+  const stats = [
+    ['affinity', '호감도', 'NPC가 플레이어에게 느끼는 감정적 호의와 불쾌감입니다.', '턴당 최대 -5~+5'],
+    ['trust', '신뢰도', 'NPC가 플레이어의 말과 행동, 신분과 의도를 믿는 정도입니다.', '턴당 최대 -5~+5'],
+    ['hypnosis_depth', '최면깊이', '실제 최면과 활성 암시가 대상에게 각인된 깊이입니다.', 'Worker의 암시 수행·회복 규칙으로 결정'],
+    ['compliance', '순응도', '유도·부탁·암시를 자연스럽게 받아들이고 자기합리화하는 정도입니다.', '일반 턴 최대 -3~+3 · 최면 관련 턴 최대 -5~+5'],
+    ['resistance', '최면저항력', '최면에 대한 대상의 고정 저항값입니다.', '항상 고정 · 변화량 0']
+  ].map(([id, label, fallback, change_rule]) => ({ id, label, range: '0~100', description: id === 'hypnosis_depth' ? fallback : extractPublicStatDefinition(statDefinitions, label, fallback), change_rule }));
+  return { version: 1, title: '최면 어플 사용자 매뉴얼', subtitle: '현재 게임의 룰북과 마지막 저장 상태를 기준으로 표시합니다. 매뉴얼 열람은 턴과 게임 상태에 영향을 주지 않습니다.', status: { level, exp: capability.exp, next_level_exp: capability.next_level_exp, exp_percent: progress, available_strength: capability.available_strength, suggestion_active: capability.active_count, suggestion_max: capability.max_active, suggestion_remaining: capability.remaining_slots, csa_active: capability.csa_active_count, csa_max: capability.csa_max_active, csa_daily_used: capability.csa_daily_used, csa_daily_limit: capability.csa_daily_limit, csa_scope_type: limits.scope_type, csa_scope_label: MANUAL_SCOPE_LABELS[limits.scope_type], next_unlock: unlock.next_unlock }, diagnostics,
+    quick_start: ['대상에게 최면 어플 화면을 2초 이상 보여 일반 최면을 시작합니다. 2초 미만이면 적용되지 않습니다.', '개인 암시는 특정 NPC에게 등록하는 지속 효과입니다. 새로 등록하거나 기존 내용을 수정하거나 해제할 수 있습니다.', '상식개변은 특정 NPC가 아니라 지정된 공간 안의 사회적 상식을 변경합니다.', '평범한 대화·명령·말투만으로 저장된 암시나 상식개변은 바뀌지 않습니다. 변경은 반드시 어플 조작으로 처리됩니다.', '범위 초과·슬롯 부족·대상 미확인 등으로 처리되지 않은 시도는 상태·경험치·수치를 바꾸지 않습니다.', '이 매뉴얼을 열고 닫는 행동은 턴을 소비하지 않습니다.'],
+    suggestions: { title: '개인 암시', description: '특정 NPC 한 명에게 지속되는 개인 규칙입니다. 모든 NPC의 개인 암시는 하나의 공용 슬롯 풀을 사용합니다.', rules: ['일반 최면을 통해 대상에게 암시를 등록할 수 있습니다.', '같은 NPC에게 여러 암시를 등록할 수 있지만 전체 슬롯 한도를 함께 사용합니다.', '새 암시는 빈 슬롯을 1개 사용합니다.', '기존 암시 수정은 같은 슬롯을 유지합니다.', '암시 해제는 슬롯을 즉시 비웁니다.', '개인 암시에는 하루 사용 횟수 제한이 없습니다.', '사용자가 약한 암시라고 표현해도 실제 내용이 더 강하면 내용 자체의 강도로 판정합니다.', '현재 사용 가능한 강도를 넘는 요청은 적용되지 않으며 상태와 경험치도 변하지 않습니다.'], tiers },
+    common_sense: { title: '상식개변', description: '특정 NPC가 아니라 지정 공간의 사회적 상식 자체를 변경합니다. 범위 안의 인물은 변경된 내용을 원래부터 당연했던 관습으로 받아들입니다.', rules: ['activate는 새 상식개변과 새 슬롯을 만들며 하루 사용 횟수 1회를 소비합니다.', 'update는 기존 슬롯을 유지하면서 내용·강도·범위를 변경하며 하루 사용 횟수 1회를 소비합니다.', 'deactivate는 기존 상식개변을 해제하며 하루 사용 횟수를 소비하지 않습니다.', '활성 슬롯이 가득 차 있어도 기존 상식개변 수정은 가능하지만 하루 사용 횟수가 남아 있어야 합니다.', '직접 해제하지 않은 활성 상식개변은 날짜가 바뀌어도 유지됩니다.', '날짜가 바뀌면 하루 사용 횟수만 초기화됩니다.', '적용 당시 공간 범위는 고정되며 레벨이 올라도 기존 상식개변의 범위가 자동으로 확대되지 않습니다.', '현재 강도나 공간 범위를 넘는 요청은 적용되지 않으며 사용 횟수도 소비하지 않습니다.'], current_scope: { type: limits.scope_type, label: MANUAL_SCOPE_LABELS[limits.scope_type] }, scope_unlocks: [[1, 'Lv.1~3'], [4, 'Lv.4~6'], [7, 'Lv.7~9'], [10, 'Lv.10']].map(([unlockLevel, level_range]) => { const item = getCsaLimits(unlockLevel); return { level_range, scope_type: item.scope_type, scope_label: MANUAL_SCOPE_LABELS[item.scope_type], max_active: item.max_active, daily_limit: item.daily_limit, available: level >= unlockLevel }; }), tiers: csaTiers },
+    hypnosis_depth: { title: '최면깊이', description: '최면과 활성 암시가 대상에게 각인된 정도입니다.', rules: ['활성 암시가 실제 행동에 반영된 턴에는 현재 활성 암시 중 가장 강한 단계 기준으로 깊이가 상승합니다.', '약한 암시가 작동하면 +1, 중간 암시는 +2, 강한 암시는 +3입니다.', '활성 암시가 있지만 이번 턴에 실제로 작동하지 않았다면 최면깊이는 변하지 않습니다.', '활성 암시가 하나도 없는 NPC는 정상적으로 저장되는 매 턴마다 최면깊이가 2씩 감소합니다.', '최면깊이는 0 아래로 내려가지 않습니다.', '암시가 모두 사라져 최면깊이가 회복돼도 그동안의 기억은 삭제되지 않습니다.', '평범한 대화, 칭찬, 친밀감만으로 최면깊이는 변하지 않습니다.', '최면저항력은 고정값이며 플레이 중 변하지 않습니다.'] }, stats, unlocks: unlock.unlocks, active_effects: buildManualActiveEffects(master, save), common_failures: [{ title: '일반 최면이 적용되지 않음', reasons: ['어플 화면을 2초 이상 보여주지 않았습니다.', '대상에게 실제로 어플을 사용하지 않고 말이나 행동만 했습니다.'] }, { title: '새 개인 암시를 만들 수 없음', reasons: ['개인 암시 슬롯이 가득 찼습니다.', '요청 내용의 실제 강도가 현재 사용 가능 강도를 넘었습니다.', '등록 대상 NPC를 특정하지 못했습니다.'] }, { title: '기존 암시를 수정하거나 해제할 수 없음', reasons: ['대상 암시를 찾지 못했습니다.', '실제 변경되는 내용이 없습니다.', '암시가 이미 비활성 상태입니다.'] }, { title: '새 상식개변을 만들 수 없음', reasons: ['상식개변 활성 슬롯이 가득 찼습니다.', '오늘 사용 횟수를 모두 사용했습니다.', '요청한 공간 범위가 현재 레벨의 범위를 넘었습니다.', '요청 내용의 실제 강도가 현재 사용 가능 강도를 넘었습니다.'] }, { title: '상식개변 수정이 적용되지 않음', reasons: ['오늘 사용 횟수를 모두 사용했습니다.', '대상 상식개변을 찾지 못했습니다.', '내용·강도·범위가 기존과 동일해 실제 변경이 없습니다.'] }] };
 }
 
 // ─────────────────────────────────────────────

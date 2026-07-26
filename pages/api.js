@@ -31,6 +31,15 @@ const api = {
     return readApiResponse(res, 'context');
   },
 
+  async appManual(gameId) {
+    const res = await fetch(`${API_BASE}/api/app-manual`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ game_id: gameId })
+    });
+    return readApiResponse(res, 'app-manual');
+  },
+
   // ─── 2. 서사 생성 (SSE) — stream.js에서 직접 호출 ───
   // story()는 stream.js의 streamStory()가 담당
 

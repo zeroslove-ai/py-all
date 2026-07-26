@@ -377,6 +377,22 @@
       border-radius: var(--radius); background: var(--bg-primary); color: var(--text-primary);
     }
     .feedback-modal-error { color: var(--warning); font-size: .85rem; margin: 0; }
+    .app-manual-overlay { position: fixed; inset: 0; z-index: 60; display: grid; place-items: center; padding: 16px; background: rgba(0,0,0,.65); }
+    .app-manual-modal { width: min(900px, calc(100vw - 32px)); max-height: min(88vh, 920px); display: flex; flex-direction: column; overflow: hidden; background: var(--bg-secondary); border: 1px solid var(--border); border-radius: var(--radius); color: var(--text-primary); }
+    .app-manual-header { position: sticky; top: 0; z-index: 1; display: flex; gap: 12px; align-items: flex-start; padding: 18px 20px; background: var(--bg-secondary); border-bottom: 1px solid var(--border); }
+    .app-manual-header h2 { margin: 0; font-size: 1.15rem; } .app-manual-header p { margin: 4px 0 0; color: var(--text-secondary); font-size: .85rem; }
+    .app-manual-close { margin-left: auto; flex: 0 0 auto; background: var(--bg-tertiary); color: var(--text-primary); border: 1px solid var(--border); border-radius: var(--radius); padding: 7px 10px; cursor: pointer; }
+    .app-manual-body { overflow-y: auto; padding: 18px 20px 24px; display: grid; gap: 12px; }
+    .app-manual-status-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 10px; }
+    .app-manual-card, .app-manual-diagnostic, .app-manual-active-item { padding: 11px; border: 1px solid var(--border); border-radius: var(--radius); background: var(--bg-tertiary); }
+    .app-manual-card small { display: block; color: var(--text-secondary); } .app-manual-card strong { display: block; margin-top: 3px; }
+    .app-manual-progress { height: 7px; margin-top: 7px; border-radius: 999px; overflow: hidden; background: var(--bg-primary); }
+    .app-manual-progress-fill { height: 100%; background: var(--accent); }
+    .app-manual-diagnostic.success { border-color: var(--success); } .app-manual-diagnostic.warning { border-color: var(--warning); } .app-manual-diagnostic.info { border-color: var(--accent); }
+    .app-manual-section { border: 1px solid var(--border); border-radius: var(--radius); background: var(--bg-primary); } .app-manual-section summary, .app-manual-tier summary { cursor: pointer; padding: 12px; font-weight: 700; }
+    .app-manual-section > div { padding: 0 12px 12px; } .app-manual-tier { margin: 8px 0; border: 1px solid var(--border); border-radius: var(--radius); background: var(--bg-secondary); }
+    .app-manual-list { margin: 0; padding-left: 20px; } .app-manual-list li { margin: 5px 0; } .app-manual-active-item { margin: 8px 0; white-space: pre-wrap; }
+    .app-manual-error { padding: 20px; text-align: center; color: var(--warning); } .app-manual-error-actions { display: flex; justify-content: center; gap: 8px; margin-top: 12px; }
 
     /* Responsive */
     @media (max-width: 768px) {
@@ -399,6 +415,9 @@
       }
       .header-controls { margin-left: 0; width: 100%; }
       .tts-status { max-width: none; flex: 1 1 160px; }
+      .app-manual-overlay { padding: 0; } .app-manual-modal { width: 100%; height: 100dvh; max-height: none; border-radius: 0; }
+      .app-manual-header { padding-top: max(14px, env(safe-area-inset-top)); } .app-manual-body { padding-bottom: max(20px, env(safe-area-inset-bottom)); }
+      .app-manual-status-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
       .choice-buttons { grid-template-columns: 1fr; gap: 9px; max-height: 46vh; }
       .choice-btn { width: 100%; min-width: 0; padding: 8px 10px; text-align: left; }
     }
@@ -1056,21 +1075,80 @@
       }
     }
 
-    function showAppInfo() {
-      const save = state.context?.save || {};
-      const progress = save.player_progress || { level: 1, exp: 0, next_level_exp: 10 };
-      const csa = Array.isArray(save.csa_active) ? save.csa_active.filter(item => item?.active) : [];
-      const suggestionMap = save.active_suggestions && typeof save.active_suggestions === 'object' && !Array.isArray(save.active_suggestions)
-        ? save.active_suggestions : {};
-      const characters = state.context?.master?.characters || {};
-      const suggestionLines = Object.entries(suggestionMap)
-        .map(([characterId, list]) => [characterId, (Array.isArray(list) ? list : []).filter(item => item?.active)])
-        .filter(([, list]) => list.length)
-        .map(([characterId, list]) => {
-          const name = characters[characterId]?.name || characters[characterId]?.['이름'] || characterId;
-          return `${name}: ${list.map(item => item.content).join(', ')}`;
-        });
-      ui.showSystemMessage(`📱 어플 정보\n레벨 ${progress.level || 1} · 경험치 ${progress.exp || 0}/${progress.next_level_exp || 10}\n기능: 개인 대상 일반 최면·암시 / 마인드 모니터 / 공간 범위 상식 개변\n활성 암시: ${suggestionLines.length ? suggestionLines.join(' · ') : '없음'}\n상식 개변: ${csa.length ? csa.map(item => `${item.content} (${item.scope_label || item.scope_id})`).join(', ') : '없음'}`);
+    function createManualElement(tag, className = '', text = '') {
+      const node = document.createElement(tag);
+      if (className) node.className = className;
+      if (text) node.textContent = text;
+      return node;
+    }
+
+    function appendManualList(parent, items, ordered = false) {
+      const list = createManualElement(ordered ? 'ol' : 'ul', 'app-manual-list');
+      (Array.isArray(items) ? items : []).forEach(text => list.appendChild(createManualElement('li', '', String(text))));
+      parent.appendChild(list);
+    }
+
+    function manualSection(title, open, render) {
+      const details = createManualElement('details', 'app-manual-section');
+      details.open = open;
+      details.appendChild(createManualElement('summary', '', title));
+      const body = document.createElement('div');
+      render(body);
+      details.appendChild(body);
+      return details;
+    }
+
+    function renderManualStatus(manual) {
+      const status = manual.status || {};
+      const grid = createManualElement('div', 'app-manual-status-grid');
+      const card = (label, value, detail = '') => { const node = createManualElement('div', 'app-manual-card'); node.append(createManualElement('small', '', label), createManualElement('strong', '', value)); if (detail) node.appendChild(createManualElement('small', '', detail)); grid.appendChild(node); return node; };
+      const expCard = card('경험치', `${status.exp || 0} / ${status.next_level_exp || 0}`);
+      const progress = createManualElement('div', 'app-manual-progress'); const fill = createManualElement('div', 'app-manual-progress-fill'); const percent = Number(status.exp_percent) || 0; fill.style.width = `${percent}%`; progress.setAttribute('role', 'progressbar'); progress.setAttribute('aria-valuemin', '0'); progress.setAttribute('aria-valuemax', '100'); progress.setAttribute('aria-valuenow', String(percent)); progress.appendChild(fill); expCard.appendChild(progress);
+      card('레벨', `Lv.${status.level || 1}`); card('사용 가능 암시', `${status.available_strength || '약함'}까지`); card('개인 암시', `${status.suggestion_active || 0} / ${status.suggestion_max || 0}`, `남은 슬롯 ${status.suggestion_remaining || 0}`); card('상식개변', `${status.csa_active || 0} / ${status.csa_max || 0}`, `현재 범위: ${status.csa_scope_label || '-'}`); card('오늘 상식개변', `${status.csa_daily_used || 0} / ${status.csa_daily_limit || 0}회`);
+      return grid;
+    }
+
+    function renderManualTiers(body, tiers, includeDescription = false) {
+      (Array.isArray(tiers) ? tiers : []).forEach(tier => {
+        const details = createManualElement('details', 'app-manual-tier');
+        details.appendChild(createManualElement('summary', '', tier.available ? `${tier.label} · 사용 가능` : `${tier.label} · Lv.${tier.unlock_level} 해금 🔒`));
+        const content = document.createElement('div');
+        if (!tier.available) content.appendChild(createManualElement('p', '', '현재 레벨에서는 이 단계의 상세 예시를 확인할 수 없습니다.'));
+        else { if (includeDescription && tier.description) content.appendChild(createManualElement('p', '', tier.description)); appendManualList(content, tier.examples, true); }
+        details.appendChild(content); body.appendChild(details);
+      });
+    }
+
+    function renderAppManualModal(manual, opener) {
+      const overlay = createManualElement('div', 'app-manual-overlay');
+      const modal = createManualElement('div', 'app-manual-modal'); modal.setAttribute('role', 'dialog'); modal.setAttribute('aria-modal', 'true'); modal.setAttribute('aria-labelledby', 'app-manual-title');
+      const header = createManualElement('header', 'app-manual-header'); const heading = document.createElement('div'); const title = createManualElement('h2', '', manual.title || '최면 어플 사용자 매뉴얼'); title.id = 'app-manual-title'; heading.append(title, createManualElement('p', '', manual.subtitle || '')); const close = createManualElement('button', 'app-manual-close', '닫기'); close.type = 'button'; close.setAttribute('aria-label', '매뉴얼 닫기'); header.append(heading, close);
+      const body = createManualElement('div', 'app-manual-body');
+      body.appendChild(manualSection('현재 어플 상태', true, section => section.appendChild(renderManualStatus(manual))));
+      body.appendChild(manualSection('현재 상태 진단', true, section => (manual.diagnostics || []).forEach(item => section.appendChild(createManualElement('div', `app-manual-diagnostic ${item.type || 'info'}`, item.text)))));
+      body.appendChild(manualSection('빠른 사용법', true, section => appendManualList(section, manual.quick_start, true)));
+      body.appendChild(manualSection('개인 암시', false, section => { section.append(createManualElement('p', '', manual.suggestions?.description || ''), createManualElement('h3', '', '규칙')); appendManualList(section, manual.suggestions?.rules); renderManualTiers(section, manual.suggestions?.tiers, true); }));
+      body.appendChild(manualSection('상식개변', false, section => { section.appendChild(createManualElement('p', '', manual.common_sense?.description || '')); appendManualList(section, manual.common_sense?.rules); section.appendChild(createManualElement('p', '', `현재 범위: ${manual.common_sense?.current_scope?.label || '-'}`)); appendManualList(section, (manual.common_sense?.scope_unlocks || []).map(item => `${item.level_range} · ${item.scope_label} · 활성 ${item.max_active}개 · 하루 ${item.daily_limit}회${item.available ? ' · 사용 가능' : ''}`)); renderManualTiers(section, manual.common_sense?.tiers); }));
+      body.appendChild(manualSection('최면깊이', false, section => { section.appendChild(createManualElement('p', '', manual.hypnosis_depth?.description || '')); appendManualList(section, manual.hypnosis_depth?.rules); }));
+      body.appendChild(manualSection('NPC 수치 설명', false, section => (manual.stats || []).forEach(stat => { const item = createManualElement('div', 'app-manual-active-item'); item.append(createManualElement('strong', '', `${stat.label} (${stat.range})`), createManualElement('div', '', stat.description), createManualElement('small', '', stat.change_rule)); section.appendChild(item); })));
+      body.appendChild(manualSection('레벨·해금 기능', false, section => (manual.unlocks || []).forEach(unlock => { const title = createManualElement('p', '', `Lv.${unlock.level}`); section.appendChild(title); appendManualList(section, unlock.items); })));
+      body.appendChild(manualSection('현재 활성 효과', true, section => { const effects = manual.active_effects || {}; if (!(effects.suggestions || []).length && !(effects.common_sense || []).length) { section.appendChild(createManualElement('p', '', '현재 활성 효과가 없습니다.')); return; } const groups = new Map(); (effects.suggestions || []).forEach(item => groups.set(item.character_name, [...(groups.get(item.character_name) || []), item])); groups.forEach((items, name) => { section.appendChild(createManualElement('h3', '', name)); items.forEach(item => section.appendChild(createManualElement('div', 'app-manual-active-item', `[${item.strength}] ${item.content}`))); }); (effects.common_sense || []).forEach(item => section.appendChild(createManualElement('div', 'app-manual-active-item', `[${item.scope_label} · ${item.strength}]\n${item.content}`))); }));
+      body.appendChild(manualSection('자주 발생하는 실패 원인', false, section => (manual.common_failures || []).forEach(item => { section.appendChild(createManualElement('h3', '', item.title)); appendManualList(section, item.reasons); })));
+      const closeModal = () => { document.removeEventListener('keydown', onKey); overlay.remove(); opener?.focus(); };
+      const onKey = event => { if (event.key === 'Escape') closeModal(); };
+      close.addEventListener('click', closeModal); overlay.addEventListener('click', event => { if (event.target === overlay) closeModal(); }); document.addEventListener('keydown', onKey);
+      modal.append(header, body); overlay.appendChild(modal); document.body.appendChild(overlay); close.focus();
+    }
+
+    async function showAppManual() {
+      if (document.querySelector('.app-manual-overlay')) return;
+      const opener = document.getElementById('app-info-side-button');
+      if (!state.gameId) return;
+      if (opener) { opener.disabled = true; opener.textContent = '불러오는 중…'; }
+      try { const result = await api.appManual(state.gameId); renderAppManualModal(result.manual || {}, opener); }
+      catch (error) {
+        const overlay = createManualElement('div', 'app-manual-overlay'); const box = createManualElement('div', 'app-manual-modal'); const body = createManualElement('div', 'app-manual-error', '매뉴얼을 불러오지 못했습니다.'); const actions = createManualElement('div', 'app-manual-error-actions'); const retry = createManualElement('button', 'choice-btn', '다시 시도'); const close = createManualElement('button', 'choice-btn', '닫기'); actions.append(retry, close); body.appendChild(actions); box.appendChild(body); overlay.appendChild(box); const dismiss = () => { overlay.remove(); opener?.focus(); }; retry.addEventListener('click', () => { overlay.remove(); showAppManual(); }); close.addEventListener('click', dismiss); overlay.addEventListener('click', event => { if (event.target === overlay) dismiss(); }); document.body.appendChild(overlay); close.focus(); }
+      finally { if (opener) { opener.disabled = false; opener.textContent = '📘 어플 매뉴얼'; } }
     }
 
     function submitChoice(choiceText, meta = {}) {
@@ -1135,7 +1213,8 @@
     }
 
     window.resumeGame = resumeGame;
-    window.showAppInfo = showAppInfo;
+    window.showAppManual = showAppManual;
+    window.showAppInfo = showAppManual;
     window.showResetModal = showResetModal;
     window.showFeedbackModal = showFeedbackModal;
 

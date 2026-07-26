@@ -380,14 +380,35 @@ ${errors.join('; ')}
 }
 
 // Deterministic, LLM-free — used only when mind-monitor generation/repair
-// still fails validation. Deliberately generic (no plot-specific facts) so
-// it can never contradict the current narrative; never the previous turn's
-// saved surface/inner/physical_reaction.
-const MIND_MONITOR_DEGRADED_FALLBACK = {
-  surface: '“현재 상황을 정리하려 하지만 감정이 쉽게 가라앉지 않는다.”',
-  inner: '“방금 일어난 일을 아직 제대로 받아들이지 못하고 있다.”',
-  physical_reaction: '호흡을 고르며 자세를 바로잡으려 한다. 시선과 손끝에 긴장이 남아 있다.'
+// still fails validation. Deliberately generic (no plot-specific facts, no
+// concrete action/outfit/body state) so it can never contradict the current
+// narrative; never the previous turn's saved surface/inner/physical_reaction.
+// Several candidates per field (never randomized — picked by turn number, see
+// resolveMindMonitorDegradedFallback) so back-to-back degraded turns don't
+// show the exact same line.
+const MIND_MONITOR_DEGRADED_FALLBACKS = {
+  surface: [
+    '“현재 상황을 업무적으로 정리하려 하지만 생각이 쉽게 이어지지 않는다.”',
+    '“침착함을 유지하려 애쓰며 방금 지시의 의미를 되짚고 있다.”',
+    '“현재 상황을 정리하려 하지만 감정이 쉽게 가라앉지 않는다.”'
+  ],
+  inner: [
+    '“방금 일어난 일을 어떻게 받아들여야 할지 아직 판단하지 못하고 있다.”',
+    '“감정이 뒤섞여 있어 자신의 진짜 반응을 명확히 구분하지 못한다.”',
+    '“지금 느끼는 혼란을 스스로 설명할 말을 찾지 못하고 있다.”'
+  ],
+  physical_reaction: [
+    '호흡을 고르며 자세를 유지한다. 시선과 손끝에 긴장이 남아 있다.',
+    '잠시 움직임을 멈추고 숨을 정리한다. 표정에는 아직 긴장이 남아 있다.',
+    '호흡을 고르며 자세를 바로잡으려 한다. 시선과 손끝에 긴장이 남아 있다.'
+  ]
 };
+
+function resolveMindMonitorDegradedFallback(field, turnNumber) {
+  const candidates = MIND_MONITOR_DEGRADED_FALLBACKS[field];
+  const index = Math.abs(Number(turnNumber) || 0) % candidates.length;
+  return candidates[index];
+}
 
 async function repairMindMonitor(env, characterName, characterStyle, narrativeText, badEmotion, errors) {
   const prompt = buildMindRepairPrompt(characterName, characterStyle, narrativeText, badEmotion, errors);
@@ -504,7 +525,12 @@ async function performExtractionPass(env, { narrativeText, playerInput, compatCt
 
   const t5 = Date.now();
   const npcRejected = extract._npc_registration_rejected || extract._npc_location_rejected;
+  const mindMonitorCharacterId = npcRejected ? null : extract.character_id;
+  const previousNpcEmotion = mindMonitorCharacterId && mindMonitorCharacterId !== 'narrator'
+    ? compatCtx?.save?.npc_emotion?.[mindMonitorCharacterId]
+    : null;
   let validation = validateNpcEmotion(extract.npc_emotion, npcRejected ? 'narrator' : extract.character_id);
+  validation = applyMindMonitorRepeatCheck(validation, extract.npc_emotion, previousNpcEmotion);
   timing.mind_validation_ms = Date.now() - t5;
   // 턴 기록용 마인드 모니터 출처 — _turn_record에만 쓰이고 game_save.data에는
   // 영구 저장되지 않는다. 정상 첫 생성이면 generated.
@@ -524,14 +550,14 @@ async function performExtractionPass(env, { narrativeText, playerInput, compatCt
 
   let mindMonitorRepaired = false;
   if (!validation.ok) {
-    const characterId = npcRejected ? null : extract.character_id;
+    const characterId = mindMonitorCharacterId;
     const character = characterId ? compatCtx?.master?.characters?.[characterId] : null;
     if (character && !shouldReserveRecovery && consumeRecoveryBudget(recoveryBudget, 'mind_monitor')) {
       const t6 = Date.now();
       try {
         const repaired = await repairMindMonitor(env, character.name || character['이름'], character['말투'], narrativeText, extract.npc_emotion, validation.errors);
         if (isPlainObject(repaired)) {
-          const repairedValidation = validateNpcEmotion(repaired, characterId);
+          const repairedValidation = applyMindMonitorRepeatCheck(validateNpcEmotion(repaired, characterId), repaired, previousNpcEmotion);
           // Adopt whichever fields the repair actually fixed even if the
           // repair didn't fully pass — one still-failing field must not
           // discard a sibling field that already validates cleanly.
@@ -560,7 +586,7 @@ async function performExtractionPass(env, { narrativeText, playerInput, compatCt
     let mindDegradedUsed = false;
     for (const field of ['surface', 'inner', 'physical_reaction']) {
       if (validation.fieldErrors[field].length) {
-        extract.npc_emotion[field] = MIND_MONITOR_DEGRADED_FALLBACK[field];
+        extract.npc_emotion[field] = resolveMindMonitorDegradedFallback(field, nextTurn);
         mindDegradedUsed = true;
       }
     }
@@ -1986,7 +2012,7 @@ ${recentMemorySlice.map((m, index) => clipHeadTail(m.content || '', index === re
   const feedbackSection = Array.isArray(feedback) && feedback.length
     ? `\n\n[USER FEEDBACK — APPLY TO THIS NEXT RESPONSE ONLY]\n${feedback.map(item => `- ${typeof item === 'string' ? item : item?.text || ''}`).filter(Boolean).join('\n')}\nThis is not an in-world action. Never narrate it as dialogue or an event; use it only to improve output quality.`
     : '';
-  const continuitySection = `\n\n[TURN CONTINUITY CONTRACT]\n- 직전 턴에서 완료된 행동을 다시 실행하지 않는다.\n- 이미 성공한 암시를 다시 시도하지 않는다.\n- NPC가 확정 암시를 매 턴 이유 없이 의심하거나 거부하지 않는다.\n- 현재 장면을 한 단계 앞으로 진행한다.\n- 저장된 확정 사실과 충돌하는 쪽지, 과거 사건, 시간, 인물 관계를 새로 만들지 않는다.`;
+  const continuitySection = `\n\n[TURN CONTINUITY CONTRACT]\n- 직전 턴에서 완료된 행동을 다시 실행하지 않는다.\n- 이미 성공한 암시를 다시 시도하지 않는다.\n- NPC가 확정 암시를 매 턴 이유 없이 의심하거나 거부하지 않는다.\n- 현재 장면을 한 단계 앞으로 진행한다.\n- 저장된 확정 사실과 충돌하는 쪽지, 과거 사건, 시간, 인물 관계를 새로 만들지 않는다.\n- 직전 장면에서 벗거나 변경한 복장은 명시적으로 다시 입는 행동이 나오기 전까지 그대로 유지한다. 이미 벗은 옷을 다시 벗거나 현재 입지 않은 옷을 걷어 올리거나 조작하지 않는다.\n- 복장은 캐릭터 기본 외형·복장 프로필보다 최근 장면에서 확정된 상태를 우선하고, [최근 기억]끼리 복장이 충돌하면 가장 최근에 명시된 상태를 따른다. 플레이어와 NPC의 복장은 각각 구분해서 판단한다. [3. 선택지]도 이 복장 상태와 충돌하지 않아야 한다.`;
   const finalFormatRules = `\n\n[FINAL OUTPUT CONTRACT — HIGHEST PRIORITY]\nThe response body contains exactly three sections: [1. 서사 및 행동], [2. 플레이어 상황판], [3. 선택지]. Never include a mind monitor, NPC stat table, character body information, or turn number in the body. Mind monitor belongs only to npc_emotion extraction and the sidebar UI. The Player Status Panel Contract overrides any legacy display-format text, including whatever [2] format appears inside [최근 기억] from earlier turns — past turns may still show 🎯 접근 대상 or 📌 현재 목표 from an older contract; never copy that old layout, only follow the current Player Status Panel Contract's fields. In normal play, [3] contains exactly four in-world action choices; never include an app-information choice.\nDo not use formulaic first-impression or hypnosis-success calculations.\n출력 직전 최소 확인: [1]은 현재 장면을 실제로 진행하고 모든 직접 대사는 [대사 — AUTHORITATIVE DIALOGUE CONTRACT]을 지킨다. [2]는 Player Status Panel Contract만 따른다. [3]은 일반 플레이에서 정확히 4개의 서로 다른 실제 행동이다. 사용자가 요청하지 않은 영구 암시·상식개변은 새로 만들지 않는다.\n지침이 서로 충돌하면 다음 우선순위를 따른다: 1) 사용자의 최신 입력과 정정 2) 직전 장면의 연속성 3) 등록 캐릭터 설정과 현재 관계 상태 4) 자연스러운 반응과 플레이어 유도 5) 모든 직접 대사의 화자명·연기지시 형식 6) [1] 서사 / [2] 상황판 / [3] 선택지 출력. 길이를 채우기 위해 확정 사실을 깨거나 플레이어 행동을 임의로 추가하지 않는다.\n`;
   const openingFlow = mode === 'opening'
     ? `\n\n[OPENING PHASE — AFTER PLAYER SETUP]\nThe player setup is confirmed. Generate only the first hospital scene and first NPC encounter now. Do not repeat the app discovery, app feature explanation, player questions, or character recommendation. Never claim that the player has already used the app to change the hospital in the past.\n`
@@ -2138,6 +2164,7 @@ npc_emotion.inner는 현재 NPC가 의식적으로 인정하지 못하는 욕구
 npc_emotion.physical_reaction은 표정, 시선, 자세, 목소리, 손동작, 호흡 등 외부에서 관찰 가능한 반응만 객관적으로 쓴다. 독백을 넣지 말고 최소 두 문장으로 쓴다.
 "상태다", "느끼고 있다", "생각한다" 같은 분석문만으로 surface 또는 inner를 채우지 마라.
 활성 암시가 하나도 없어도, character_id가 narrator가 아닌 등록 NPC이고 그 NPC가 방금 서사에 실제로 등장한 정상 턴이면 npc_emotion(표면의식/잠재의식/신체적·행동적 반응)을 반드시 모두 생성한다. player_setup 후보 화면처럼 등록 NPC가 실제로 등장하지 않는 턴에만 비워둔다.
+직전 저장된 npc_emotion 문장을 그대로 복사하거나 단어만 바꿔치기하지 마라. 이번 턴 서사에서 새로 일어난 인식·감정·신체 변화만 기록하고, 변화가 작더라도 직전 문장을 그대로 반복하지 마라. 일시적인 신체 반응이나 순간의 동요를 사랑, 영구 복종, 완전한 욕망으로 자동 확정하지 말고, 갈등·혼란·자기합리화가 남아 있다면 그대로 유지해라.
 
 [NPC STAT DELTA CONTRACT]
 npc_stat_changes만 반환한다. 서사에 숫자가 없어도 대사·행동·표정·판단의 실제 변화를 근거로 판단하되 변화 없는 반복 대화는 0이다. 의미 있는 호의·편안함·자발적 대화 지속은 호감 +1~2, 의심 완화·정직성 확인·도움 수용은 신뢰 +1~2, 부탁 자발 수용·자기합리화·자연스러운 따름은 순응 +1~3을 검토한다. 무례는 호감 -1~-2, 거짓말 발각·모순·신분 의심은 신뢰 -1~-3, 명확한 거부는 순응 -1~-3을 검토한다. 실제 반응 변화가 명백하면 모든 값을 기계적으로 0으로 두지 마라. 최면깊이는 플레이어가 어플을 사용해 실제로 최면을 시도·성공·실패·각성시켰거나 활성 암시가 작동했을 때만 변화하며, 일반 대화·설득만으로는 변화하지 않는다. 저항력은 항상 0이다. 한도는 호감·신뢰·최면 -5~+5, 순응 일반 -3~+3·최면 사건 -5~+5이고 ±4~5는 중요한 전환에만 쓴다. reason은 서사 근거 한 문장이다.
@@ -2452,6 +2479,24 @@ function validateNpcEmotion(emotion = {}, characterId = null) {
   };
   const errors = [...fieldErrors.surface, ...fieldErrors.inner, ...fieldErrors.physical_reaction];
   return { ok: errors.length === 0, errors, fieldErrors };
+}
+
+// 82→83턴처럼 직전 저장값을 그대로 반복하는 것을 검증 실패로 취급한다 — 문장
+// 유사도 비교가 아니라 trim 기준 완전히 동일한 문자열만 감지한다. 검증 결과에
+// 필드를 추가할 뿐이므로 기존 1회 repair 예산·degraded fallback 흐름을 그대로
+// 탄다(새 검증 체계가 아니다).
+function applyMindMonitorRepeatCheck(validationResult, emotion, previousEmotion) {
+  if (!isPlainObject(previousEmotion)) return validationResult;
+  for (const field of ['surface', 'inner', 'physical_reaction']) {
+    const current = typeof emotion?.[field] === 'string' ? emotion[field].trim() : '';
+    const previous = typeof previousEmotion?.[field] === 'string' ? previousEmotion[field].trim() : '';
+    if (current && previous && current === previous) {
+      validationResult.fieldErrors[field] = [...validationResult.fieldErrors[field], `${field}: identical to previous turn's saved value`];
+    }
+  }
+  validationResult.errors = [...validationResult.fieldErrors.surface, ...validationResult.fieldErrors.inner, ...validationResult.fieldErrors.physical_reaction];
+  validationResult.ok = validationResult.errors.length === 0;
+  return validationResult;
 }
 
 function buildSavePatch(extract, enginePatch = {}, summaryPlan = null, previousSave = {}, turnNumber = 0, playerInput = '', today = currentUtcDateString()) {
@@ -3017,6 +3062,18 @@ function normalizeStrengthForStorage(value) {
   return typeof value === 'string' && HYPNOSIS_STRENGTH_TIERS.includes(value.trim()) ? value.trim() : null;
 }
 
+// Audited (active_suggestions loss investigation): this function only ever
+// returns a non-null patch when extract.suggestion_action is itself a valid
+// activate/update/deactivate object — a normal turn with no action, or an
+// empty/malformed one, returns null here and buildSavePatch then never sets
+// patch.active_suggestions at all, so jsonb_deep_merge leaves the DB's full
+// active_suggestions column (every NPC, every entry) untouched. Every branch
+// below also always starts from the FULL previous list for this one NPC and
+// only replaces the single matched target entry — sibling suggestions (same
+// NPC) and every other NPC's entries are never touched. console.log calls
+// below exist purely so a future recurrence of "a suggestion disappeared
+// with no user action" has a concrete before/after audit trail instead of
+// having to re-derive it from scratch.
 function applySuggestionAction(previousSave, action, currentCharacterId, turnNumber) {
   if (!isPlainObject(action) || !['activate', 'update', 'deactivate'].includes(action.action)) return null;
   if (!currentCharacterId || currentCharacterId === 'narrator') return null;
@@ -3042,6 +3099,7 @@ function applySuggestionAction(previousSave, action, currentCharacterId, turnNum
     const duplicate = list.some(item => item?.active && normalizeSuggestionContent(item.content) === content);
     if (duplicate) return null;
     const newItem = { id: nextSuggestionId(list, turnNumber), content, strength, created_turn: turnNumber, active: true };
+    console.log(JSON.stringify({ event: 'suggestion_action_applied', action: 'activate', character_id: currentCharacterId, turn: turnNumber, before_count: list.length, after_count: list.length + 1 }));
     return { active_suggestions: { [currentCharacterId]: [...list, newItem] } };
   }
 
@@ -3058,6 +3116,7 @@ function applySuggestionAction(previousSave, action, currentCharacterId, turnNum
   if (!target) return null;
 
   if (action.action === 'deactivate') {
+    console.log(JSON.stringify({ event: 'suggestion_action_applied', action: 'deactivate', character_id: currentCharacterId, turn: turnNumber, target_id: target.id, active_before: list.filter(i => i.active).length, active_after: list.filter(i => i.active).length - 1 }));
     return { active_suggestions: { [currentCharacterId]: list.map(item => item === target ? { ...item, active: false } : item) } };
   }
 
@@ -3070,6 +3129,7 @@ function applySuggestionAction(previousSave, action, currentCharacterId, turnNum
     if (!requestedStrength || hypnosisStrengthRank(requestedStrength) > capability.max_strength_rank) return null;
     newStrength = requestedStrength;
   }
+  console.log(JSON.stringify({ event: 'suggestion_action_applied', action: 'update', character_id: currentCharacterId, turn: turnNumber, target_id: target.id, active_count: list.filter(i => i.active).length }));
   return {
     active_suggestions: {
       [currentCharacterId]: list.map(item => item === target ? { ...item, content: newContent, strength: newStrength } : item)

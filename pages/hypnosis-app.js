@@ -231,7 +231,7 @@ window.hypnosisApp = (() => {
     if (isApplying) return;
     const count=(domain, operation)=>requested.filter(item=>item.domain===domain&&item.operation===operation).length;
     const summary=[['개인 암시 신규',count('suggestion','activate')],['개인 암시 수정',count('suggestion','update')],['개인 암시 삭제',count('suggestion','deactivate')],['상식개변 신규',count('csa','activate')],['상식개변 수정',count('csa','update')],['상식개변 해제',count('csa','deactivate')]].filter(([,value])=>value).map(([label,value])=>`- ${label} ${value}개`);
-    const daily=count('csa','activate')+count('csa','update'); if(daily) summary.push(`상식개변 일일 사용 ${daily}회가 소비됩니다.`); summary.push('전체 변경사항은 게임 1턴으로 처리됩니다.');
+    summary.push('전체 변경사항은 게임 1턴으로 처리됩니다.');
     const proceed = async () => {
       if (typeof window.runHypnosisStructuredAction !== 'function') return showDialog('오류','구조화 턴 실행 함수를 찾지 못했습니다.',[{label:'확인',run:()=>{}}]);
       if (state.isStreaming) return showDialog('적용할 수 없습니다.','현재 턴이 끝난 뒤 다시 적용해 주세요. 변경사항은 아직 저장되지 않았습니다.',[{label:'확인',run:()=>{}}]);
@@ -327,7 +327,6 @@ window.hypnosisApp = (() => {
     addStatus('사용 가능 강도', status.available_strength || '약함');
     addStatus('개인 암시', `${status.suggestion_active || 0} / ${status.suggestion_max || 0}`, `남은 슬롯 ${status.suggestion_remaining || 0}`);
     addStatus('상식개변', `${status.csa_active || 0} / ${status.csa_max || 0}`, `현재 범위: ${status.csa_scope_label || '-'}`);
-    addStatus('오늘 상식개변', `${status.csa_daily_used || 0} / ${status.csa_daily_limit || 0}회`);
     if (status.next_unlock) addStatus('다음 해금', `Lv.${status.next_unlock.level}`, status.next_unlock.text || '');
     statusSection.content.appendChild(statusGrid);
     (manual.diagnostics || []).forEach(item => statusSection.content.appendChild(el('p', `hypnosis-app-diagnostic ${item.type || ''}`, item.text)));
@@ -344,7 +343,7 @@ window.hypnosisApp = (() => {
     if (manual.common_sense?.description) csa.content.appendChild(el('p','',manual.common_sense.description));
     csa.content.appendChild(el('p','',`현재 사용 가능 범위: ${manual.common_sense?.current_scope?.label || '-'}`));
     appendManualList(csa.content, manual.common_sense?.rules);
-    const scopeList = el('div','app-manual-unlock-list'); (manual.common_sense?.scope_unlocks || []).forEach(item => scopeList.appendChild(el('p','',`${item.level_range} · ${item.scope_label} · 활성 ${item.max_active}개 · 하루 ${item.daily_limit}회${item.available ? ' · 사용 가능' : ' · 잠금'}`))); csa.content.appendChild(scopeList);
+    const scopeList = el('div','app-manual-unlock-list'); (manual.common_sense?.scope_unlocks || []).forEach(item => scopeList.appendChild(el('p','',`${item.level_range} · ${item.scope_label} · 활성 ${item.max_active}개${item.available ? ' · 사용 가능' : ' · 잠금'}`))); csa.content.appendChild(scopeList);
     appendManualTiers(csa.content, manual.common_sense?.tiers, true); body.appendChild(csa.details);
 
     const strength = manualSection('최면 강도'); strength.content.appendChild(el('h4','', '개인 암시')); appendManualTiers(strength.content, manual.suggestions?.tiers, true); strength.content.appendChild(el('h4','', '상식개변')); appendManualTiers(strength.content, manual.common_sense?.tiers, true); body.appendChild(strength.details);

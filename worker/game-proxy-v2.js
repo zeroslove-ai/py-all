@@ -662,7 +662,6 @@ async function handleAppValidate(req, env) {
   const result = planStructuredAction(ctx.save, ctx.master, structured_action, {
     turnNumber: ctx.turn_count + 1,
     turnCount: ctx.turn_count,
-    today: currentUtcDateString()
   });
   if (!result.ok) {
     console.warn(JSON.stringify({ event: 'app_action_rejected', type: structured_action.type || null, game_id, error_code: result.error_code, issue_codes: result.issues.map(issue => issue.code) }));
@@ -825,13 +824,13 @@ function extractPublicStatDefinition(statDefinitions, statName, fallback) {
 
 function buildManualUnlockMilestones(level) {
   const milestones = [
-    [1, ['약한 암시 사용 가능', '개인 암시 슬롯 1개', '상식개변 범위 병동', '상식개변 활성·하루 한도 1개']],
+    [1, ['약한 암시 사용 가능', '개인 암시 슬롯 1개', '상식개변 범위 병동', '상식개변 활성 슬롯 1개']],
     [3, ['중간 암시 사용 가능', '개인 암시 슬롯 2개']],
-    [4, ['상식개변 범위 해당 층 전체', '상식개변 활성·하루 한도 2개']],
+    [4, ['상식개변 범위 해당 층 전체', '상식개변 활성 슬롯 2개']],
     [5, ['강한 암시 사용 가능', '개인 암시 슬롯 3개']],
-    [7, ['상식개변 범위 건물 전체', '상식개변 활성·하루 한도 3개']],
+    [7, ['상식개변 범위 건물 전체', '상식개변 활성 슬롯 3개']],
     [8, ['개인 암시 슬롯 4개']],
-    [10, ['상식개변 범위 전 세계', '상식개변 활성·하루 한도 4개']]
+    [10, ['상식개변 범위 전 세계', '상식개변 활성 슬롯 4개']]
   ];
   const next = milestones.find(([unlockLevel]) => unlockLevel > level);
   const nextText = {
@@ -1040,10 +1039,8 @@ function buildAppManualPayload(master, save, turnCount = 0) {
     ? { type: 'success', text: `새 개인 암시를 ${capability.remaining_slots}개 더 등록할 수 있습니다.` }
     : { type: 'warning', text: `개인 암시 슬롯이 ${capability.active_count}/${capability.max_active}로 가득 찼습니다. 기존 암시를 수정하거나 해제해야 새 암시를 등록할 수 있습니다.` });
   const remainingCsaSlots = Math.max(0, capability.csa_max_active - capability.csa_active_count);
-  const remainingDaily = Math.max(0, capability.csa_daily_limit - capability.csa_daily_used);
-  if (remainingCsaSlots > 0 && remainingDaily > 0) diagnostics.push({ type: 'success', text: `새 상식개변을 등록할 수 있습니다. 남은 슬롯 ${remainingCsaSlots}개 · 오늘 남은 사용 ${remainingDaily}회.` });
+  if (remainingCsaSlots > 0) diagnostics.push({ type: 'success', text: `새 상식개변을 등록할 수 있습니다. 남은 슬롯 ${remainingCsaSlots}개.` });
   if (remainingCsaSlots === 0) diagnostics.push({ type: 'warning', text: `상식개변 활성 슬롯이 ${capability.csa_active_count}/${capability.csa_max_active}로 가득 찼습니다. 기존 개변을 수정하거나 해제할 수 있습니다.` });
-  if (remainingDaily === 0) diagnostics.push({ type: 'warning', text: '오늘 상식개변 사용 횟수를 모두 사용했습니다. 해제는 가능하지만 신규 등록과 수정은 다음 초기화 전까지 사용할 수 없습니다.' });
   diagnostics.push(unlock.next_unlock ? { type: 'info', text: `다음 기능 해금: Lv.${unlock.next_unlock.level} · ${unlock.next_unlock.text}` } : { type: 'info', text: '현재 최면 어플의 모든 기능이 해금되었습니다.' });
   const statDefinitions = system?.stat_definitions || master?.stat_definitions;
   const stats = [
@@ -1053,12 +1050,12 @@ function buildAppManualPayload(master, save, turnCount = 0) {
     ['compliance', '순응도', '유도·부탁·암시를 자연스럽게 받아들이고 자기합리화하는 정도입니다.', '일반 턴 최대 -3~+3 · 최면 관련 턴 최대 -5~+5'],
     ['resistance', '최면저항력', '최면에 대한 대상의 고정 저항값입니다.', '항상 고정 · 변화량 0']
   ].map(([id, label, fallback, change_rule]) => ({ id, label, range: '0~100', description: id === 'hypnosis_depth' ? fallback : extractPublicStatDefinition(statDefinitions, label, fallback), change_rule }));
-  return { version: 1, title: '최면 어플 사용자 매뉴얼', subtitle: '현재 게임의 룰북과 마지막 저장 상태를 기준으로 표시합니다. 매뉴얼 열람은 턴과 게임 상태에 영향을 주지 않습니다.', status: { level, exp: capability.exp, next_level_exp: capability.next_level_exp, exp_percent: progress, available_strength: capability.available_strength, suggestion_active: capability.active_count, suggestion_max: capability.max_active, suggestion_remaining: capability.remaining_slots, csa_active: capability.csa_active_count, csa_max: capability.csa_max_active, csa_daily_used: capability.csa_daily_used, csa_daily_limit: capability.csa_daily_limit, csa_scope_type: limits.scope_type, csa_scope_label: MANUAL_SCOPE_LABELS[limits.scope_type], next_unlock: unlock.next_unlock }, diagnostics,
+  return { version: 1, title: '최면 어플 사용자 매뉴얼', subtitle: '현재 게임의 룰북과 마지막 저장 상태를 기준으로 표시합니다. 매뉴얼 열람은 턴과 게임 상태에 영향을 주지 않습니다.', status: { level, exp: capability.exp, next_level_exp: capability.next_level_exp, exp_percent: progress, available_strength: capability.available_strength, suggestion_active: capability.active_count, suggestion_max: capability.max_active, suggestion_remaining: capability.remaining_slots, csa_active: capability.csa_active_count, csa_max: capability.csa_max_active, csa_scope_type: limits.scope_type, csa_scope_label: MANUAL_SCOPE_LABELS[limits.scope_type], next_unlock: unlock.next_unlock }, diagnostics,
     quick_start: ['개인 암시는 현재 함께 있는 NPC에게 최면 어플에서 등록하는 지속 효과입니다.', '상식개변은 특정 NPC가 아니라 지정된 공간 안의 사회적 상식을 변경합니다.', '평범한 대화·명령·말투만으로 저장된 암시나 상식개변은 바뀌지 않습니다. 변경은 반드시 어플 조작으로 처리됩니다.', '범위 초과·슬롯 부족·대상 미확인 등으로 처리되지 않은 시도는 상태·경험치·수치를 바꾸지 않습니다.', '이 매뉴얼을 열고 닫는 행동은 턴을 소비하지 않습니다.'],
     suggestions: { title: '개인 암시', description: '특정 NPC 한 명에게 지속되는 개인 규칙입니다. 모든 NPC의 개인 암시는 하나의 공용 슬롯 풀을 사용합니다. 강도는 문장의 노골적인 표현이 아니라 실제로 바꾸는 범위로 판정합니다.', rules: ['같은 NPC에게 여러 암시를 등록할 수 있지만 전체 슬롯 한도를 함께 사용합니다.', '새 암시는 빈 슬롯을 1개 사용하며, 기존 암시 수정은 같은 슬롯을 유지합니다.', '암시 해제는 성공 판정 없이 슬롯을 즉시 비웁니다.', '개인 암시는 대상의 순응도·최면깊이·최면저항력과 어플 레벨에 따라 성공률이 달라집니다.', '실패한 신규 암시는 슬롯을 사용하지 않으며, 기존 암시 수정 실패 시 이전 암시는 유지됩니다.', '최면저항력이 매우 높은 NPC는 다른 NPC보다 크게 어렵고, 순응도와 최면깊이가 높아지면 성공률이 올라갑니다.', '일반 직접 입력으로는 최면 효과를 만들 수 없습니다.', '암시를 해제해도 그동안 있었던 사건과 행동은 기억합니다. 해제되는 것은 암시의 효과와 강제된 인식입니다.', '대상은 과거 행동을 떠올리며 의문을 품거나 자기합리화를 할 수 있습니다. 기억상실은 별도의 기억 관련 효과가 있을 때만 발생합니다.', '최면 어플은 적용 전에 내용 자체에 필요한 최소 강도를 확인합니다. 선택한 강도보다 필요한 강도가 높으면 저장되지 않으며, 현재 해금된 단계 안에서 강도를 변경한 뒤 다시 적용해야 합니다.', '내용이 현재 해금 단계보다 강하거나 강한 단계에서도 지원하지 않는 내용은 어떤 변경사항도 저장하지 않습니다. 강도는 자동으로 변경되지 않습니다.'], tiers },
-    common_sense: { title: '상식개변', description: '특정 NPC가 아니라 지정 공간의 사회적 상식 자체를 변경합니다. 범위 안의 인물은 변경된 내용을 원래부터 당연했던 관습으로 받아들입니다.', rules: ['activate는 새 상식개변과 새 슬롯을 만들며 하루 사용 횟수 1회를 소비합니다.', 'update는 기존 슬롯을 유지하면서 내용·강도·범위를 변경하며 하루 사용 횟수 1회를 소비합니다.', 'deactivate는 기존 상식개변을 해제하며 하루 사용 횟수를 소비하지 않습니다.', '상식개변을 해제해도 그 상식 아래에서 벌어진 사건은 사라지지 않습니다. 사람들은 자신의 행동과 목격한 장면을 기억하며, 해제 후 이상함을 느낄 수 있습니다.', '활성 슬롯이 가득 차 있어도 기존 상식개변 수정은 가능하지만 하루 사용 횟수가 남아 있어야 합니다.', '직접 해제하지 않은 활성 상식개변은 날짜가 바뀌어도 유지됩니다.', '날짜가 바뀌면 하루 사용 횟수만 초기화됩니다.', '적용 당시 공간 범위는 고정되며 레벨이 올라도 기존 상식개변의 범위가 자동으로 확대되지 않습니다.', '현재 강도나 공간 범위를 넘는 요청은 적용되지 않으며 사용 횟수도 소비하지 않습니다.'], current_scope: { type: limits.scope_type, label: MANUAL_SCOPE_LABELS[limits.scope_type] }, scope_unlocks: [[1, 'Lv.1~3'], [4, 'Lv.4~6'], [7, 'Lv.7~9'], [10, 'Lv.10']].map(([unlockLevel, level_range]) => { const item = getCsaLimits(unlockLevel); return { level_range, scope_type: item.scope_type, scope_label: MANUAL_SCOPE_LABELS[item.scope_type], max_active: item.max_active, daily_limit: item.daily_limit, available: level >= unlockLevel }; }), tiers: csaTiers },
+    common_sense: { title: '상식개변', description: '특정 NPC가 아니라 지정 공간의 사회적 상식 자체를 변경합니다. 범위 안의 인물은 변경된 내용을 원래부터 당연했던 관습으로 받아들입니다.', rules: ['activate는 새 상식개변과 새 활성 슬롯을 만듭니다.', 'update는 기존 슬롯을 유지하면서 내용·강도·범위를 변경합니다.', 'deactivate는 기존 상식개변을 해제해 활성 슬롯을 비웁니다.', '상식개변을 해제해도 그 상식 아래에서 벌어진 사건은 사라지지 않습니다. 사람들은 자신의 행동과 목격한 장면을 기억하며, 해제 후 이상함을 느낄 수 있습니다.', '활성 슬롯이 가득 차면 기존 상식개변을 해제한 뒤 새 항목을 등록해야 합니다. 수정과 해제는 제한 없이 가능합니다.', '직접 해제하지 않은 활성 상식개변은 날짜가 바뀌어도 유지됩니다.', '적용 당시 공간 범위는 고정되며 레벨이 올라도 기존 상식개변의 범위가 자동으로 확대되지 않습니다.', '현재 강도나 공간 범위를 넘는 요청은 적용되지 않습니다.'], current_scope: { type: limits.scope_type, label: MANUAL_SCOPE_LABELS[limits.scope_type] }, scope_unlocks: [[1, 'Lv.1~3'], [4, 'Lv.4~6'], [7, 'Lv.7~9'], [10, 'Lv.10']].map(([unlockLevel, level_range]) => { const item = getCsaLimits(unlockLevel); return { level_range, scope_type: item.scope_type, scope_label: MANUAL_SCOPE_LABELS[item.scope_type], max_active: item.max_active, available: level >= unlockLevel }; }), tiers: csaTiers },
     hospital_map: buildHospitalMapPayload(master, save),
-    hypnosis_depth: { title: '최면깊이', description: '최면과 활성 암시가 대상에게 각인된 정도입니다.', rules: ['성공한 신규 암시는 약함 +1, 중간 +3, 강함 +5만큼 최면깊이를 올립니다.', '활성 암시가 실제 행동에 반영된 턴에는 현재 활성 암시 중 가장 강한 단계 기준으로 깊이가 상승합니다.', '활성 암시가 있지만 이번 턴에 실제로 작동하지 않았다면 최면깊이는 변하지 않습니다.', '활성 암시가 하나도 없는 NPC는 정상적으로 저장되는 매 턴마다 최면깊이가 2씩 감소합니다.', '최면깊이는 0 아래로 내려가지 않습니다.', '암시가 모두 사라져 최면깊이가 회복돼도 그동안의 기억은 삭제되지 않습니다.', '평범한 대화, 칭찬, 친밀감만으로 최면깊이는 변하지 않습니다.', '최면저항력은 고정값이며 플레이 중 변하지 않습니다.'] }, stats, unlocks: unlock.unlocks, active_effects: buildManualActiveEffects(master, save), common_failures: [{ title: '일반 최면이 적용되지 않음', reasons: ['일반 대화나 말·행동만으로는 최면 효과가 생기지 않습니다.', '개인 암시는 최면 어플에서 현재 함께 있는 NPC에게 등록해야 합니다.'] }, { title: '새 개인 암시를 만들 수 없음', reasons: ['개인 암시 슬롯이 가득 찼습니다.', '요청 내용의 실제 강도가 현재 사용 가능 강도를 넘었습니다.', '등록 대상 NPC를 특정하지 못했습니다.', '유효한 암시라도 성공 판정에 실패할 수 있습니다.'] }, { title: '기존 암시를 수정하거나 해제할 수 없음', reasons: ['대상 암시를 찾지 못했습니다.', '실제 변경되는 내용이 없습니다.', '암시가 이미 비활성 상태입니다.'] }, { title: '새 상식개변을 만들 수 없음', reasons: ['상식개변 활성 슬롯이 가득 찼습니다.', '오늘 사용 횟수를 모두 사용했습니다.', '요청한 공간 범위가 현재 레벨의 범위를 넘었습니다.', '요청 내용의 실제 강도가 현재 사용 가능 강도를 넘었습니다.'] }, { title: '상식개변 수정이 적용되지 않음', reasons: ['오늘 사용 횟수를 모두 사용했습니다.', '대상 상식개변을 찾지 못했습니다.', '내용·강도·범위가 기존과 동일해 실제 변경이 없습니다.'] }] };
+    hypnosis_depth: { title: '최면깊이', description: '최면과 활성 암시가 대상에게 각인된 정도입니다.', rules: ['성공한 신규 암시는 약함 +1, 중간 +3, 강함 +5만큼 최면깊이를 올립니다.', '활성 암시가 실제 행동에 반영된 턴에는 현재 활성 암시 중 가장 강한 단계 기준으로 깊이가 상승합니다.', '활성 암시가 있지만 이번 턴에 실제로 작동하지 않았다면 최면깊이는 변하지 않습니다.', '활성 암시가 하나도 없는 NPC는 정상적으로 저장되는 매 턴마다 최면깊이가 2씩 감소합니다.', '최면깊이는 0 아래로 내려가지 않습니다.', '암시가 모두 사라져 최면깊이가 회복돼도 그동안의 기억은 삭제되지 않습니다.', '평범한 대화, 칭찬, 친밀감만으로 최면깊이는 변하지 않습니다.', '최면저항력은 고정값이며 플레이 중 변하지 않습니다.'] }, stats, unlocks: unlock.unlocks, active_effects: buildManualActiveEffects(master, save), common_failures: [{ title: '일반 최면이 적용되지 않음', reasons: ['일반 대화나 말·행동만으로는 최면 효과가 생기지 않습니다.', '개인 암시는 최면 어플에서 현재 함께 있는 NPC에게 등록해야 합니다.'] }, { title: '새 개인 암시를 만들 수 없음', reasons: ['개인 암시 슬롯이 가득 찼습니다.', '요청 내용의 실제 강도가 현재 사용 가능 강도를 넘었습니다.', '등록 대상 NPC를 특정하지 못했습니다.', '유효한 암시라도 성공 판정에 실패할 수 있습니다.'] }, { title: '기존 암시를 수정하거나 해제할 수 없음', reasons: ['대상 암시를 찾지 못했습니다.', '실제 변경되는 내용이 없습니다.', '암시가 이미 비활성 상태입니다.'] }, { title: '새 상식개변을 만들 수 없음', reasons: ['상식개변 활성 슬롯이 가득 찼습니다.', '요청한 공간 범위가 현재 레벨의 범위를 넘었습니다.', '요청 내용의 실제 강도가 현재 사용 가능 강도를 넘었습니다.'] }, { title: '상식개변 수정이 적용되지 않음', reasons: ['대상 상식개변을 찾지 못했습니다.', '내용·강도·범위가 기존과 동일해 실제 변경이 없습니다.'] }] };
 }
 
 const NPC_MIND_STATES = new Set(['normal', 'questioning', 'conflicted', 'self_rationalizing', 'accepting', 'resisting', 'dependent']);
@@ -1234,8 +1231,7 @@ function buildStructuredEffectiveSave(save = {}, structuredPlan = null) {
     return {
       ...previousSave,
       active_suggestions: structuredPlan.plan?.active_suggestions ?? previousSave.active_suggestions,
-      csa_active: structuredPlan.plan?.csa_active ?? previousSave.csa_active,
-      csa_daily_used: structuredPlan.plan?.csa_daily_used ?? previousSave.csa_daily_used
+      csa_active: structuredPlan.plan?.csa_active ?? previousSave.csa_active
     };
   }
   if (structuredPlan.canonical_action?.type === 'find_npc') {
@@ -1282,10 +1278,10 @@ async function handleStory(req, env) {
       console.warn(JSON.stringify({ event: 'app_validation_proof_rejected', endpoint: '/api/story', game_id, reason: proof.reason }));
       return jsonResponse({ error: '최면 어플 검증 정보가 올바르지 않습니다. 어플을 다시 열어 적용해 주세요.', error_code: 'APP_VALIDATION_PROOF_INVALID', request_id: requestId }, 422);
     }
-    structuredPlan = planStructuredAction(ctx?.save || {}, ctx?.master || {}, structured_action, { turnNumber: currentTurn + 1, turnCount: currentTurn, today: currentUtcDateString() });
+    structuredPlan = planStructuredAction(ctx?.save || {}, ctx?.master || {}, structured_action, { turnNumber: currentTurn + 1, turnCount: currentTurn });
     if (!structuredPlan.ok) return jsonResponse(buildStructuredActionError(structuredPlan, currentTurn), structuredPlan.status);
     if (structured_action.type === 'app_transaction') structuredPlan.canonical_action = structured_action;
-    structuredPlan = applySuggestionResolutionsToPlan(ctx?.save || {}, ctx?.master || {}, structuredPlan, { turnNumber: currentTurn + 1, turnCount: currentTurn, today: currentUtcDateString() });
+    structuredPlan = applySuggestionResolutionsToPlan(ctx?.save || {}, ctx?.master || {}, structuredPlan, { turnNumber: currentTurn + 1, turnCount: currentTurn });
   }
   const resolvedPlayerInput = structuredPlan?.ok ? structuredPlan.display_input : resolveMarkerChoiceInput(player_input, ctx?.save?.last_choices);
   const promptStart = Date.now();
@@ -1725,10 +1721,10 @@ async function runExtractPipeline(env, { game_id, narrative_text, player_input, 
       console.warn(JSON.stringify({ event: 'app_validation_proof_rejected', endpoint: '/api/extract', game_id, reason: proof.reason }));
       return { body: { error: '최면 어플 검증 정보가 올바르지 않습니다. 어플을 다시 열어 적용해 주세요.', error_code: 'APP_VALIDATION_PROOF_INVALID', request_id: requestId }, status: 422 };
     }
-    structuredPlan = planStructuredAction(compatCtx.save || {}, compatCtx.master || {}, structured_action, { turnNumber: nextTurn, turnCount: ctx?.turn_count ?? 0, today: currentUtcDateString() });
+    structuredPlan = planStructuredAction(compatCtx.save || {}, compatCtx.master || {}, structured_action, { turnNumber: nextTurn, turnCount: ctx?.turn_count ?? 0 });
     if (!structuredPlan.ok) return { body: buildStructuredActionError(structuredPlan, ctx?.turn_count ?? 0), status: structuredPlan.status };
     if (structured_action.type === 'app_transaction') structuredPlan.canonical_action = structured_action;
-    structuredPlan = applySuggestionResolutionsToPlan(compatCtx.save || {}, compatCtx.master || {}, structuredPlan, { turnNumber: nextTurn, turnCount: ctx?.turn_count ?? 0, today: currentUtcDateString() });
+    structuredPlan = applySuggestionResolutionsToPlan(compatCtx.save || {}, compatCtx.master || {}, structuredPlan, { turnNumber: nextTurn, turnCount: ctx?.turn_count ?? 0 });
   }
   const effectiveCtx = { ...compatCtx, save: buildStructuredEffectiveSave(compatCtx?.save, structuredPlan) };
   const shortlistByCharacter = {};
@@ -2315,10 +2311,10 @@ async function runCommitPipeline(env, { game_id, turn_number, content: rawConten
       console.warn(JSON.stringify({ event: 'app_validation_proof_rejected', endpoint: '/api/commit-turn', game_id, reason: proof.reason }));
       return { body: { error: '최면 어플 검증 정보가 올바르지 않습니다. 어플을 다시 열어 적용해 주세요.', error_code: 'APP_VALIDATION_PROOF_INVALID', request_id: requestId }, status: 422 };
     }
-    structuredPlan = planStructuredAction(ctx?.save || {}, ctx?.master || {}, structured_action, { turnNumber: turn_number, turnCount: ctx?.turn_count ?? 0, today: currentUtcDateString() });
+    structuredPlan = planStructuredAction(ctx?.save || {}, ctx?.master || {}, structured_action, { turnNumber: turn_number, turnCount: ctx?.turn_count ?? 0 });
     if (!structuredPlan.ok) return { body: buildStructuredActionError(structuredPlan, ctx?.turn_count ?? 0), status: structuredPlan.status };
     if (structured_action.type === 'app_transaction') structuredPlan.canonical_action = structured_action;
-    structuredPlan = applySuggestionResolutionsToPlan(ctx?.save || {}, ctx?.master || {}, structuredPlan, { turnNumber: turn_number, turnCount: ctx?.turn_count ?? 0, today: currentUtcDateString() });
+    structuredPlan = applySuggestionResolutionsToPlan(ctx?.save || {}, ctx?.master || {}, structuredPlan, { turnNumber: turn_number, turnCount: ctx?.turn_count ?? 0 });
   }
   if (turn_number !== (ctx?.turn_count ?? 0) + 1) return { body: { error: 'turn conflict', expected_turn: (ctx?.turn_count ?? 0) + 1, received_turn: turn_number, request_id: requestId }, status: 409 };
   const effectiveWorldStateForCommit = computeEffectiveWorldState(ctx?.save?.world_state, extract.world_state_patch);
@@ -2358,7 +2354,7 @@ async function runCommitPipeline(env, { game_id, turn_number, content: rawConten
       console.warn(JSON.stringify({ event: 'recent100_summary_fail_open', endpoint: '/api/commit-turn', request_id: requestId, error: error.message }));
     }
   }
-  const patch = buildSavePatch(safeExtract, engine_patch, summaryPlan, ctx?.save || {}, turn_number, player_input, currentUtcDateString(), structuredPlan);
+  const patch = buildSavePatch(safeExtract, engine_patch, summaryPlan, ctx?.save || {}, turn_number, player_input, structuredPlan);
   // Reserved key (same convention as _turn_record) — commit_turn's SQL
   // strips this before merging into game_save.data and instead persists it
   // into this turn's own game_memories.pre_turn_save_snapshot column. Lets
@@ -2480,7 +2476,7 @@ async function runCommitPipeline(env, { game_id, turn_number, content: rawConten
   // into state.context.save right after commit instead of showing stale
   // pre-commit values until the next full /api/context reload.
   const statePatch = {};
-  for (const key of ['player_progress', 'active_suggestions', 'csa_active', 'csa_daily_used', 'world_state', 'player_location', 'npc_locations', 'npc_emotion', 'npc_stats', 'npc_stat_changes', 'last_character_id', 'last_npcs_present', 'last_choices']) {
+  for (const key of ['player_progress', 'active_suggestions', 'csa_active', 'world_state', 'player_location', 'npc_locations', 'npc_emotion', 'npc_stats', 'npc_stat_changes', 'last_character_id', 'last_npcs_present', 'last_choices']) {
     if (key in patch) statePatch[key] = patch[key];
   }
 
@@ -3282,14 +3278,14 @@ ${hypnosisSummaryText}
 ${suggestionPanelData.count ? suggestionPanelData.lines : '없음'}
 
 [STATUS PANEL DATA — 상식 개변]
-활성 ${csaPanelData.count}개 / 최대 ${csaPanelData.maxActive}개, 오늘 사용 ${csaPanelData.dailyUsed}회 / 한도 ${csaPanelData.dailyLimit}회
+활성 ${csaPanelData.count}개 / 최대 ${csaPanelData.maxActive}개
 ${csaPanelData.count ? csaPanelData.lines : '없음'}`;
 
   const currentHypnosisStatusText = buildCurrentHypnosisStatusPanelText(save, master);
   const playerStatusPanel = `
 
 [PLAYER STATUS PANEL CONTRACT — HIGHEST PRIORITY FOR SECTION 2]
-[2. 플레이어 상황판]은 플레이어 이름·현재 장소·플레이어의 1인칭 직접 독백(한국어 큰따옴표, 실질 40자 이상)·이번 턴의 실제 변화와 아래 Worker 확정 스냅샷을 포함한다. NPC 수치, 일일 사용량, 예상 수치 변화, 턴 번호, 사정·오르가즘 누적값은 출력하지 않는다.
+[2. 플레이어 상황판]은 플레이어 이름·현재 장소·플레이어의 1인칭 직접 독백(한국어 큰따옴표, 실질 40자 이상)·이번 턴의 실제 변화와 아래 Worker 확정 스냅샷을 포함한다. NPC 수치, 예상 수치 변화, 턴 번호, 사정·오르가즘 누적값은 출력하지 않는다.
 
 [PLAYER STATUS HYPNOSIS SNAPSHOT — COPY EXACTLY]
 아래 블록은 Worker가 현재 저장 상태에서 계산한 확정 정보다. [2. 플레이어 상황판]에 내용·강도·범위·개수를 바꾸지 말고 그대로 출력한다. 요약, 생략, 각색, 추측, 내부 ID 추가를 하지 않는다.
@@ -3825,7 +3821,7 @@ function clampPlayerInputEchoedStatChanges({ patch, previousSave, characterId })
   return patch;
 }
 
-function buildSavePatch(extract, enginePatch = {}, summaryPlan = null, previousSave = {}, turnNumber = 0, playerInput = '', today = currentUtcDateString(), structuredPlan = null) {
+function buildSavePatch(extract, enginePatch = {}, summaryPlan = null, previousSave = {}, turnNumber = 0, playerInput = '', structuredPlan = null) {
   const characterId = typeof extract.character_id === 'string'
     ? extract.character_id
     : null;
@@ -3990,19 +3986,9 @@ function buildSavePatch(extract, enginePatch = {}, summaryPlan = null, previousS
   }
   patch.player_progress = calculateProgress(previousSave?.player_progress, extract.growth_event);
 
-  // A calendar-day rollover resets csa_daily_used exactly once — csa_active
-  // itself is NEVER touched by a date change (stage 4-B item 6: an active
-  // CSA persists until the player explicitly deactivates or changes it).
-  const csaDailyReset = resolveCsaDailyReset(previousSave, today);
-  if (csaDailyReset) Object.assign(patch, csaDailyReset);
-  // applyCsaAction must see the already-reset csa_daily_used (not the stale
-  // pre-reset value) when deciding whether this turn's own action is within
-  // today's limit — csaState (if any) is assigned after and correctly
-  // overwrites csaDailyReset's csa_daily_used: 0 with used+1.
   if (isStructuredAppTransaction) {
     patch.active_suggestions = structuredPlan.plan.active_suggestions;
     patch.csa_active = structuredPlan.plan.csa_active;
-    patch.csa_daily_used = structuredPlan.plan.csa_daily_used;
     const recovery = applyGlobalHypnosisDepthRecovery(previousSave?.npc_stats, patch.active_suggestions, patch.npc_stats, patch.npc_stat_changes);
     if (recovery.changed) { patch.npc_stats = recovery.stats; patch.npc_stat_changes = recovery.changes; }
     const activation = structuredPlan.plan.suggestion_activations
@@ -4310,29 +4296,16 @@ function applyNpcStatChanges(previous = {}, proposed = {}) {
   return { stats, changes, errors };
 }
 
-// Stage 4-B item 8: daily_limit is no longer a level-based formula (the old
-// "2 levels per use, max 5" rule is removed entirely) — it is now always
-// exactly equal to the current level's max_active slot count.
 function getCsaLimits(level) {
   const clamped = Math.max(1, Number(level) || 1);
-  if (clamped >= 10) return { scope_type: 'world', max_active: 4, daily_limit: 4 };
-  if (clamped >= 7) return { scope_type: 'building', max_active: 3, daily_limit: 3 };
-  if (clamped >= 4) return { scope_type: 'floor', max_active: 2, daily_limit: 2 };
-  return { scope_type: 'ward', max_active: 1, daily_limit: 1 };
+  if (clamped >= 10) return { scope_type: 'world', max_active: 4 };
+  if (clamped >= 7) return { scope_type: 'building', max_active: 3 };
+  if (clamped >= 4) return { scope_type: 'floor', max_active: 2 };
+  return { scope_type: 'ward', max_active: 1 };
 }
 
 function currentUtcDateString() {
   return new Date().toISOString().slice(0, 10);
-}
-
-// A calendar-day rollover resets csa_daily_used exactly once — csa_active
-// is deliberately untouched here (stage 4-B item 6: an activation persists
-// until the player explicitly deactivates or changes it, never auto-expires
-// on a date change). Returns null when no reset is due yet today.
-function resolveCsaDailyReset(previousSave = {}, today = currentUtcDateString()) {
-  const lastResetDate = typeof previousSave?.csa_daily_reset_date === 'string' ? previousSave.csa_daily_reset_date : null;
-  if (lastResetDate === today) return null;
-  return { csa_daily_used: 0, csa_daily_reset_date: today };
 }
 
 const CSA_SCOPE_LABELS = {
@@ -4353,22 +4326,14 @@ function resolveCsaScopeId(scopeType, worldState = {}) {
   return typeof value === 'string' && value.trim() ? value.trim() : null;
 }
 
-// H3-B item 3: daily usage always equals the level-unlocked max slot
-// capacity (getCsaLimits' daily_limit === max_active), never "current active
-// count" — see item 4. activate/update each consume one of today's uses;
-// deactivate never does. update never consumes a new slot — it edits the
-// existing active entry in place, preserving id/created_turn/active:true.
 function applyCsaAction(save, action, level, turnNumber, worldState = {}) {
   if (!isPlainObject(action) || !['activate', 'update', 'deactivate'].includes(action.action)) return null;
   const active = Array.isArray(save?.csa_active) ? save.csa_active : [];
   const limits = getCsaLimits(level);
-  const used = Math.max(0, Number(save?.csa_daily_used) || 0);
 
   if (action.action === 'deactivate') {
     if (typeof action.id !== 'string') return null;
     if (!active.some(item => item.id === action.id)) return null;
-    // Never gated by daily_limit or slot occupancy — deactivating is always
-    // available regardless of today's usage or how full the active list is.
     return { csa_active: active.map(item => item.id === action.id ? { ...item, active: false } : item) };
   }
 
@@ -4381,11 +4346,6 @@ function applyCsaAction(save, action, level, turnNumber, worldState = {}) {
       return oldContent && item.content === oldContent;
     });
     if (!target) return null;
-    // update still consumes one of today's uses (like activate) even though
-    // it never touches slot occupancy — so it's still gated by daily_limit,
-    // never by max_active/activeCount.
-    if (used >= limits.daily_limit) return null;
-
     const newContent = typeof action.content === 'string' && action.content.trim() ? action.content.trim() : target.content;
 
     let newStrength = target.strength;
@@ -4424,8 +4384,7 @@ function applyCsaAction(save, action, level, turnNumber, worldState = {}) {
     return {
       csa_active: active.map(item => item === target
         ? { ...item, content: newContent, strength: newStrength, scope_type: newScopeType, scope_id: newScopeId, scope_label: newScopeLabel, updated_turn: turnNumber }
-        : item),
-      csa_daily_used: used + 1
+        : item)
     };
   }
 
@@ -4448,7 +4407,7 @@ function applyCsaAction(save, action, level, turnNumber, worldState = {}) {
   }
   const content = action.content.trim();
   const activeCount = active.filter(item => item?.active === true).length;
-  if (activeCount >= limits.max_active || used >= limits.daily_limit) return null;
+  if (activeCount >= limits.max_active) return null;
   if (active.some(item => item?.active === true && item.content === content && item.scope_id === scopeId)) return null;
   return {
     csa_active: [...active, {
@@ -4460,8 +4419,7 @@ function applyCsaAction(save, action, level, turnNumber, worldState = {}) {
       scope_label: CSA_SCOPE_LABELS[scopeId] || scopeId,
       created_turn: turnNumber,
       active: true
-    }],
-    csa_daily_used: used + 1
+    }]
   };
 }
 
@@ -4528,7 +4486,7 @@ function buildActiveCsaOperationSection(save = {}) {
     `  scope_label: ${item.scope_label || item.scope_id}`
   ].join('\n')).join('\n');
 
-  return `\n\n[ACTIVE CSA ENTRIES — APP OPERATION DATA]\n\n${lines}\n\n규칙:\n- 기존 상식개변을 변경하거나 해제할 때 위 id를 사용한다.\n- update는 같은 슬롯을 유지한다.\n- activate와 update는 오늘 사용 횟수를 1회 소비한다.\n- deactivate는 오늘 사용 횟수를 소비하지 않는다.\n- 실제 게임 서사나 사용자용 상황판에 내부 id를 출력하지 않는다.`;
+  return `\n\n[ACTIVE CSA ENTRIES — APP OPERATION DATA]\n\n${lines}\n\n규칙:\n- 기존 상식개변을 변경하거나 해제할 때 위 id를 사용한다.\n- update는 같은 슬롯을 유지한다.\n- activate는 빈 활성 슬롯이 필요하고, update와 deactivate는 제한 없이 가능하다.\n- 실제 게임 서사나 사용자용 상황판에 내부 id를 출력하지 않는다.`;
 }
 
 // ─────────────────────────────────────────────
@@ -4833,13 +4791,10 @@ function buildCsaPanelText(save = {}) {
   const active = (Array.isArray(save?.csa_active) ? save.csa_active : []).filter(item => item?.active === true);
   const level = Math.max(1, Number(save?.player_progress?.level) || 1);
   const limits = getCsaLimits(level);
-  const dailyUsed = Math.max(0, Number(save?.csa_daily_used) || 0);
   const lines = active.map(item => `- [${item.scope_label || item.scope_id}] ${item.content}`).join('\n');
   return {
     count: active.length,
     maxActive: limits.max_active,
-    dailyUsed,
-    dailyLimit: limits.daily_limit,
     lines
   };
 }
@@ -4933,7 +4888,6 @@ function calculateHypnosisCapability(save = {}, master = {}) {
 
   const csaLimits = getCsaLimits(level);
   const csaActiveCount = (Array.isArray(save?.csa_active) ? save.csa_active : []).filter(item => item?.active === true).length;
-  const csaDailyUsed = Math.max(0, Number(save?.csa_daily_used) || 0);
 
   return {
     current_level: level,
@@ -4956,9 +4910,7 @@ function calculateHypnosisCapability(save = {}, master = {}) {
     can_disable_or_delete: activeCount > 0,
     can_increase_strength: activeCount > 0 && maxStrengthRank > 0,
     csa_active_count: csaActiveCount,
-    csa_max_active: csaLimits.max_active,
-    csa_daily_used: csaDailyUsed,
-    csa_daily_limit: csaLimits.daily_limit
+    csa_max_active: csaLimits.max_active
   };
 }
 
@@ -5026,11 +4978,10 @@ function nextAppCsaId(csaActive, turnNumber) {
 }
 
 function summarizeAppOperations(operations) {
-  const summary = { total: operations.length, suggestion_activate: 0, suggestion_update: 0, suggestion_deactivate: 0, csa_activate: 0, csa_update: 0, csa_deactivate: 0, csa_daily_uses: 0 };
+  const summary = { total: operations.length, suggestion_activate: 0, suggestion_update: 0, suggestion_deactivate: 0, csa_activate: 0, csa_update: 0, csa_deactivate: 0 };
   for (const operation of operations) {
     const key = `${operation.domain}_${operation.operation}`;
     if (Object.prototype.hasOwnProperty.call(summary, key)) summary[key] += 1;
-    if (operation.domain === 'csa' && ['activate', 'update'].includes(operation.operation)) summary.csa_daily_uses += 1;
   }
   return summary;
 }
@@ -5061,18 +5012,16 @@ function planFindNpcAction(previousSave, master, action, { turnCount }) {
   return { ok: true, canonical_action, display_input: `최면 어플의 위치 추적을 이용해 ${name}이 있는 ${locationLabel}로 찾아간다.`, summary: { total: 1 }, plan: { character_id: characterId, character_name: name, target_world_state: targetLocation, target_location_label: locationLabel } };
 }
 
-function planAppTransaction(previousSave, master, action, { turnNumber, today }) {
+function planAppTransaction(previousSave, master, action, { turnNumber }) {
   const rawOperations = Array.isArray(action.operations) ? action.operations : [];
   if (!rawOperations.length) return { ok: false, status: 422, error_code: 'NO_CHANGES', issues: [appIssue(action, 'NO_CHANGES', '적용할 변경사항이 없습니다.')] };
   if (rawOperations.length > 12) return { ok: false, status: 422, error_code: 'TOO_MANY_OPERATIONS', issues: [appIssue(action, 'TOO_MANY_OPERATIONS', '한 번에 최대 12개 작업만 적용할 수 있습니다.')] };
   const characters = isPlainObject(master?.characters) ? master.characters : {};
   const capability = calculateHypnosisCapability(previousSave, master);
   const csaLimits = getCsaLimits(capability.current_level);
-  const reset = resolveCsaDailyReset(previousSave, today || currentUtcDateString());
-  const virtualSave = reset ? { ...previousSave, ...reset } : previousSave;
+  const virtualSave = previousSave;
   const suggestions = cloneSuggestionMap(virtualSave.active_suggestions);
   const csa = cloneCsaList(virtualSave.csa_active);
-  let csaDailyUsed = Math.max(0, Number(virtualSave.csa_daily_used) || 0);
   const issues = [];
   const seenClientIds = new Set();
   const seenTargets = new Set();
@@ -5155,7 +5104,6 @@ function planAppTransaction(previousSave, master, action, { turnNumber, today })
       if (csa.some(item => item?.active && normalizeAppContent(item.content) === content && item.scope_id === scopeId)) { issues.push(appIssue(raw, 'DUPLICATE_TARGET', '같은 범위에 동일한 활성 상식개변이 있습니다.', index)); continue; }
       const item = { id: nextAppCsaId(csa, turnNumber), active: true, content, strength: storageStrength, scope_type: scopeType, scope_id: scopeId, scope_label: buildAppScopeLabel(scopeId), created_turn: turnNumber };
       csa.push(item);
-      csaDailyUsed += 1;
       canonicalOperations.push({ version: 1, client_id: raw.client_id, domain: 'csa', operation: 'activate', strength, scope_type: scopeType, content });
       continue;
     }
@@ -5178,7 +5126,6 @@ function planAppTransaction(previousSave, master, action, { turnNumber, today })
     if (csa.some(item => item !== target && item?.active && normalizeAppContent(item.content) === content && item.scope_id === scopeId)) { issues.push(appIssue(raw, 'DUPLICATE_TARGET', '같은 범위에 동일한 활성 상식개변이 있습니다.', index)); continue; }
     const at = csa.indexOf(target);
     csa[at] = { ...target, content, strength: storageStrength, scope_type: scopeType, scope_id: scopeId, scope_label: scopeType === target.scope_type ? target.scope_label : buildAppScopeLabel(scopeId), updated_turn: turnNumber };
-    csaDailyUsed += 1;
     canonicalOperations.push({ version: 1, client_id: raw.client_id, domain: 'csa', operation: 'update', id, strength, scope_type: scopeType, content });
   }
 
@@ -5187,7 +5134,6 @@ function planAppTransaction(previousSave, master, action, { turnNumber, today })
   const activeCsaCount = csa.filter(item => item?.active === true).length;
   if (activeSuggestionCount > capability.max_active) return { ok: false, status: 422, error_code: 'SUGGESTION_SLOT_FULL', issues: [appIssue(action, 'SUGGESTION_SLOT_FULL', '개인 암시 슬롯이 부족합니다.')] };
   if (activeCsaCount > csaLimits.max_active) return { ok: false, status: 422, error_code: 'CSA_SLOT_FULL', issues: [appIssue(action, 'CSA_SLOT_FULL', '상식개변 활성 슬롯이 부족합니다.')] };
-  if (csaDailyUsed > csaLimits.daily_limit) return { ok: false, status: 422, error_code: 'CSA_DAILY_LIMIT', issues: [appIssue(action, 'CSA_DAILY_LIMIT', '오늘 사용할 수 있는 상식개변 횟수를 초과했습니다.')] };
   const summary = summarizeAppOperations(canonicalOperations);
   const canonical_action = { version: 1, type: 'app_transaction', base_turn_count: action.base_turn_count, operations: canonicalOperations };
   const labels = [];
@@ -5196,7 +5142,7 @@ function planAppTransaction(previousSave, master, action, { turnNumber, today })
   const suggestionTargets = canonicalOperations
     .filter(operation => operation.domain === 'suggestion')
     .map(operation => ({ client_id: operation.client_id, character_id: operation.character_id, character_name: publicCharacterName(characters[operation.character_id], operation.character_id) }));
-  return { ok: true, canonical_action, display_input: `최면 어플에서 ${labels.join('과 ')}의 변경사항을 적용한다.`, summary, plan: { active_suggestions: suggestions, csa_active: csa, csa_daily_used: csaDailyUsed, operations: canonicalOperations, suggestion_activations: suggestionActivations, suggestion_targets: suggestionTargets, counts: summary } };
+  return { ok: true, canonical_action, display_input: `최면 어플에서 ${labels.join('과 ')}의 변경사항을 적용한다.`, summary, plan: { active_suggestions: suggestions, csa_active: csa, operations: canonicalOperations, suggestion_activations: suggestionActivations, suggestion_targets: suggestionTargets, counts: summary } };
 }
 
 function planStructuredAction(previousSave, master, rawAction, context = {}) {
@@ -5217,14 +5163,12 @@ function applySuggestionResolutionsToPlan(previousSave, master, structuredPlan, 
   if (!failed.size) return structuredPlan;
   const successfulOperations = structuredPlan.canonical_action.operations.filter(operation => !failed.has(operation.client_id));
   if (!successfulOperations.length) {
-    const reset = resolveCsaDailyReset(previousSave, context.today || currentUtcDateString());
-    const virtualSave = reset ? { ...previousSave, ...reset } : previousSave;
+    const virtualSave = previousSave;
     return {
       ...structuredPlan,
       plan: {
         active_suggestions: cloneSuggestionMap(virtualSave.active_suggestions),
         csa_active: cloneCsaList(virtualSave.csa_active),
-        csa_daily_used: Math.max(0, Number(virtualSave.csa_daily_used) || 0),
         operations: [],
         suggestion_activations: [],
         suggestion_targets: structuredPlan.plan?.suggestion_targets || [],
@@ -5429,7 +5373,7 @@ function buildHypnosisStatusPanelData(capability, hypnosisState = {}) {
     `🌀 암시 슬롯: 활성 ${capability.active_count} / 최대 ${capability.max_active} · 남은 슬롯 ${capability.remaining_slots}`,
     `⚡ 사용 가능 강도: ${capability.available_strength}`,
     `🧠 현재 NPC 최면 상태: 깊이 ${hypnosisState.previousDepth || 0} · 활성 암시 ${hypnosisState.activeCount || 0}개 · ${hypnosisState.status || '정상'}`,
-    `🌐 상식 개변: 활성 ${capability.csa_active_count} / 최대 ${capability.csa_max_active} · 오늘 사용 ${capability.csa_daily_used} / 한도 ${capability.csa_daily_limit}`
+    `🌐 상식 개변: 활성 ${capability.csa_active_count} / 최대 ${capability.csa_max_active}`
   ].join('\n');
 }
 
@@ -6402,7 +6346,6 @@ function buildStoryStateSnapshot(save = {}, master = {}) {
     current_npc_emotion: characterId && isPlainObject(save.npc_emotion?.[characterId]) ? save.npc_emotion[characterId] : {},
     active_suggestions: normalizeLegacyActiveSuggestions(save.active_suggestions),
     csa_active: Array.isArray(save.csa_active) ? save.csa_active : [],
-    csa_daily_used: Number(save.csa_daily_used) || 0,
     npc_encounters: isPlainObject(save.npc_encounters) ? save.npc_encounters : {},
     story_summary_overall: typeof save.story_summary_overall === 'string' ? save.story_summary_overall : '',
     story_summary_recent100: typeof save.story_summary_recent100 === 'string' ? save.story_summary_recent100 : '',
@@ -6908,7 +6851,6 @@ export {
   readRulebookExampleTier,
   buildSuggestionExampleSection,
   buildCsaExampleSection,
-  resolveCsaDailyReset,
   currentUtcDateString,
   findUnregisteredNamedIndividualsInNarrative,
   DIALOGUE_SPEAKER_LINE_PATTERN,

@@ -848,9 +848,9 @@ function buildManualActiveEffects(master, save) {
   for (const characterId of Object.keys(normalizeLegacyActiveSuggestions(save?.active_suggestions)).sort()) {
     const list = normalizeLegacyActiveSuggestions(save.active_suggestions)[characterId];
     if (!Array.isArray(list)) continue;
-    list.filter(item => item?.active).forEach(item => suggestions.push({ character_id: characterId, character_name: characters?.[characterId]?.name || characters?.[characterId]?.['이름'] || '알 수 없는 대상', strength: item.strength || '약함', content: typeof item.content === 'string' ? item.content : '' }));
+    list.filter(item => item?.active === true).forEach(item => suggestions.push({ character_id: characterId, character_name: characters?.[characterId]?.name || characters?.[characterId]?.['이름'] || '알 수 없는 대상', strength: item.strength || '약함', content: typeof item.content === 'string' ? item.content : '' }));
   }
-  const common_sense = (Array.isArray(save?.csa_active) ? save.csa_active : []).filter(item => item?.active).map(item => ({ strength: item.strength || '약함', scope_label: item.scope_label || '현재 범위', content: typeof item.content === 'string' ? item.content : '' }));
+  const common_sense = (Array.isArray(save?.csa_active) ? save.csa_active : []).filter(item => item?.active === true).map(item => ({ strength: item.strength || '약함', scope_label: item.scope_label || '현재 범위', content: typeof item.content === 'string' ? item.content : '' }));
   return { suggestions, common_sense };
 }
 
@@ -1194,7 +1194,7 @@ function buildAppStatePayload(master, save, turnCount = 0) {
       mind: { state, state_label: state ? NPC_MIND_STATE_LABELS[state] : '상태 미확인', surface: typeof emotion.surface === 'string' ? emotion.surface : '', inner: typeof emotion.inner === 'string' ? emotion.inner : '', physical_reaction: typeof emotion.physical_reaction === 'string' ? emotion.physical_reaction : '', updated_turn: Number.isInteger(emotion.updated_turn) ? emotion.updated_turn : null },
       location: { known: Boolean(location?.location_label), location_label: location?.location_label || '', ward: location?.ward || '', floor: location?.floor || '', building: location?.building || '', updated_turn: Number.isInteger(location?.updated_turn) ? location.updated_turn : null },
       stats: isPlainObject(save?.npc_stats?.[character_id]) ? save.npc_stats[character_id] : {},
-      active_suggestion_count: Array.isArray(suggestionMap?.[character_id]) ? suggestionMap[character_id].filter(item => item?.active).length : 0,
+      active_suggestion_count: Array.isArray(suggestionMap?.[character_id]) ? suggestionMap[character_id].filter(item => item?.active === true).length : 0,
       profile: buildPublicNpcProfile(character),
       body: buildPublicNpcBody(character),
       relationship_record: buildNpcRelationshipRecord(save, character_id),
@@ -1204,8 +1204,8 @@ function buildAppStatePayload(master, save, turnCount = 0) {
   });
   const strength_options = [['weak', '약함', 1], ['medium', '중간', 3], ['strong', '강함', 5]].map(([id, label, unlock_level]) => ({ id, label, available: manual.status.level >= unlock_level, unlock_level }));
   const scope_options = [['ward', '병동', 1], ['floor', '해당 층 전체', 4], ['building', '건물 전체', 7], ['world', '전 세계', 10]].map(([id, label, unlock_level]) => ({ id, label, available: manual.status.level >= unlock_level, unlock_level }));
-  const suggestions = buildManualActiveEffects(master, save).suggestions.map(item => ({ ...item, strength: appStrengthId(item.strength), id: (suggestionMap[item.character_id] || []).find(row => row?.active && row.content === item.content)?.id || '', created_turn: (suggestionMap[item.character_id] || []).find(row => row?.active && row.content === item.content)?.created_turn ?? null, strength_label: item.strength }));
-  const common_sense = (Array.isArray(save?.csa_active) ? save.csa_active : []).filter(item => item?.active).map(item => ({ id: item.id, strength: appStrengthId(item.strength), strength_label: item.strength || '약함', content: item.content || '', scope_type: item.scope_type || '', scope_label: item.scope_label || '', created_turn: item.created_turn ?? null }));
+  const suggestions = buildManualActiveEffects(master, save).suggestions.map(item => ({ ...item, strength: appStrengthId(item.strength), id: (suggestionMap[item.character_id] || []).find(row => row?.active === true && row.content === item.content)?.id || '', created_turn: (suggestionMap[item.character_id] || []).find(row => row?.active === true && row.content === item.content)?.created_turn ?? null, strength_label: item.strength }));
+  const common_sense = (Array.isArray(save?.csa_active) ? save.csa_active : []).filter(item => item?.active === true).map(item => ({ id: item.id, strength: appStrengthId(item.strength), strength_label: item.strength || '약함', content: item.content || '', scope_type: item.scope_type || '', scope_label: item.scope_label || '', created_turn: item.created_turn ?? null }));
   return { version: 1, title: '최면 어플', turn_count: Number.isInteger(turnCount) ? turnCount : 0, home: { status: manual.status, diagnostics: manual.diagnostics, current_location: currentWorld.location_label || save?.player_location || '', current_npc_ids: currentIds }, strength_options, scope_options, npcs, suggestions, common_sense, manual };
 }
 
@@ -1225,6 +1225,31 @@ function resolveHypnosisAppUiRoute(input, characters = {}) {
   if (/최면\s*(?:어플|앱)\s*(?:사용법|매뉴얼)|어플\s*설명|암시\s*단계\s*설명|상식개변\s*사용법/.test(text)) return { tab:'manual', character_id:null, notice:'최면 어플 매뉴얼을 엽니다.' };
   if (/최면\s*(?:어플|앱)\s*열어|어플\s*열어|앱\s*상태\s*보여/.test(text)) return { tab:'home', character_id:null, notice:'최면 어플을 엽니다.' };
   return null;
+}
+
+function buildStructuredEffectiveSave(save = {}, structuredPlan = null) {
+  const previousSave = isPlainObject(save) ? save : {};
+  if (!structuredPlan?.ok) return previousSave;
+  if (structuredPlan.canonical_action?.type === 'app_transaction') {
+    return {
+      ...previousSave,
+      active_suggestions: structuredPlan.plan?.active_suggestions ?? previousSave.active_suggestions,
+      csa_active: structuredPlan.plan?.csa_active ?? previousSave.csa_active,
+      csa_daily_used: structuredPlan.plan?.csa_daily_used ?? previousSave.csa_daily_used
+    };
+  }
+  if (structuredPlan.canonical_action?.type === 'find_npc') {
+    const target = structuredPlan.plan;
+    if (!target) return previousSave;
+    return {
+      ...previousSave,
+      world_state: { ...target.target_world_state },
+      player_location: target.target_location_label,
+      last_character_id: target.character_id,
+      last_npcs_present: [target.character_id]
+    };
+  }
+  return previousSave;
 }
 
 async function handleStory(req, env) {
@@ -1264,7 +1289,8 @@ async function handleStory(req, env) {
   }
   const resolvedPlayerInput = structuredPlan?.ok ? structuredPlan.display_input : resolveMarkerChoiceInput(player_input, ctx?.save?.last_choices);
   const promptStart = Date.now();
-  const prompt = buildStoryPrompt(ctx, resolvedPlayerInput, currentTurn, feedback, regeneration_feedback, structuredPlan);
+  const effectiveCtx = { ...ctx, save: buildStructuredEffectiveSave(ctx?.save, structuredPlan) };
+  const prompt = buildStoryPrompt(effectiveCtx, resolvedPlayerInput, currentTurn, feedback, regeneration_feedback, structuredPlan);
   const promptMs = Date.now() - promptStart;
 
   let deepseekRes;
@@ -1704,6 +1730,7 @@ async function runExtractPipeline(env, { game_id, narrative_text, player_input, 
     if (structured_action.type === 'app_transaction') structuredPlan.canonical_action = structured_action;
     structuredPlan = applySuggestionResolutionsToPlan(compatCtx.save || {}, compatCtx.master || {}, structuredPlan, { turnNumber: nextTurn, turnCount: ctx?.turn_count ?? 0, today: currentUtcDateString() });
   }
+  const effectiveCtx = { ...compatCtx, save: buildStructuredEffectiveSave(compatCtx?.save, structuredPlan) };
   const shortlistByCharacter = {};
   for (const img of shortlistedImages) {
     shortlistByCharacter[img.character_id] = (shortlistByCharacter[img.character_id] || 0) + 1;
@@ -1727,7 +1754,7 @@ async function runExtractPipeline(env, { game_id, narrative_text, player_input, 
     : (structuredPlan ? false : canUseDegradedExtract(compatCtx, narrative_text, player_input));
 
   const firstPass = await performExtractionPass(env, {
-    narrativeText: narrative_text, playerInput: player_input, compatCtx, shortlistedImages, nextTurn, requestId,
+    narrativeText: narrative_text, playerInput: player_input, compatCtx: effectiveCtx, shortlistedImages, nextTurn, requestId,
     recoveryBudget, maxAttempts: degradedAllowed ? 1 : 2, structuredPlan
   });
   Object.assign(timing, firstPass.timing);
@@ -3076,6 +3103,25 @@ function buildCurrentNpcRelationshipMemorySection(save = {}, characters = {}) {
   return `\n\n[CURRENT NPC PERSISTENT RELATIONSHIP MEMORY — ESTABLISHED FACT]\n\n${entries.join('\n')}\n\n규칙:\n- 이 기록은 최근 요약보다 우선하는 영구 사실이며, 최근 기억에 없다는 이유로 잊거나 처음 경험처럼 묘사하지 않는다.\n- 정확한 과거 장면 세부는 저장된 기억 범위에서만 사용하고, 횟수를 매 턴 대사로 억지로 언급하지 않는다.\n- 현재 장면과 관련 있을 때만 자연스럽게 반영한다. 과거 경험이 현재 동의·흥분·연인 관계·복종이나 모든 부탁 수락을 자동 보장하지 않는다.`;
 }
 
+function buildCurrentNpcPhysicalSceneStateSection(save = {}, characters = {}) {
+  const sceneState = isPlainObject(save?.npc_scene_state) ? save.npc_scene_state : {};
+  const ids = [...new Set([save?.last_character_id, ...(Array.isArray(save?.last_npcs_present) ? save.last_npcs_present : [])])]
+    .filter(id => typeof id === 'string' && id && id !== 'narrator' && isPlainObject(characters?.[id]) && isPlainObject(sceneState[id]));
+  const blocks = ids.map(id => {
+    const state = sceneState[id];
+    const lines = [characters[id].name || characters[id]['이름'] || id];
+    for (const [key, label] of [['uniform_top', '유니폼 상의'], ['uniform_bottom', '유니폼 하의'], ['underwear_top', '상의 속옷'], ['underwear_bottom', '하의 속옷']]) {
+      const value = state?.clothing?.[key];
+      if (NPC_SCENE_CLOTHING_LABELS[key]?.[value]) lines.push(`- ${label}: ${NPC_SCENE_CLOTHING_LABELS[key][value]}`);
+    }
+    if (NPC_SCENE_POSTURE_LABELS[state.posture]) lines.push(`- 자세: ${NPC_SCENE_POSTURE_LABELS[state.posture]}`);
+    if (typeof state.current_action === 'string' && state.current_action.trim()) lines.push(`- 현재 행동: ${state.current_action.trim()}`);
+    return lines.length > 1 ? lines.join('\n') : '';
+  }).filter(Boolean);
+  if (!blocks.length) return '';
+  return `\n\n[CURRENT NPC PHYSICAL SCENE STATE — ESTABLISHED FACT]\n\n${blocks.join('\n\n')}\n\n규칙:\n- structured action으로 확정된 활성 효과 다음으로 이 물리 상태를 우선한다. 최근 기억·요약·오래된 서사가 충돌해도 이 값을 바꾸지 않는다.\n- 저장된 복장과 자세는 현재 물리 상태다. 실제로 입고 벗고 열고 잠그거나 자세를 바꾸는 행동이 서사에서 완료된 경우만 바꾼다.\n- 상식개변의 생성·해제는 복장을 자동으로 바꾸지 않는다. 현재 인식과 현재 물리 상태를 구분한다.`;
+}
+
 // Injected every turn (unlike the periodic rulebook_address block, which
 // still only comes in via needsRulebook every ~10 turns and is kept
 // unchanged) — a short, always-present fallback so common hospital address
@@ -3145,7 +3191,7 @@ function buildRegenerationFeedbackSection(regenerationFeedback) {
 function buildStoryPrompt(ctx, playerInput, currentTurn, feedback = [], regenerationFeedback = null, structuredPlan = null) {
   ctx = withSetupCompatibility(ctx);
   const master = ctx?.master || {};
-  const save = ctx?.save || {};
+  const save = buildStructuredEffectiveSave(ctx?.save, structuredPlan);
   const recentMemories = ctx?.recent_memories || [];
   const nextTurn = currentTurn + 1;
   const isReentry = !playerInput || playerInput.trim() === '' || playerInput.trim() === '/플레이';
@@ -3279,6 +3325,7 @@ ${recentMemorySlice.map((m, index) => clipHeadTail(sanitizeRecentNarrativeForPro
   const hospitalLocationMemorySection = buildHospitalLocationMemorySection(save);
   const npcProfileSection = buildCurrentNpcProfileSection(save, master.characters || {});
   const relationshipMemorySection = buildCurrentNpcRelationshipMemorySection(save, master.characters || {});
+  const physicalSceneStateSection = buildCurrentNpcPhysicalSceneStateSection(save, master.characters || {});
   const explicitMentionSection = buildExplicitNpcMentionSection(playerInput, master.characters || {});
   const csaSection = buildApplicableCsaSection(save);
   const suggestionSection = buildActiveSuggestionSection(save, master.characters || {});
@@ -3331,7 +3378,7 @@ ${recentMemorySlice.map((m, index) => clipHeadTail(sanitizeRecentNarrativeForPro
   // everything above it, including [최근 기억]'s now-stale account of the
   // turn that was just rolled back.
   const regenerationFeedbackSection = buildRegenerationFeedbackSection(regenerationFeedback);
-  const systemPrompt = coreRules + playerGate + modeSection + rulebookSection + openingScenarioSection + appUsageSection + eligibleNpcRosterSection + buildHypnosisRuntimeSection() + buildGeneralActionJudgmentSection() + buildHypnosisRecoveryNarrativeRule() + currentSceneSection + hospitalLocationMemorySection + npcProfileSection + relationshipMemorySection + explicitMentionSection + csaSection + suggestionSection + narrativeLengthSection + npcDialogueSection + moanVocalReactionSection + antiRepetitionSection + playerStatusPanel + contextSection + feedbackSection + continuitySection + finalFormatRules + openingFlow + playerSetupReminder + registeredNpcChoiceReminder + choiceLengthReminder + buildAddressAbbreviationSection() + regenerationFeedbackSection + buildStructuredActionStorySection(structuredPlan) + playerAttemptSection;
+  const systemPrompt = coreRules + playerGate + modeSection + rulebookSection + openingScenarioSection + appUsageSection + eligibleNpcRosterSection + buildHypnosisRuntimeSection() + buildGeneralActionJudgmentSection() + buildHypnosisRecoveryNarrativeRule() + currentSceneSection + hospitalLocationMemorySection + npcProfileSection + relationshipMemorySection + explicitMentionSection + csaSection + suggestionSection + physicalSceneStateSection + narrativeLengthSection + npcDialogueSection + moanVocalReactionSection + antiRepetitionSection + playerStatusPanel + contextSection + feedbackSection + continuitySection + finalFormatRules + openingFlow + playerSetupReminder + registeredNpcChoiceReminder + choiceLengthReminder + buildAddressAbbreviationSection() + regenerationFeedbackSection + buildStructuredActionStorySection(structuredPlan) + playerAttemptSection;
 
   return {
     mode,
@@ -3360,7 +3407,7 @@ function buildCsaApplicationCheckSection(save) {
 
 function buildExtractPrompt(narrativeText, playerInput, ctx, images, turnCount, structuredPlan = null) {
   const master = ctx?.master || {};
-  const save = ctx?.save || {};
+  const save = buildStructuredEffectiveSave(ctx?.save, structuredPlan);
 
   const imageCatalog = images.map(img => ({
     image_id: img.image_id ?? img.id,
@@ -3437,6 +3484,9 @@ npc_stat_changes만 반환한다. 서사에 숫자가 없어도 대사·행동·
 npc_relationship_state는 현재 메인 NPC와의 누적 절대값 두 개만 반환한다. 명확히 완료된 플레이어 사정 또는 현재 NPC 오르가즘만 증가시키고, 직전·실패·중단·가짜·상상·회상·다른 NPC 사건은 증가시키지 않는다. 값을 모르면 직전값을 유지하고 감소·초기화하지 않는다. narrator에는 반환하지 않는다.
 relationship_memory_patch는 최종 Story에서 실제로 완료된 중요한 친밀 사건이 있을 때만 현재 메인 NPC에 대해 짧은 사실 문장으로 최대 2개 반환한다. 플레이어 입력만의 결과 선언, 실패·추측·감정 과장, 매 턴 반복되는 일반 사실은 넣지 않는다.
 
+[NPC PHYSICAL SCENE STATE PATCH]
+npc_scene_state_patch는 최종 Story에서 등록 NPC가 실제로 옷을 입거나 벗고, 열고 잠그고, 올리거나 내리고, 갈아입거나 자세를 바꾼 완료 사건만 반영한다. 플레이어 입력만의 선언, 실패·시도·계획, 상식개변의 생성·해제만으로는 반환하지 않는다. 기존 상태를 유지할 키는 생략하고, 등록 NPC·허용 enum만 사용한다.
+
 [WORLD STATE PATCH CONTRACT]
 플레이어가 실제로 출발해서 새 장소에 도착했고 장면이 그 새 장소로 전환된 경우, world_state_patch에 building, floor, ward, location_label을 모두 채워서 반환한다. 바뀌지 않은 필드는 이전 저장값의 기존 명칭을 그대로 다시 적고, 실제로 바뀐 필드만 새 값으로 적는다. building/floor/ward는 장소를 설명하는 한국어 명칭으로 적으면 Worker가 표준 ID로 정규화하며, 표준 ID로 정규화되지 않는 값은 무시된다. 이동을 제안하거나 준비만 했을 뿐 아직 도착하지 않았다면 world_state_patch를 채우지 말고 비워둔다. 기존 지도 장소를 우선 재사용하고, 새 구체적 방이 실제 장면 위치가 되면 기존 1·3·5·6층과 3·6병동 안의 정확한 location_label만 반환한다. 새 병원·건물·층·병동과 단순 언급·가정 장소를 만들거나 저장하지 마라. 빈 문자열로 기존 값을 덮어쓰지 마라.
 
@@ -3493,6 +3543,7 @@ ${JSON.stringify(imageCatalog)}
   "csa_omission": ["조건을 충족했는데도 실행되지 않은 강제 상식개변에 대한 짧은 설명. 누락이 없으면 []"],
   "npc_relationship_state": {"player_ejaculation_count": 0, "npc_orgasm_count": 0},
   "relationship_memory_patch": ["최종 Story에서 실제 완료된 중요한 친밀 사건의 짧은 사실. 없으면 []"],
+  "npc_scene_state_patch": {"heroine1": {"clothing": {"uniform_top": "worn|removed|open|unknown", "uniform_bottom": "worn|removed|open|unknown", "underwear_top": "worn|removed|unknown", "underwear_bottom": "worn|removed|unknown"}, "posture": "standing|sitting|kneeling|lying|unknown", "current_action": "실제 현재 행동, 없으면 생략"}},
   "turn_summary": "이번 턴에서 변한 핵심 사실 1~3문장",
   "is_sexual": false,
   "choices": ["서사의 선택지를 그대로 옮겨라"],
@@ -3683,10 +3734,14 @@ function normalizeRegisteredNpcExtract(extract = {}, characters = {}, lastCharac
     normalized.npc_stat_changes = {};
     normalized.npc_relationship_state = null;
     normalized.relationship_memory_patch = [];
+    normalized.npc_scene_state_patch = {};
     normalized.image_id = null;
     normalized.is_sexual = false;
     normalized.first_encounter_stats = null;
   }
+  const presentIds = new Set(normalized.npcs_present);
+  normalized.npc_scene_state_patch = Object.fromEntries(Object.entries(normalized.npc_scene_state_patch || {})
+    .filter(([characterId]) => presentIds.has(characterId)));
   return normalized;
 }
 
@@ -3864,6 +3919,8 @@ function buildSavePatch(extract, enginePatch = {}, summaryPlan = null, previousS
 
   }
   if (!degraded) {
+    const sceneState = buildNpcSceneStatePatch(previousSave, extract.npc_scene_state_patch, turnNumber);
+    if (sceneState) patch.npc_scene_state = sceneState;
     const registeredPresent = [...new Set((Array.isArray(extract.npcs_present) ? extract.npcs_present : []).filter(id => typeof id === 'string' && id && id !== 'narrator'))];
     patch.last_npcs_present = registeredPresent;
     const locationLabel = mergedWorldState.location_label || previousSave?.player_location || previousSave?.world_state?.location_label || '';
@@ -4085,6 +4142,7 @@ function normalizeExtract(extract) {
     : [];
   normalized.npc_relationship_state = normalizeRelationshipExtract(normalized.npc_relationship_state);
   normalized.relationship_memory_patch = normalizeRelationshipMemoryItems(normalized.relationship_memory_patch, 2);
+  normalized.npc_scene_state_patch = normalizeNpcSceneStatePatch(normalized.npc_scene_state_patch);
   if (!isPlainObject(normalized.first_encounter_stats)) normalized.first_encounter_stats = null;
   if (!isPlainObject(normalized.world_state_patch)) normalized.world_state_patch = null;
   delete normalized.image_reasoning;
@@ -4143,6 +4201,63 @@ function normalizeRelationshipState(previous = {}, patch = {}, turnNumber = 0, r
   if (firstIntimateTurn !== null) result.first_intimate_turn = firstIntimateTurn;
   if (lastIntimateTurn !== null) result.last_intimate_turn = lastIntimateTurn;
   return result;
+}
+
+const NPC_SCENE_CLOTHING_VALUES = new Set(['worn', 'removed', 'open', 'unknown']);
+const NPC_SCENE_UNDERWEAR_VALUES = new Set(['worn', 'removed', 'unknown']);
+const NPC_SCENE_POSTURE_VALUES = new Set(['standing', 'sitting', 'kneeling', 'lying', 'unknown']);
+const NPC_SCENE_CLOTHING_LABELS = {
+  uniform_top: { worn: '착용', removed: '벗음', open: '열림', unknown: '미확인' },
+  uniform_bottom: { worn: '착용', removed: '벗음', open: '열림', unknown: '미확인' },
+  underwear_top: { worn: '착용', removed: '벗음', unknown: '미확인' },
+  underwear_bottom: { worn: '착용', removed: '벗음', unknown: '미확인' }
+};
+const NPC_SCENE_POSTURE_LABELS = { standing: '서 있음', sitting: '앉아 있음', kneeling: '무릎 꿇음', lying: '누워 있음', unknown: '미확인' };
+
+function normalizeNpcSceneStatePatch(value) {
+  if (!isPlainObject(value)) return {};
+  const result = {};
+  for (const [characterId, rawState] of Object.entries(value)) {
+    if (typeof characterId !== 'string' || !characterId || !isPlainObject(rawState)) continue;
+    const state = {};
+    if (isPlainObject(rawState.clothing)) {
+      const clothing = {};
+      for (const key of ['uniform_top', 'uniform_bottom']) {
+        if (NPC_SCENE_CLOTHING_VALUES.has(rawState.clothing[key])) clothing[key] = rawState.clothing[key];
+      }
+      for (const key of ['underwear_top', 'underwear_bottom']) {
+        if (NPC_SCENE_UNDERWEAR_VALUES.has(rawState.clothing[key])) clothing[key] = rawState.clothing[key];
+      }
+      if (Object.keys(clothing).length) state.clothing = clothing;
+    }
+    if (NPC_SCENE_POSTURE_VALUES.has(rawState.posture)) state.posture = rawState.posture;
+    const action = typeof rawState.current_action === 'string' ? rawState.current_action.trim().replace(/\s+/g, ' ').slice(0, 160) : null;
+    if (action || (Object.keys(state).length && action === '')) state.current_action = action;
+    if (Object.keys(state).length) result[characterId] = state;
+  }
+  return result;
+}
+
+function buildNpcSceneStatePatch(previousSave = {}, sceneStatePatch = {}, turnNumber = 0) {
+  if (!isPlainObject(sceneStatePatch) || !Object.keys(sceneStatePatch).length) return null;
+  const previous = isPlainObject(previousSave?.npc_scene_state) ? previousSave.npc_scene_state : {};
+  const result = Object.fromEntries(Object.entries(previous).map(([characterId, state]) => [characterId, {
+    ...(isPlainObject(state) ? state : {}),
+    clothing: isPlainObject(state?.clothing) ? { ...state.clothing } : {}
+  }]));
+  let changed = false;
+  for (const [characterId, next] of Object.entries(sceneStatePatch)) {
+    const before = isPlainObject(previous[characterId]) ? previous[characterId] : {};
+    result[characterId] = {
+      ...before,
+      clothing: { ...(isPlainObject(before.clothing) ? before.clothing : {}), ...(next.clothing || {}) },
+      ...(Object.prototype.hasOwnProperty.call(next, 'posture') ? { posture: next.posture } : {}),
+      ...(Object.prototype.hasOwnProperty.call(next, 'current_action') ? { current_action: next.current_action } : {}),
+      updated_turn: turnNumber
+    };
+    changed = true;
+  }
+  return changed ? result : null;
 }
 
 function normalizeRelationshipExtract(value) {
@@ -4332,9 +4447,9 @@ function applyCsaAction(save, action, level, turnNumber, worldState = {}) {
     return null;
   }
   const content = action.content.trim();
-  const activeCount = active.filter(item => item?.active).length;
+  const activeCount = active.filter(item => item?.active === true).length;
   if (activeCount >= limits.max_active || used >= limits.daily_limit) return null;
-  if (active.some(item => item?.active && item.content === content && item.scope_id === scopeId)) return null;
+  if (active.some(item => item?.active === true && item.content === content && item.scope_id === scopeId)) return null;
   return {
     csa_active: [...active, {
       id: `csa_${turnNumber}`,
@@ -4351,7 +4466,7 @@ function applyCsaAction(save, action, level, turnNumber, worldState = {}) {
 }
 
 function isCsaApplicable(csa, worldState = {}) {
-  if (!csa?.active) return false;
+  if (csa?.active !== true) return false;
   if (csa.scope_type === 'world') return true;
   return csa.scope_id === worldState[csa.scope_type];
 }
@@ -4367,12 +4482,18 @@ function buildCurrentHypnosisStatusSnapshot(save = {}, master = {}) {
   const capability = calculateHypnosisCapability(save, master);
   const characterId = typeof save?.last_character_id === 'string' && save.last_character_id !== 'narrator' ? save.last_character_id : null;
   const character = characterId && isPlainObject(master?.characters?.[characterId]) ? master.characters[characterId] : {};
-  const currentSuggestions = (normalizeLegacyActiveSuggestions(save?.active_suggestions)?.[characterId] || [])
-    .filter(item => item?.active)
+  const suggestionMap = normalizeLegacyActiveSuggestions(save?.active_suggestions);
+  const currentSuggestions = (suggestionMap?.[characterId] || [])
+    .filter(item => item?.active === true)
     .map(item => ({ strength: item.strength || '약함', content: typeof item.content === 'string' ? item.content.trim() : '' }))
     .filter(item => item.content);
+  const activeSuggestionCount = Object.values(suggestionMap).reduce(
+    (count, list) => count + (Array.isArray(list) ? list.filter(item => item?.active === true).length : 0),
+    0
+  );
+  const activeCsa = (Array.isArray(save?.csa_active) ? save.csa_active : []).filter(item => item?.active === true);
   const applicableCsa = getApplicableCsaEntries(save).map(item => ({ strength: item.strength || '약함', scope_label: item.scope_label || '', content: typeof item.content === 'string' ? item.content.trim() : '' })).filter(item => item.content);
-  return { currentCharacterId: characterId, currentCharacterName: character?.name || character?.['이름'] || null, suggestionCount: capability.active_count, suggestionMax: capability.max_active, csaCount: capability.csa_active_count, csaMax: capability.csa_max_active, currentSuggestions, applicableCsa };
+  return { currentCharacterId: characterId, currentCharacterName: character?.name || character?.['이름'] || null, suggestionCount: activeSuggestionCount, suggestionMax: capability.max_active, csaCount: activeCsa.length, csaMax: capability.csa_max_active, currentSuggestions, applicableCsa };
 }
 
 function buildCurrentHypnosisStatusPanelText(save = {}, master = {}) {
@@ -4394,7 +4515,7 @@ function buildApplicableCsaSection(save) {
 // Legacy helper retained for saved-data compatibility only; structured app
 // transactions never expose internal IDs to Story or Extract.
 function buildActiveCsaOperationSection(save = {}) {
-  const active = (Array.isArray(save?.csa_active) ? save.csa_active : []).filter(item => item?.active);
+  const active = (Array.isArray(save?.csa_active) ? save.csa_active : []).filter(item => item?.active === true);
 
   if (!active.length) return '';
 
@@ -4669,7 +4790,7 @@ function applySuggestionAction(previousSave, action, currentCharacterId, turnNum
 function buildActiveSuggestionSection(save, characters = {}) {
   const map = normalizeLegacyActiveSuggestions(save?.active_suggestions);
   const entries = Object.entries(map)
-    .map(([characterId, list]) => [characterId, (Array.isArray(list) ? list : []).filter(item => item?.active)])
+    .map(([characterId, list]) => [characterId, (Array.isArray(list) ? list : []).filter(item => item?.active === true)])
     .filter(([characterId, list]) => characterId !== 'narrator' && list.length && isPlainObject(characters?.[characterId]));
   if (!entries.length) return '';
   const blocks = entries.map(([characterId, list]) => {
@@ -4689,7 +4810,7 @@ function buildActiveSuggestionSection(save, characters = {}) {
 function buildActiveSuggestionPanelText(save, characters = {}) {
   const map = normalizeLegacyActiveSuggestions(save?.active_suggestions);
   const entries = Object.entries(map)
-    .map(([characterId, list]) => [characterId, (Array.isArray(list) ? list : []).filter(item => item?.active)])
+    .map(([characterId, list]) => [characterId, (Array.isArray(list) ? list : []).filter(item => item?.active === true)])
     .filter(([characterId, list]) => characterId !== 'narrator' && list.length && isPlainObject(characters?.[characterId]));
   if (!entries.length) return { count: 0, lines: '' };
   let count = 0;
@@ -4709,7 +4830,7 @@ function buildActiveSuggestionPanelText(save, characters = {}) {
 // label and content, plus the active/max and daily-use counts, as
 // render-ready text for [2. 플레이어 상황판].
 function buildCsaPanelText(save = {}) {
-  const active = (Array.isArray(save?.csa_active) ? save.csa_active : []).filter(item => item?.active);
+  const active = (Array.isArray(save?.csa_active) ? save.csa_active : []).filter(item => item?.active === true);
   const level = Math.max(1, Number(save?.player_progress?.level) || 1);
   const limits = getCsaLimits(level);
   const dailyUsed = Math.max(0, Number(save?.csa_daily_used) || 0);
@@ -4745,7 +4866,7 @@ function resolveHypnosisDepthDelta({ previousDepth, currentCharacterId, activeSu
   }
   const suggestions = normalizeLegacyActiveSuggestions(activeSuggestions);
   const active = Array.isArray(suggestions[currentCharacterId])
-    ? suggestions[currentCharacterId].filter(item => item?.active)
+    ? suggestions[currentCharacterId].filter(item => item?.active === true)
     : [];
   if (!active.length) {
     return { delta: 0, reason: '최면 영향 없음' };
@@ -4803,7 +4924,7 @@ function calculateHypnosisCapability(save = {}, master = {}) {
 
   const suggestionMap = normalizeLegacyActiveSuggestions(save?.active_suggestions);
   const activeCount = Object.values(suggestionMap).reduce(
-    (total, list) => total + (Array.isArray(list) ? list.filter(item => item?.active).length : 0),
+    (total, list) => total + (Array.isArray(list) ? list.filter(item => item?.active === true).length : 0),
     0
   );
   const { max_active: maxActive, available_strength: availableStrength } = getHypnosisSuggestionLimits(level);
@@ -4811,7 +4932,7 @@ function calculateHypnosisCapability(save = {}, master = {}) {
   const maxStrengthRank = hypnosisStrengthRank(availableStrength);
 
   const csaLimits = getCsaLimits(level);
-  const csaActiveCount = (Array.isArray(save?.csa_active) ? save.csa_active : []).filter(item => item?.active).length;
+  const csaActiveCount = (Array.isArray(save?.csa_active) ? save.csa_active : []).filter(item => item?.active === true).length;
   const csaDailyUsed = Math.max(0, Number(save?.csa_daily_used) || 0);
 
   return {
@@ -5062,8 +5183,8 @@ function planAppTransaction(previousSave, master, action, { turnNumber, today })
   }
 
   if (issues.length) return { ok: false, status: 422, error_code: 'APP_ACTION_INVALID', issues };
-  const activeSuggestionCount = Object.values(suggestions).flat().filter(item => item?.active).length;
-  const activeCsaCount = csa.filter(item => item?.active).length;
+  const activeSuggestionCount = Object.values(suggestions).flat().filter(item => item?.active === true).length;
+  const activeCsaCount = csa.filter(item => item?.active === true).length;
   if (activeSuggestionCount > capability.max_active) return { ok: false, status: 422, error_code: 'SUGGESTION_SLOT_FULL', issues: [appIssue(action, 'SUGGESTION_SLOT_FULL', '개인 암시 슬롯이 부족합니다.')] };
   if (activeCsaCount > csaLimits.max_active) return { ok: false, status: 422, error_code: 'CSA_SLOT_FULL', issues: [appIssue(action, 'CSA_SLOT_FULL', '상식개변 활성 슬롯이 부족합니다.')] };
   if (csaDailyUsed > csaLimits.daily_limit) return { ok: false, status: 422, error_code: 'CSA_DAILY_LIMIT', issues: [appIssue(action, 'CSA_DAILY_LIMIT', '오늘 사용할 수 있는 상식개변 횟수를 초과했습니다.')] };

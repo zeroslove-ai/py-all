@@ -86,16 +86,6 @@ const ui = {
     const locked = typeof state !== 'undefined' && state.inputLocked;
     this.els.chatSend.disabled = active || locked;
     this.els.chatInput.disabled = active || locked;
-    // Loading toggles fire at the start of every Story/Extract/Commit/image
-    // step — a forced scrollToBottom() here was the main source of the view
-    // jumping while a user was mid-turn reading something above. 'nearest'
-    // only moves the view if the loading badge genuinely isn't visible yet,
-    // so it never yanks the page down on its own.
-    if (active && window.matchMedia('(max-width: 768px)').matches) {
-      requestAnimationFrame(() => {
-        this.els.loading.scrollIntoView({ block: 'nearest' });
-      });
-    }
   },
 
   // ─── 사용자 메시지 ───

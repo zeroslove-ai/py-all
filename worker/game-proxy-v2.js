@@ -1506,6 +1506,7 @@ async function performExtractionPass(env, { narrativeText, playerInput, compatCt
   const effectiveWorldState = computeEffectiveWorldState(compatCtx?.save?.world_state, extract.world_state_patch);
   extract = normalizeRegisteredNpcExtract(extract, compatCtx?.master?.characters, compatCtx?.save?.last_character_id, effectiveWorldState);
   extract = sanitizeCsaDeactivationMemoryExtract(extract, structuredPlan);
+  extract = sanitizePersonalSuggestionMetaExtract(extract);
   timing.extract_parse_ms = Date.now() - t4;
 
   const t5 = Date.now();
@@ -1890,6 +1891,7 @@ async function runExtractPipeline(env, { game_id, narrative_text, player_input, 
   }
 
   extract = sanitizeCsaDeactivationMemoryExtract(extract, structuredPlan);
+  extract = sanitizePersonalSuggestionMetaExtract(extract);
 
   // H1: the NPC narrative contract is fail-open — an unregistered minor
   // NPC, a registered NPC appearing outside their usual ward, or a
@@ -2325,6 +2327,7 @@ async function runCommitPipeline(env, { game_id, turn_number, content: rawConten
   const effectiveWorldStateForCommit = computeEffectiveWorldState(ctx?.save?.world_state, extract.world_state_patch);
   let safeExtract = normalizeRegisteredNpcExtract({ ...extract, is_sexual: extract.is_sexual === true }, ctx?.master?.characters, ctx?.save?.last_character_id, effectiveWorldStateForCommit);
   safeExtract = sanitizeCsaDeactivationMemoryExtract(safeExtract, structuredPlan);
+  safeExtract = sanitizePersonalSuggestionMetaExtract(safeExtract);
   if (structuredPlan?.canonical_action?.type === 'find_npc') {
     safeExtract.character_id = structuredPlan.plan.character_id;
     safeExtract.npcs_present = [structuredPlan.plan.character_id];
@@ -3401,6 +3404,7 @@ ${recentMemorySlice.map((m, index) => clipHeadTail(sanitizeRecentNarrativeForPro
   const explicitMentionSection = buildExplicitNpcMentionSection(playerInput, master.characters || {});
   const csaSection = buildApplicableCsaSection(save, activeCsa);
   const suggestionSection = buildActiveSuggestionSection(save, master.characters || {});
+  const suggestionSecrecySection = buildPersonalSuggestionSecrecySection();
   const narrativeLengthSection = buildNarrativeLengthSection();
   const npcDialogueSection = buildNpcDialogueMinimumSection();
   const moanVocalReactionSection = buildMoanVocalReactionSection();
@@ -3450,7 +3454,7 @@ ${recentMemorySlice.map((m, index) => clipHeadTail(sanitizeRecentNarrativeForPro
   // everything above it, including [최근 기억]'s now-stale account of the
   // turn that was just rolled back.
   const regenerationFeedbackSection = buildRegenerationFeedbackSection(regenerationFeedback);
-  const systemPrompt = coreRules + playerGate + modeSection + rulebookSection + openingScenarioSection + appUsageSection + eligibleNpcRosterSection + buildHypnosisRuntimeSection() + buildGeneralActionJudgmentSection() + buildHypnosisRecoveryNarrativeRule() + currentSceneSection + hospitalLocationMemorySection + npcProfileSection + relationshipMemorySection + explicitMentionSection + csaSection + suggestionSection + physicalSceneStateSection + narrativeLengthSection + npcDialogueSection + moanVocalReactionSection + antiRepetitionSection + playerStatusPanel + contextSection + feedbackSection + continuitySection + finalFormatRules + openingFlow + playerSetupReminder + registeredNpcChoiceReminder + choiceLengthReminder + buildAddressAbbreviationSection() + regenerationFeedbackSection + buildStructuredActionStorySection(structuredPlan, save, activeCsa) + playerAttemptSection;
+  const systemPrompt = coreRules + playerGate + modeSection + rulebookSection + openingScenarioSection + appUsageSection + eligibleNpcRosterSection + buildHypnosisRuntimeSection() + buildGeneralActionJudgmentSection() + buildHypnosisRecoveryNarrativeRule() + currentSceneSection + hospitalLocationMemorySection + npcProfileSection + relationshipMemorySection + explicitMentionSection + csaSection + suggestionSection + suggestionSecrecySection + physicalSceneStateSection + narrativeLengthSection + npcDialogueSection + moanVocalReactionSection + antiRepetitionSection + playerStatusPanel + contextSection + feedbackSection + continuitySection + finalFormatRules + openingFlow + playerSetupReminder + registeredNpcChoiceReminder + choiceLengthReminder + buildAddressAbbreviationSection() + regenerationFeedbackSection + buildStructuredActionStorySection(structuredPlan, save, activeCsa) + playerAttemptSection;
 
   return {
     mode,
@@ -4342,6 +4346,67 @@ function normalizeRelationshipExtract(value) {
   return Object.keys(result).length ? result : null;
 }
 
+const PERSONAL_SUGGESTION_META_PATTERNS = [
+  /(?:개인\s*)?암시(?:가|의|로|를|는|은|에)?\s*(?:반응|활성|작동|효과|영향|만들|유발|때문)/,
+  /암시(?:가|를)?\s*(?:먹히|통하|성공|실패)/,
+  /기억(?:이|은)?\s*(?:암시|최면)\s*때문/,
+  /최면(?:의)?\s*영향/,
+  /어플\s*효과/,
+  /설정된\s*(?:명령|감정)/,
+  /프로그래밍된\s*감정/
+];
+const PERSONAL_SUGGESTION_META_SUMMARY_FALLBACK = '상대는 이유를 설명하기 어려운 감정 변화에 흔들렸지만, 당시 느낀 감정 자체를 부정하지는 못했다.';
+const PERSONAL_SUGGESTION_META_MEMORY_FALLBACK = '당시의 판단 이유는 완전히 설명하지 못하지만, 그때 느낀 감정 자체는 진짜였다고 받아들였다.';
+const PERSONAL_SUGGESTION_META_EMOTION_FALLBACKS = {
+  surface: '이유를 설명하기 어려운 감정이 스쳐 지나가자, 스스로도 낯선 반응에 조심스럽게 시선을 피한다.',
+  inner: '왜 이런 마음이 드는지 분명히 설명할 수는 없지만, 그때 느낀 감정만큼은 쉽게 부정할 수 없다고 생각한다.',
+  physical_reaction: '잠시 눈동자가 흔들리고 숨이 가빠진다. 이내 자기 반응을 이해하려는 듯 조용히 표정을 가다듬는다.'
+};
+
+function hasPersonalSuggestionMetaKnowledge(value = '') {
+  const text = typeof value === 'string' ? value.trim() : '';
+  return Boolean(text) && PERSONAL_SUGGESTION_META_PATTERNS.some(pattern => pattern.test(text));
+}
+
+function removePersonalSuggestionMetaSentences(value, fallback) {
+  const text = typeof value === 'string' ? value.trim() : '';
+  if (!hasPersonalSuggestionMetaKnowledge(text)) return text;
+  const kept = text.split(/(?<=[.!?。！？])\s*|\n+/)
+    .filter(sentence => sentence.trim() && !hasPersonalSuggestionMetaKnowledge(sentence))
+    .join(' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+  return kept || fallback;
+}
+
+function sanitizePersonalSuggestionMetaExtract(extract = {}) {
+  const sanitized = { ...extract };
+  sanitized.turn_summary = removePersonalSuggestionMetaSentences(
+    sanitized.turn_summary,
+    PERSONAL_SUGGESTION_META_SUMMARY_FALLBACK
+  ).slice(0, 200);
+  if (isPlainObject(sanitized.npc_emotion)) {
+    sanitized.npc_emotion = { ...sanitized.npc_emotion };
+    for (const field of ['surface', 'inner', 'physical_reaction']) {
+      sanitized.npc_emotion[field] = removePersonalSuggestionMetaSentences(
+        sanitized.npc_emotion[field],
+        PERSONAL_SUGGESTION_META_EMOTION_FALLBACKS[field]
+      );
+    }
+  }
+  sanitized.relationship_memory_patch = normalizeRelationshipMemoryItems(
+    (Array.isArray(sanitized.relationship_memory_patch) ? sanitized.relationship_memory_patch : []).map(item => {
+      const text = typeof item === 'string' ? item : item?.text;
+      if (!hasPersonalSuggestionMetaKnowledge(text)) return item;
+      return isPlainObject(item)
+        ? { ...item, text: PERSONAL_SUGGESTION_META_MEMORY_FALLBACK }
+        : { text: PERSONAL_SUGGESTION_META_MEMORY_FALLBACK, permanent: false, turn: null };
+    }),
+    { limit: 2 }
+  );
+  return sanitized;
+}
+
 const CSA_DEACTIVATION_MEMORY_LOSS_RE = /(?:기억(?:이|을)?\s*(?:없|나지\s*않|못하|흐릿|하지\s*못)|기억상실|시간\s*공백|언제\s*(?:옷을\s*)?벗|분명\s*옷을\s*입|누가\s*내\s*옷을\s*벗)/;
 
 function hasStructuredCsaDeactivation(structuredPlan) {
@@ -4874,6 +4939,10 @@ function buildActiveSuggestionSection(save, characters = {}) {
     return `${name}(${characterId})\n${lines}`;
   }).join('\n\n');
   return `\n\n[ACTIVE PERSONAL SUGGESTIONS — ESTABLISHED FACTS]\n\n${blocks}\n\n규칙:\n- 위 암시는 각 NPC에게 이미 성공해 활성 상태다.\n- 성공 여부를 다시 의심하거나 같은 암시를 다시 거는 장면을 만들지 않는다.\n- 해당 NPC는 암시 범위 안의 요청을 자기 성격에 맞게 자연스럽게 따른다. 실제 수행 효과는 최면깊이에 누적될 수 있으나, 같은 내용을 반복 문장으로 쓰지 않는다.\n- 암시 범위를 벗어난 무조건 복종으로 확대하지 않는다.\n- 다른 NPC에게 잘못 적용하지 않는다.\n- 활성 암시 슬롯이 가득 찼으면 신규 암시는 반드시 실패한다.\n- 사용자가 명시적으로 삭제·해제·수정·교체하지 않은 기존 암시는 절대 변경하지 않는다.\n- 대상 NPC에게 기존 활성 암시가 없으면 기존 암시 수정으로 처리하지 않는다.\n- 실패한 암시의 효과나 신체 반응을 발생시키지 않는다.\n\n[금지 표현]\n- 암시가 먹힌 것 같다\n- 암시가 제대로 적용됐는지 모르겠다\n- 다시 걸어봐야겠다\n- 효과를 확인해야겠다\n- 아까 최면이 성공했는지 확실하지 않다`;
+}
+
+function buildPersonalSuggestionSecrecySection() {
+  return `\n\n[PERSONAL SUGGESTION SECRECY — ESTABLISHED RULE]\n- 개인 암시는 플레이어와 시스템만 아는 비공개 정보이며, NPC는 자신이나 타인에게 적용됐다는 사실을 알지 못한다.\n- [1. 서사 및 행동]과 NPC 대사에서는 “암시”, “최면의 영향”, “어플 효과”, “설정된 명령”, “프로그래밍된 감정” 같은 원인을 언급하지 않는다. 암시 활성 여부를 눈빛·광택으로 표시하지 않는다.\n- 그로 인한 감정과 행동은 자신의 자연스러운 충동·감정·판단·이유를 설명하기 어려운 혼란으로 받아들인다. 플레이어가 폭로해도 별도 공개 규칙 없이는 즉시 사실로 확신하지 않으며, 해제도 알림이나 자각을 주지 않는다.\n- [2. 플레이어 상황판]의 “현재 NPC 개인 암시”만 플레이어용 메타 UI다. 그 목록은 NPC가 볼 수 없고 [1]이나 대사에 시스템명으로 전파하지 않는다.`;
 }
 
 // Pre-formats every currently active personal suggestion, grouped by real

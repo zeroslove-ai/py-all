@@ -3015,6 +3015,67 @@ function buildCurrentNpcProfileSection(save = {}, characters = {}) {
   return `\n\n[CURRENT NPC PROFILE — ESTABLISHED FACT]\n\n${lines.join('\n')}\n\n규칙:\n- 위 정보(공개 신체정보와 해금 은밀정보 포함)는 최근 기억·선택지·요약의 충돌값보다 우선하며, 없는 신체정보는 추측하지 않는다.\n- 소속이 간호사인데 근거 없이 실장·과장·수간호사 등으로 승격시키지 않는다.\n- 직종·부서·직급이 위에 적혀 있으면 그 값을 그대로 유지한다. 근거 없이 다른 직종·부서·직급으로 바꾸거나 승격·강등시키지 않는다.\n- 해금 은밀정보는 현재 장면과 관련 있을 때만 자연스럽게 반영하고 매 턴 목록처럼 나열하지 않는다.\n- 플레이어가 잘못된 호칭을 사용하면 NPC 성격에 맞게 자연스럽게 정정하거나 호칭을 흘려넘길 수 있지만, 서술자와 선택지는 잘못된 직급을 확정 사실로 반복하지 않는다.`;
 }
 
+function normalizeRelationshipMemoryItems(items, limit = 5) {
+  const seen = new Set();
+  const result = [];
+  for (const item of Array.isArray(items) ? items : []) {
+    if (typeof item !== 'string') continue;
+    const text = item.trim().replace(/\s+/g, ' ').slice(0, 100);
+    if (!text || seen.has(text)) continue;
+    seen.add(text);
+    result.push(text);
+    if (result.length >= limit) break;
+  }
+  return result;
+}
+
+function buildRelationshipMemoryFacts(relationship = {}) {
+  const npcOrgasmCount = Math.max(0, Number(relationship?.npc_orgasm_count) || 0);
+  const playerEjaculationCount = Math.max(0, Number(relationship?.player_ejaculation_count) || 0);
+  const hasHadSexWithPlayer = relationship?.has_had_sex_with_player === true
+    || relationship?.intimate_info_unlocked === true
+    || npcOrgasmCount > 0 || playerEjaculationCount > 0;
+  const hasReceivedPlayerEjaculation = relationship?.has_received_player_ejaculation === true || playerEjaculationCount > 0;
+  const deterministic = [];
+  if (hasHadSexWithPlayer) deterministic.push('플레이어와 친밀한 성적 경험을 가진 적이 있다.');
+  if (npcOrgasmCount > 0) deterministic.push('플레이어와의 성행위 중 절정한 경험이 있다.');
+  if (hasReceivedPlayerEjaculation) deterministic.push('플레이어의 사정을 경험했다.');
+  return {
+    npc_orgasm_count: npcOrgasmCount,
+    player_ejaculation_count: playerEjaculationCount,
+    intimate_info_unlocked: relationship?.intimate_info_unlocked === true || hasHadSexWithPlayer,
+    has_had_sex_with_player: hasHadSexWithPlayer,
+    has_received_player_ejaculation: hasReceivedPlayerEjaculation,
+    first_intimate_turn: Number.isInteger(relationship?.first_intimate_turn) && relationship.first_intimate_turn >= 0 ? relationship.first_intimate_turn : null,
+    last_intimate_turn: Number.isInteger(relationship?.last_intimate_turn) && relationship.last_intimate_turn >= 0 ? relationship.last_intimate_turn : null,
+    deterministic_memory: deterministic
+  };
+}
+
+function buildCurrentNpcRelationshipMemorySection(save = {}, characters = {}) {
+  const ids = [...new Set([save?.last_character_id, ...(Array.isArray(save?.last_npcs_present) ? save.last_npcs_present : [])])]
+    .filter(id => typeof id === 'string' && id && id !== 'narrator' && isPlainObject(characters?.[id]));
+  const entries = ids.map(id => {
+    const facts = buildRelationshipMemoryFacts(save?.npc_relationship_state?.[id]);
+    const memories = normalizeRelationshipMemoryItems([
+      ...facts.deterministic_memory,
+      ...(save?.npc_relationship_state?.[id]?.relationship_memory || [])
+    ]);
+    if (!facts.has_had_sex_with_player && !memories.length) return '';
+    const name = characters[id].name || characters[id]['이름'] || id;
+    const lines = [`- ${name}: 플레이어와 성관계를 가진 경험이 있음`];
+    if (facts.npc_orgasm_count > 0) lines.push(`  플레이어와의 성행위 중 절정 경험이 있음`);
+    if (facts.has_received_player_ejaculation) lines.push(`  플레이어의 사정을 경험함`);
+    lines.push(`  누적 기록: NPC 절정 ${facts.npc_orgasm_count}회 · 플레이어 사정 ${facts.player_ejaculation_count}회`);
+    if (facts.first_intimate_turn !== null) lines.push(`  최초 친밀 기록: ${facts.first_intimate_turn}턴`);
+    if (facts.last_intimate_turn !== null) lines.push(`  최근 친밀 기록: ${facts.last_intimate_turn}턴`);
+    if (memories.length) lines.push(...memories.map(memory => `  기억: ${memory}`));
+    return lines.join('\n');
+  }).filter(Boolean);
+  if (!entries.length) return '';
+  return `\n\n[CURRENT NPC PERSISTENT RELATIONSHIP MEMORY — ESTABLISHED FACT]\n\n${entries.join('\n')}\n\n규칙:\n- 이 기록은 최근 요약보다 우선하는 영구 사실이며, 최근 기억에 없다는 이유로 잊거나 처음 경험처럼 묘사하지 않는다.\n- 정확한 과거 장면 세부는 저장된 기억 범위에서만 사용하고, 횟수를 매 턴 대사로 억지로 언급하지 않는다.\n- 현재 장면과 관련 있을 때만 자연스럽게 반영한다. 과거 경험이 현재 동의·흥분·연인 관계·복종이나 모든 부탁 수락을 자동 보장하지 않는다.`;
+}
+
 // Injected every turn (unlike the periodic rulebook_address block, which
 // still only comes in via needsRulebook every ~10 turns and is kept
 // unchanged) — a short, always-present fallback so common hospital address
@@ -3217,6 +3278,7 @@ ${recentMemorySlice.map((m, index) => clipHeadTail(sanitizeRecentNarrativeForPro
   const currentSceneSection = buildCurrentSceneSection(save, master.characters || {});
   const hospitalLocationMemorySection = buildHospitalLocationMemorySection(save);
   const npcProfileSection = buildCurrentNpcProfileSection(save, master.characters || {});
+  const relationshipMemorySection = buildCurrentNpcRelationshipMemorySection(save, master.characters || {});
   const explicitMentionSection = buildExplicitNpcMentionSection(playerInput, master.characters || {});
   const csaSection = buildApplicableCsaSection(save);
   const suggestionSection = buildActiveSuggestionSection(save, master.characters || {});
@@ -3269,7 +3331,7 @@ ${recentMemorySlice.map((m, index) => clipHeadTail(sanitizeRecentNarrativeForPro
   // everything above it, including [최근 기억]'s now-stale account of the
   // turn that was just rolled back.
   const regenerationFeedbackSection = buildRegenerationFeedbackSection(regenerationFeedback);
-  const systemPrompt = coreRules + playerGate + modeSection + rulebookSection + openingScenarioSection + appUsageSection + eligibleNpcRosterSection + buildHypnosisRuntimeSection() + buildGeneralActionJudgmentSection() + buildHypnosisRecoveryNarrativeRule() + currentSceneSection + hospitalLocationMemorySection + npcProfileSection + explicitMentionSection + csaSection + suggestionSection + narrativeLengthSection + npcDialogueSection + moanVocalReactionSection + antiRepetitionSection + playerStatusPanel + contextSection + feedbackSection + continuitySection + finalFormatRules + openingFlow + playerSetupReminder + registeredNpcChoiceReminder + choiceLengthReminder + buildAddressAbbreviationSection() + regenerationFeedbackSection + buildStructuredActionStorySection(structuredPlan) + playerAttemptSection;
+  const systemPrompt = coreRules + playerGate + modeSection + rulebookSection + openingScenarioSection + appUsageSection + eligibleNpcRosterSection + buildHypnosisRuntimeSection() + buildGeneralActionJudgmentSection() + buildHypnosisRecoveryNarrativeRule() + currentSceneSection + hospitalLocationMemorySection + npcProfileSection + relationshipMemorySection + explicitMentionSection + csaSection + suggestionSection + narrativeLengthSection + npcDialogueSection + moanVocalReactionSection + antiRepetitionSection + playerStatusPanel + contextSection + feedbackSection + continuitySection + finalFormatRules + openingFlow + playerSetupReminder + registeredNpcChoiceReminder + choiceLengthReminder + buildAddressAbbreviationSection() + regenerationFeedbackSection + buildStructuredActionStorySection(structuredPlan) + playerAttemptSection;
 
   return {
     mode,
@@ -3373,6 +3435,7 @@ npc_stat_changes만 반환한다. 서사에 숫자가 없어도 대사·행동·
 [CURRENT NPC RELATIONSHIP RECORD]
 현재 메인 NPC의 직전 누적값: player_ejaculation_count=${Math.max(0, Number(save?.npc_relationship_state?.[save?.last_character_id]?.player_ejaculation_count) || 0)}, npc_orgasm_count=${Math.max(0, Number(save?.npc_relationship_state?.[save?.last_character_id]?.npc_orgasm_count) || 0)}.
 npc_relationship_state는 현재 메인 NPC와의 누적 절대값 두 개만 반환한다. 명확히 완료된 플레이어 사정 또는 현재 NPC 오르가즘만 증가시키고, 직전·실패·중단·가짜·상상·회상·다른 NPC 사건은 증가시키지 않는다. 값을 모르면 직전값을 유지하고 감소·초기화하지 않는다. narrator에는 반환하지 않는다.
+relationship_memory_patch는 최종 Story에서 실제로 완료된 중요한 친밀 사건이 있을 때만 현재 메인 NPC에 대해 짧은 사실 문장으로 최대 2개 반환한다. 플레이어 입력만의 결과 선언, 실패·추측·감정 과장, 매 턴 반복되는 일반 사실은 넣지 않는다.
 
 [WORLD STATE PATCH CONTRACT]
 플레이어가 실제로 출발해서 새 장소에 도착했고 장면이 그 새 장소로 전환된 경우, world_state_patch에 building, floor, ward, location_label을 모두 채워서 반환한다. 바뀌지 않은 필드는 이전 저장값의 기존 명칭을 그대로 다시 적고, 실제로 바뀐 필드만 새 값으로 적는다. building/floor/ward는 장소를 설명하는 한국어 명칭으로 적으면 Worker가 표준 ID로 정규화하며, 표준 ID로 정규화되지 않는 값은 무시된다. 이동을 제안하거나 준비만 했을 뿐 아직 도착하지 않았다면 world_state_patch를 채우지 말고 비워둔다. 기존 지도 장소를 우선 재사용하고, 새 구체적 방이 실제 장면 위치가 되면 기존 1·3·5·6층과 3·6병동 안의 정확한 location_label만 반환한다. 새 병원·건물·층·병동과 단순 언급·가정 장소를 만들거나 저장하지 마라. 빈 문자열로 기존 값을 덮어쓰지 마라.
@@ -3429,6 +3492,7 @@ ${JSON.stringify(imageCatalog)}
   "world_state_patch": {"building": "이동 완료 시 기존 또는 새 건물명, 이동 없으면 전체 비움", "floor": "이동 완료 시 기존 또는 새 층 명칭", "ward": "이동 완료 시 기존 또는 새 병동 명칭", "location_label": "이동 완료 시 도착한 새 장소, 이동 없으면 전체 비움"},
   "csa_omission": ["조건을 충족했는데도 실행되지 않은 강제 상식개변에 대한 짧은 설명. 누락이 없으면 []"],
   "npc_relationship_state": {"player_ejaculation_count": 0, "npc_orgasm_count": 0},
+  "relationship_memory_patch": ["최종 Story에서 실제 완료된 중요한 친밀 사건의 짧은 사실. 없으면 []"],
   "turn_summary": "이번 턴에서 변한 핵심 사실 1~3문장",
   "is_sexual": false,
   "choices": ["서사의 선택지를 그대로 옮겨라"],
@@ -3618,6 +3682,7 @@ function normalizeRegisteredNpcExtract(extract = {}, characters = {}, lastCharac
     normalized.npc_emotion = {};
     normalized.npc_stat_changes = {};
     normalized.npc_relationship_state = null;
+    normalized.relationship_memory_patch = [];
     normalized.image_id = null;
     normalized.is_sexual = false;
     normalized.first_encounter_stats = null;
@@ -3771,8 +3836,14 @@ function buildSavePatch(extract, enginePatch = {}, summaryPlan = null, previousS
       updated_turn: turnNumber
     };
     patch.npc_emotion = { [characterId]: normalizedEmotion };
-    if (isPlainObject(extract.npc_relationship_state)) {
-      patch.npc_relationship_state = { [characterId]: normalizeRelationshipState(previousSave?.npc_relationship_state?.[characterId], extract.npc_relationship_state) };
+    if (isPlainObject(extract.npc_relationship_state) || extract.is_sexual === true) {
+      patch.npc_relationship_state = { [characterId]: normalizeRelationshipState(
+        previousSave?.npc_relationship_state?.[characterId],
+        extract.npc_relationship_state || {},
+        turnNumber,
+        extract.relationship_memory_patch,
+        extract.is_sexual === true
+      ) };
     }
 
     if (firstEncounterStats) {
@@ -4013,6 +4084,7 @@ function normalizeExtract(extract) {
       )
     : [];
   normalized.npc_relationship_state = normalizeRelationshipExtract(normalized.npc_relationship_state);
+  normalized.relationship_memory_patch = normalizeRelationshipMemoryItems(normalized.relationship_memory_patch, 2);
   if (!isPlainObject(normalized.first_encounter_stats)) normalized.first_encounter_stats = null;
   if (!isPlainObject(normalized.world_state_patch)) normalized.world_state_patch = null;
   delete normalized.image_reasoning;
@@ -4033,7 +4105,7 @@ function filterMainNpcDialogue(extract, characters) {
   }).map(line => ({ speaker: mainName, text: line.text.trim(), direction: typeof line.direction === 'string' && line.direction.trim() ? line.direction.trim() : 'neutral' }));
 }
 
-function normalizeRelationshipState(previous = {}, patch = {}) {
+function normalizeRelationshipState(previous = {}, patch = {}, turnNumber = 0, relationshipMemoryPatch = [], isSexual = false) {
   const previousPlayerEjaculationCount = Math.max(0, Number(previous?.player_ejaculation_count) || 0);
   const previousNpcOrgasmCount = Math.max(0, Number(previous?.npc_orgasm_count) || 0);
   const proposedPlayerEjaculationCount = Number.isInteger(patch?.player_ejaculation_count) && patch.player_ejaculation_count >= 0
@@ -4042,11 +4114,35 @@ function normalizeRelationshipState(previous = {}, patch = {}) {
     ? patch.npc_orgasm_count : previousNpcOrgasmCount;
   const playerEjaculationCount = Math.max(previousPlayerEjaculationCount, proposedPlayerEjaculationCount);
   const npcOrgasmCount = Math.max(previousNpcOrgasmCount, proposedNpcOrgasmCount);
-  return {
+  const previousFacts = buildRelationshipMemoryFacts(previous);
+  const hasNewCounter = playerEjaculationCount > previousPlayerEjaculationCount || npcOrgasmCount > previousNpcOrgasmCount;
+  const hasIntimateExperience = previousFacts.has_had_sex_with_player
+    || playerEjaculationCount > 0
+    || npcOrgasmCount > 0
+    || isSexual === true;
+  const allowPatch = hasNewCounter || isSexual === true;
+  const relationshipMemory = normalizeRelationshipMemoryItems([
+    ...(allowPatch ? relationshipMemoryPatch : []),
+    ...buildRelationshipMemoryFacts({ player_ejaculation_count: playerEjaculationCount, npc_orgasm_count: npcOrgasmCount }).deterministic_memory,
+    ...(previous?.relationship_memory || [])
+  ]);
+  const firstIntimateTurn = Number.isInteger(previous?.first_intimate_turn) && previous.first_intimate_turn >= 0
+    ? previous.first_intimate_turn
+    : (!previousFacts.has_had_sex_with_player && hasIntimateExperience && Number.isInteger(turnNumber) && turnNumber > 0 ? turnNumber : null);
+  const lastIntimateTurn = hasNewCounter || isSexual === true
+    ? (Number.isInteger(turnNumber) && turnNumber > 0 ? turnNumber : null)
+    : (Number.isInteger(previous?.last_intimate_turn) && previous.last_intimate_turn >= 0 ? previous.last_intimate_turn : null);
+  const result = {
     player_ejaculation_count: playerEjaculationCount,
     npc_orgasm_count: npcOrgasmCount,
-    intimate_info_unlocked: previous?.intimate_info_unlocked === true || playerEjaculationCount > 0 || npcOrgasmCount > 0
+    intimate_info_unlocked: previous?.intimate_info_unlocked === true || hasIntimateExperience,
+    has_had_sex_with_player: hasIntimateExperience,
+    has_received_player_ejaculation: previous?.has_received_player_ejaculation === true || playerEjaculationCount > 0,
+    relationship_memory: relationshipMemory
   };
+  if (firstIntimateTurn !== null) result.first_intimate_turn = firstIntimateTurn;
+  if (lastIntimateTurn !== null) result.last_intimate_turn = lastIntimateTurn;
+  return result;
 }
 
 function normalizeRelationshipExtract(value) {

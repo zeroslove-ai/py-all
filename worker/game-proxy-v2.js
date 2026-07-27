@@ -1285,7 +1285,8 @@ async function handleStory(req, env) {
   }
   const resolvedPlayerInput = structuredPlan?.ok ? structuredPlan.display_input : resolveMarkerChoiceInput(player_input, ctx?.save?.last_choices);
   const promptStart = Date.now();
-  const effectiveCtx = { ...ctx, save: buildStructuredEffectiveSave(ctx?.save, structuredPlan) };
+  const effectiveSave = buildStructuredEffectiveSave(ctx?.save, structuredPlan);
+  const effectiveCtx = { ...ctx, save: effectiveSave, __structured_effective_save: true };
   const prompt = buildStoryPrompt(effectiveCtx, resolvedPlayerInput, currentTurn, feedback, regeneration_feedback, structuredPlan);
   const promptMs = Date.now() - promptStart;
 
@@ -1504,6 +1505,7 @@ async function performExtractionPass(env, { narrativeText, playerInput, compatCt
   // location and reject a perfectly valid NPC.
   const effectiveWorldState = computeEffectiveWorldState(compatCtx?.save?.world_state, extract.world_state_patch);
   extract = normalizeRegisteredNpcExtract(extract, compatCtx?.master?.characters, compatCtx?.save?.last_character_id, effectiveWorldState);
+  extract = sanitizeCsaDeactivationMemoryExtract(extract, structuredPlan);
   timing.extract_parse_ms = Date.now() - t4;
 
   const t5 = Date.now();
@@ -1726,7 +1728,8 @@ async function runExtractPipeline(env, { game_id, narrative_text, player_input, 
     if (structured_action.type === 'app_transaction') structuredPlan.canonical_action = structured_action;
     structuredPlan = applySuggestionResolutionsToPlan(compatCtx.save || {}, compatCtx.master || {}, structuredPlan, { turnNumber: nextTurn, turnCount: ctx?.turn_count ?? 0 });
   }
-  const effectiveCtx = { ...compatCtx, save: buildStructuredEffectiveSave(compatCtx?.save, structuredPlan) };
+  const effectiveSave = buildStructuredEffectiveSave(compatCtx?.save, structuredPlan);
+  const effectiveCtx = { ...compatCtx, save: effectiveSave, __structured_effective_save: true };
   const shortlistByCharacter = {};
   for (const img of shortlistedImages) {
     shortlistByCharacter[img.character_id] = (shortlistByCharacter[img.character_id] || 0) + 1;
@@ -1865,7 +1868,7 @@ async function runExtractPipeline(env, { game_id, narrative_text, player_input, 
   let csaMetaAwarenessRepaired = false;
   let csaMetaAwarenessFields = [];
   if (isSetupComplete(compatCtx.save)) {
-    const applicableCsa = getApplicableCsaEntries(compatCtx.save);
+    const applicableCsa = getApplicableCsaEntries(effectiveCtx.save);
     if (applicableCsa.length) {
       const violations = collectCsaMetaAwarenessViolations(finalNarrativeText, extract);
       const omissions = extract.csa_omission;
@@ -1876,7 +1879,7 @@ async function runExtractPipeline(env, { game_id, narrative_text, player_input, 
         const integrityResult = await resolveCsaNarrativeIntegrity(env, {
           narrativeText: finalNarrativeText,
           applicableCsa, omissions, violations, extract,
-          previousSave: compatCtx.save, characters, requestId, recoveryBudget
+          previousSave: effectiveCtx.save, characters, requestId, recoveryBudget
         });
         finalNarrativeText = integrityResult.finalNarrativeText;
         if (integrityResult.narrativeReplacement) narrativeReplacement = integrityResult.narrativeReplacement;
@@ -1885,6 +1888,8 @@ async function runExtractPipeline(env, { game_id, narrative_text, player_input, 
       }
     }
   }
+
+  extract = sanitizeCsaDeactivationMemoryExtract(extract, structuredPlan);
 
   // H1: the NPC narrative contract is fail-open — an unregistered minor
   // NPC, a registered NPC appearing outside their usual ward, or a
@@ -1912,7 +1917,7 @@ async function runExtractPipeline(env, { game_id, narrative_text, player_input, 
   let choiceValidationWarnings = [];
   if (isSetupComplete(compatCtx.save)) {
     const tChoices = Date.now();
-    const hypnosisCapability = calculateHypnosisCapability(compatCtx.save, compatCtx.master);
+    const hypnosisCapability = calculateHypnosisCapability(effectiveCtx.save, compatCtx.master);
     // Captured before normalization mutates extract.choices in place — extract
     // and firstPass.extract are the same object (no second pass reassigns it
     // anymore), so this must be read now or it would always reflect the
@@ -2318,7 +2323,8 @@ async function runCommitPipeline(env, { game_id, turn_number, content: rawConten
   }
   if (turn_number !== (ctx?.turn_count ?? 0) + 1) return { body: { error: 'turn conflict', expected_turn: (ctx?.turn_count ?? 0) + 1, received_turn: turn_number, request_id: requestId }, status: 409 };
   const effectiveWorldStateForCommit = computeEffectiveWorldState(ctx?.save?.world_state, extract.world_state_patch);
-  const safeExtract = normalizeRegisteredNpcExtract({ ...extract, is_sexual: extract.is_sexual === true }, ctx?.master?.characters, ctx?.save?.last_character_id, effectiveWorldStateForCommit);
+  let safeExtract = normalizeRegisteredNpcExtract({ ...extract, is_sexual: extract.is_sexual === true }, ctx?.master?.characters, ctx?.save?.last_character_id, effectiveWorldStateForCommit);
+  safeExtract = sanitizeCsaDeactivationMemoryExtract(safeExtract, structuredPlan);
   if (structuredPlan?.canonical_action?.type === 'find_npc') {
     safeExtract.character_id = structuredPlan.plan.character_id;
     safeExtract.npcs_present = [structuredPlan.plan.character_id];
@@ -3187,7 +3193,9 @@ function buildRegenerationFeedbackSection(regenerationFeedback) {
 function buildStoryPrompt(ctx, playerInput, currentTurn, feedback = [], regenerationFeedback = null, structuredPlan = null) {
   ctx = withSetupCompatibility(ctx);
   const master = ctx?.master || {};
-  const save = buildStructuredEffectiveSave(ctx?.save, structuredPlan);
+  const save = ctx?.__structured_effective_save === true
+    ? (isPlainObject(ctx?.save) ? ctx.save : {})
+    : buildStructuredEffectiveSave(ctx?.save, structuredPlan);
   const recentMemories = ctx?.recent_memories || [];
   const nextTurn = currentTurn + 1;
   const isReentry = !playerInput || playerInput.trim() === '' || playerInput.trim() === '/플레이';
@@ -3252,9 +3260,10 @@ ${JSON.stringify({ rulebook_address: master.rulebook_address }, null, 2)}`;
     ? `\n\n[app_usage]\n${typeof master.app_usage === 'string' ? master.app_usage : JSON.stringify(master.app_usage, null, 2)}`
     : '';
 
+  const activeCsa = getActiveCsaEntries(save);
   const suggestionPanelData = buildActiveSuggestionPanelText(save, master.characters || {});
-  const csaPanelData = buildCsaPanelText(save);
-  const hypnosisCapability = calculateHypnosisCapability(save, master);
+  const csaPanelData = buildCsaPanelText(save, activeCsa);
+  const hypnosisCapability = calculateHypnosisCapability(save, master, activeCsa);
   const hypnosisSummaryText = buildHypnosisStatusPanelData(hypnosisCapability, resolveHypnosisStoryState(save));
   const legacyPlayerStatusPanel = `
 
@@ -3281,7 +3290,7 @@ ${suggestionPanelData.count ? suggestionPanelData.lines : '없음'}
 활성 ${csaPanelData.count}개 / 최대 ${csaPanelData.maxActive}개
 ${csaPanelData.count ? csaPanelData.lines : '없음'}`;
 
-  const currentHypnosisStatusText = buildCurrentHypnosisStatusPanelText(save, master);
+  const currentHypnosisStatusText = buildCurrentHypnosisStatusPanelText(save, master, activeCsa);
   const playerStatusPanel = `
 
 [PLAYER STATUS PANEL CONTRACT — HIGHEST PRIORITY FOR SECTION 2]
@@ -3323,7 +3332,7 @@ ${recentMemorySlice.map((m, index) => clipHeadTail(sanitizeRecentNarrativeForPro
   const relationshipMemorySection = buildCurrentNpcRelationshipMemorySection(save, master.characters || {});
   const physicalSceneStateSection = buildCurrentNpcPhysicalSceneStateSection(save, master.characters || {});
   const explicitMentionSection = buildExplicitNpcMentionSection(playerInput, master.characters || {});
-  const csaSection = buildApplicableCsaSection(save);
+  const csaSection = buildApplicableCsaSection(save, activeCsa);
   const suggestionSection = buildActiveSuggestionSection(save, master.characters || {});
   const narrativeLengthSection = buildNarrativeLengthSection();
   const npcDialogueSection = buildNpcDialogueMinimumSection();
@@ -3374,7 +3383,7 @@ ${recentMemorySlice.map((m, index) => clipHeadTail(sanitizeRecentNarrativeForPro
   // everything above it, including [최근 기억]'s now-stale account of the
   // turn that was just rolled back.
   const regenerationFeedbackSection = buildRegenerationFeedbackSection(regenerationFeedback);
-  const systemPrompt = coreRules + playerGate + modeSection + rulebookSection + openingScenarioSection + appUsageSection + eligibleNpcRosterSection + buildHypnosisRuntimeSection() + buildGeneralActionJudgmentSection() + buildHypnosisRecoveryNarrativeRule() + currentSceneSection + hospitalLocationMemorySection + npcProfileSection + relationshipMemorySection + explicitMentionSection + csaSection + suggestionSection + physicalSceneStateSection + narrativeLengthSection + npcDialogueSection + moanVocalReactionSection + antiRepetitionSection + playerStatusPanel + contextSection + feedbackSection + continuitySection + finalFormatRules + openingFlow + playerSetupReminder + registeredNpcChoiceReminder + choiceLengthReminder + buildAddressAbbreviationSection() + regenerationFeedbackSection + buildStructuredActionStorySection(structuredPlan) + playerAttemptSection;
+  const systemPrompt = coreRules + playerGate + modeSection + rulebookSection + openingScenarioSection + appUsageSection + eligibleNpcRosterSection + buildHypnosisRuntimeSection() + buildGeneralActionJudgmentSection() + buildHypnosisRecoveryNarrativeRule() + currentSceneSection + hospitalLocationMemorySection + npcProfileSection + relationshipMemorySection + explicitMentionSection + csaSection + suggestionSection + physicalSceneStateSection + narrativeLengthSection + npcDialogueSection + moanVocalReactionSection + antiRepetitionSection + playerStatusPanel + contextSection + feedbackSection + continuitySection + finalFormatRules + openingFlow + playerSetupReminder + registeredNpcChoiceReminder + choiceLengthReminder + buildAddressAbbreviationSection() + regenerationFeedbackSection + buildStructuredActionStorySection(structuredPlan, save, activeCsa) + playerAttemptSection;
 
   return {
     mode,
@@ -3403,7 +3412,9 @@ function buildCsaApplicationCheckSection(save) {
 
 function buildExtractPrompt(narrativeText, playerInput, ctx, images, turnCount, structuredPlan = null) {
   const master = ctx?.master || {};
-  const save = buildStructuredEffectiveSave(ctx?.save, structuredPlan);
+  const save = ctx?.__structured_effective_save === true
+    ? (isPlainObject(ctx?.save) ? ctx.save : {})
+    : buildStructuredEffectiveSave(ctx?.save, structuredPlan);
 
   const imageCatalog = images.map(img => ({
     image_id: img.image_id ?? img.id,
@@ -4254,6 +4265,29 @@ function normalizeRelationshipExtract(value) {
   return Object.keys(result).length ? result : null;
 }
 
+const CSA_DEACTIVATION_MEMORY_LOSS_RE = /(?:기억(?:이|을)?\s*(?:없|나지\s*않|못하|흐릿|하지\s*못)|기억상실|시간\s*공백|언제\s*(?:옷을\s*)?벗|분명\s*옷을\s*입|누가\s*내\s*옷을\s*벗)/;
+
+function hasStructuredCsaDeactivation(structuredPlan) {
+  return structuredPlan?.canonical_action?.type === 'app_transaction'
+    && structuredPlan.canonical_action.operations?.some(operation => operation?.domain === 'csa' && operation?.operation === 'deactivate') === true;
+}
+
+function sanitizeCsaDeactivationMemoryExtract(extract = {}, structuredPlan = null) {
+  if (!hasStructuredCsaDeactivation(structuredPlan)) return extract;
+  const sanitized = { ...extract };
+  sanitized.relationship_memory_patch = (Array.isArray(sanitized.relationship_memory_patch) ? sanitized.relationship_memory_patch : [])
+    .filter(item => typeof item === 'string' && !CSA_DEACTIVATION_MEMORY_LOSS_RE.test(item));
+  const summary = typeof sanitized.turn_summary === 'string' ? sanitized.turn_summary : '';
+  if (CSA_DEACTIVATION_MEMORY_LOSS_RE.test(summary)) {
+    const kept = summary.split(/(?<=[.!?。！？])\s*|\n+/)
+      .filter(sentence => sentence.trim() && !CSA_DEACTIVATION_MEMORY_LOSS_RE.test(sentence))
+      .join(' ')
+      .trim();
+    sanitized.turn_summary = kept || '상식개변이 해제되어 현재 적용 규칙이 사라졌다.';
+  }
+  return sanitized;
+}
+
 const NPC_STAT_KEYS = ['호감도', '신뢰도', '최면깊이', '순응도', '최면저항력'];
 const CSA_SCOPE_RANK = { ward: 1, floor: 2, building: 3, world: 4 };
 
@@ -4431,13 +4465,17 @@ function isCsaApplicable(csa, worldState = {}) {
 
 // Shared by the Story prompt section and the Extract-side omission check —
 // both must agree on exactly which CSAs are in force this turn.
-function getApplicableCsaEntries(save) {
-  const world = isPlainObject(save?.world_state) ? save.world_state : (isPlainObject(save?.player_location) ? save.player_location : {});
-  return (Array.isArray(save?.csa_active) ? save.csa_active : []).filter(csa => isCsaApplicable(csa, world));
+function getActiveCsaEntries(save = {}) {
+  return (Array.isArray(save?.csa_active) ? save.csa_active : []).filter(item => item?.active === true);
 }
 
-function buildCurrentHypnosisStatusSnapshot(save = {}, master = {}) {
-  const capability = calculateHypnosisCapability(save, master);
+function getApplicableCsaEntries(save, activeCsa = getActiveCsaEntries(save)) {
+  const world = isPlainObject(save?.world_state) ? save.world_state : (isPlainObject(save?.player_location) ? save.player_location : {});
+  return activeCsa.filter(csa => isCsaApplicable(csa, world));
+}
+
+function buildCurrentHypnosisStatusSnapshot(save = {}, master = {}, activeCsa = getActiveCsaEntries(save)) {
+  const capability = calculateHypnosisCapability(save, master, activeCsa);
   const characterId = typeof save?.last_character_id === 'string' && save.last_character_id !== 'narrator' ? save.last_character_id : null;
   const character = characterId && isPlainObject(master?.characters?.[characterId]) ? master.characters[characterId] : {};
   const suggestionMap = normalizeLegacyActiveSuggestions(save?.active_suggestions);
@@ -4449,21 +4487,20 @@ function buildCurrentHypnosisStatusSnapshot(save = {}, master = {}) {
     (count, list) => count + (Array.isArray(list) ? list.filter(item => item?.active === true).length : 0),
     0
   );
-  const activeCsa = (Array.isArray(save?.csa_active) ? save.csa_active : []).filter(item => item?.active === true);
-  const applicableCsa = getApplicableCsaEntries(save).map(item => ({ strength: item.strength || '약함', scope_label: item.scope_label || '', content: typeof item.content === 'string' ? item.content.trim() : '' })).filter(item => item.content);
+  const applicableCsa = getApplicableCsaEntries(save, activeCsa).map(item => ({ strength: item.strength || '약함', scope_label: item.scope_label || '', content: typeof item.content === 'string' ? item.content.trim() : '' })).filter(item => item.content);
   return { currentCharacterId: characterId, currentCharacterName: character?.name || character?.['이름'] || null, suggestionCount: activeSuggestionCount, suggestionMax: capability.max_active, csaCount: activeCsa.length, csaMax: capability.csa_max_active, currentSuggestions, applicableCsa };
 }
 
-function buildCurrentHypnosisStatusPanelText(save = {}, master = {}) {
-  const snapshot = buildCurrentHypnosisStatusSnapshot(save, master);
+function buildCurrentHypnosisStatusPanelText(save = {}, master = {}, activeCsa = getActiveCsaEntries(save)) {
+  const snapshot = buildCurrentHypnosisStatusSnapshot(save, master, activeCsa);
   const suggestionLines = snapshot.currentSuggestions.length ? snapshot.currentSuggestions.map(item => `- [${item.strength}] ${item.content}`).join('\n') : '- 없음';
   const csaLines = snapshot.applicableCsa.length ? snapshot.applicableCsa.map(item => `- [${item.scope_label || '현재 범위'} · ${item.strength}] ${item.content}`).join('\n') : '- 없음';
   return `👤 현재 NPC: ${snapshot.currentCharacterName || '없음'}\n\n📱 최면 어플: 개인 암시 ${snapshot.suggestionCount}/${snapshot.suggestionMax} · 상식개변 ${snapshot.csaCount}/${snapshot.csaMax}\n\n🌀 현재 NPC 개인 암시\n${suggestionLines}\n\n🌐 현재 위치 상식개변\n${csaLines}`;
 }
 
-function buildApplicableCsaSection(save) {
+function buildApplicableCsaSection(save, activeCsa = getActiveCsaEntries(save)) {
   const world = isPlainObject(save?.world_state) ? save.world_state : (isPlainObject(save?.player_location) ? save.player_location : {});
-  const applicable = getApplicableCsaEntries(save);
+  const applicable = getApplicableCsaEntries(save, activeCsa);
   if (!applicable.length) return '';
   const locationLabel = typeof world.location_label === 'string' && world.location_label.trim() ? world.location_label.trim() : '현재 위치';
   const lines = applicable.map(csa => `- ${csa.content}`).join('\n');
@@ -4785,10 +4822,10 @@ function buildActiveSuggestionPanelText(save, characters = {}) {
 
 // Pre-formats every currently active common-sense change (CSA) — not just
 // the ones applicable to the player's current location — with its scope
-// label and content, plus the active/max and daily-use counts, as
+// label and content, plus the active/max count, as
 // render-ready text for [2. 플레이어 상황판].
-function buildCsaPanelText(save = {}) {
-  const active = (Array.isArray(save?.csa_active) ? save.csa_active : []).filter(item => item?.active === true);
+function buildCsaPanelText(save = {}, activeCsa = getActiveCsaEntries(save)) {
+  const active = activeCsa;
   const level = Math.max(1, Number(save?.player_progress?.level) || 1);
   const limits = getCsaLimits(level);
   const lines = active.map(item => `- [${item.scope_label || item.scope_id}] ${item.content}`).join('\n');
@@ -4872,7 +4909,7 @@ function getHypnosisSuggestionLimits(level) {
 // active_count sums every registered NPC's active personal suggestions, not
 // just the current on-screen NPC — the slot pool is global, so a full pool
 // caused by NPC A must still block a new suggestion for NPC B.
-function calculateHypnosisCapability(save = {}, master = {}) {
+function calculateHypnosisCapability(save = {}, master = {}, activeCsa = getActiveCsaEntries(save)) {
   const level = Math.max(1, Number(save?.player_progress?.level) || 1);
   const exp = Math.max(0, Number(save?.player_progress?.exp) || 0);
   const nextLevelExp = level >= 10 ? 0 : expForNextLevel(level);
@@ -4887,7 +4924,7 @@ function calculateHypnosisCapability(save = {}, master = {}) {
   const maxStrengthRank = hypnosisStrengthRank(availableStrength);
 
   const csaLimits = getCsaLimits(level);
-  const csaActiveCount = (Array.isArray(save?.csa_active) ? save.csa_active : []).filter(item => item?.active === true).length;
+  const csaActiveCount = activeCsa.length;
 
   return {
     current_level: level,
@@ -5202,7 +5239,7 @@ function buildStructuredActionError(result, currentTurn = null) {
   };
 }
 
-function buildStructuredActionStorySection(structuredPlan) {
+function buildStructuredActionStorySection(structuredPlan, effectiveSave = {}, activeCsa = getActiveCsaEntries(effectiveSave)) {
   if (!structuredPlan?.ok) return '';
   const action = structuredPlan.canonical_action;
   if (action.type === 'find_npc') {
@@ -5219,7 +5256,12 @@ function buildStructuredActionStorySection(structuredPlan) {
     }
     return `- 상식개변 ${operation.operation}: ${operation.scope_type || '기존 범위'}`;
   }).join('\n');
-  return `\n\n[CONFIRMED HYPNOSIS APP TRANSACTION — HARD CONSTRAINT]\n아래 조작은 Worker 검증을 통과했다. 대상·개수·내용·강도와 성공 여부를 바꾸지 말고 조작 과정과 장면 직후 흐름만 자연스럽게 서술한다. 개인 암시 적용 실패는 효과가 생기지 않으며, 실패한 내용대로 NPC를 행동시키지 마라. 현재 장면에 없는 NPC의 원격 수정·해제에는 즉각적인 신체 반응이나 대사를 창작하지 마라.\n${lines}` + buildSuggestionDeactivationStorySection(structuredPlan);
+  const csaChanged = action.operations.some(operation => operation.domain === 'csa');
+  const level = Math.max(1, Number(effectiveSave?.player_progress?.level) || 1);
+  const csaResult = csaChanged
+    ? `\n\n[CSA CURRENT RESULT — ESTABLISHED FACT]\n현재 활성 상식개변: ${activeCsa.length}/${getCsaLimits(level).max_active}. 활성 목록과 현재 위치 적용 여부는 이 수치와 같은 active:true 항목만 사용한다.`
+    : '';
+  return `\n\n[CONFIRMED HYPNOSIS APP TRANSACTION — HARD CONSTRAINT]\n아래 조작은 Worker 검증을 통과했다. 대상·개수·내용·강도와 성공 여부를 바꾸지 말고 조작 과정과 장면 직후 흐름만 자연스럽게 서술한다. 개인 암시 적용 실패는 효과가 생기지 않으며, 실패한 내용대로 NPC를 행동시키지 마라. 현재 장면에 없는 NPC의 원격 수정·해제에는 즉각적인 신체 반응이나 대사를 창작하지 마라.\n${lines}` + csaResult + buildSuggestionDeactivationStorySection(structuredPlan) + buildCsaDeactivationStorySection(structuredPlan);
 }
 
 function buildSuggestionDeactivationStorySection(structuredPlan) {
@@ -5234,9 +5276,16 @@ function buildSuggestionDeactivationStorySection(structuredPlan) {
   return `\n\n[개인 암시 해제 — 기억 보존]\n해제 대상: ${names.join(', ')}\n- 대상은 암시 중의 사건과 자신의 행동을 기억한다. 사라지는 것은 강제력과 당연하게 느껴지던 인식이다.\n- 기억을 바탕으로 의문·당황·수치심·불안·자기합리화 중 상황에 맞는 반응을 보이되 한꺼번에 나열하지 않는다.\n- 기억상실·시간 공백·꿈처럼 흐린 회상, 과거 행동·관계·신체 결과의 소급 취소를 만들지 않는다.`;
 }
 
+function buildCsaDeactivationStorySection(structuredPlan) {
+  const action = structuredPlan?.canonical_action;
+  if (action?.type !== 'app_transaction' || !action.operations.some(operation => operation.domain === 'csa' && operation.operation === 'deactivate')) return '';
+  return `\n\n[CSA DEACTIVATION MEMORY RULE — ESTABLISHED FACT]\n- 상식개변 해제는 기억 삭제, 기억 흐림, 시간 공백, 세뇌 해제가 아니다.\n- NPC는 개변 적용 중 자신이 보고 듣고 말하고 행동한 모든 사건과, 당시 그 상식을 자연스럽고 당연하다고 인식했던 사실을 정상적으로 기억한다.\n- 해제 후에는 그 상식에 대한 당연함만 사라진다. 과거 행동을 현재의 원래 가치관으로 재평가하며 당황, 수치심, 후회, 혼란을 느낄 수 있다.\n- 실제로 스스로 한 행동을 강요받은 일·기억이 없는 일·원래 옷을 입고 있던 일로 바꾸지 않는다. 과거 사건을 소급 삭제하거나 다시 쓰지 않는다.\n- npc_scene_state의 현재 물리 상태를 그대로 유지한다. 옷, 자세, 위치, 신체 상태를 자동 복구하지 않는다.\n- 별도의 실제 기억상실 사건이 없는 한 “기억이 안 난다”, “기억이 흐릿하다”, “언제 벗었지”, “분명 옷을 입고 있었다”, “누가 내 옷을 벗겼나”라고 묘사하지 않는다.\n- 권장 반응: 행동은 기억하지만 당시 판단이 이해되지 않는다는 자연스러운 재평가.`;
+}
+
 function buildStructuredActionExtractSection(structuredPlan) {
   if (!structuredPlan?.ok) return '';
   if (structuredPlan.canonical_action.type === 'find_npc') return '\n\n이번 턴의 최종 대상과 목적지는 Worker가 확정했다. character_id는 지정 대상이고 npcs_present에는 지정 대상을 포함한다.';
+  if (hasStructuredCsaDeactivation(structuredPlan)) return '\n\n이번 턴에는 상식개변 해제가 확정되었다. 해제는 과거 사건·기억·물리 상태를 지우거나 되돌리지 않는다. relationship_memory_patch와 turn_summary에 기억상실·시간 공백·자동 복장 복구를 영구 사실로 기록하지 말고, npc_scene_state_patch에는 실제 완료된 물리 변화만 넣는다.';
   return '\n\n이번 턴의 최면 어플 상태 변경은 Worker가 이미 확정했다. 저장 상태를 새로 추론하지 말고 서사에서 실제 발생한 NPC 감정·수치·장면·대사·이미지 정보만 추출한다. 최면깊이의 앱 신규 등록 증가는 Worker가 결정한다.';
 }
 

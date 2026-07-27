@@ -905,12 +905,25 @@ function buildNpcPrivateInfo(character = {}, relationship = {}) {
   return result;
 }
 
+function resolveCurrentSuggestionTarget(save, characters) {
+  const present = Array.isArray(save?.last_npcs_present)
+    ? [...new Set(save.last_npcs_present.filter(id => isPlainObject(characters?.[id])))]
+    : [];
+  const lastCharacterId = typeof save?.last_character_id === 'string' ? save.last_character_id : '';
+  if (lastCharacterId && present.includes(lastCharacterId)) return lastCharacterId;
+  if (!Array.isArray(save?.last_npcs_present) && isPlainObject(characters?.[lastCharacterId])) return lastCharacterId;
+  // A sole registered NPC in the confirmed scene is unambiguous even when a
+  // narrator-style Extract left last_character_id behind on the prior turn.
+  return present.length === 1 ? present[0] : null;
+}
+
 function buildAppStatePayload(master, save, turnCount = 0) {
   const manual = buildAppManualPayload(master, save, turnCount);
   const characters = isPlainObject(master?.characters) ? master.characters : {};
   const currentIds = Array.isArray(save?.last_npcs_present)
     ? [...new Set(save.last_npcs_present.filter(id => isPlainObject(characters[id])))]
     : (isPlainObject(characters?.[save?.last_character_id]) ? [save.last_character_id] : []);
+  const currentSuggestionTarget = resolveCurrentSuggestionTarget(save, characters);
   const currentWorld = isPlainObject(save?.world_state) ? save.world_state : {};
   const locations = isPlainObject(save?.npc_locations) ? save.npc_locations : {};
   const suggestionMap = normalizeLegacyActiveSuggestions(save?.active_suggestions);
@@ -927,7 +940,7 @@ function buildAppStatePayload(master, save, turnCount = 0) {
       name: character?.name || character?.['이름'] || '',
       role: character?.직책 || character?.job || character?.role || character?.소속 || character?.affiliation || '',
       present_now: currentIds.includes(character_id),
-      can_add_suggestion: character_id === save?.last_character_id && currentIds.includes(character_id),
+      can_add_suggestion: character_id === currentSuggestionTarget,
       can_find: Boolean(location?.location_label) && !currentIds.includes(character_id),
       mind: { state, state_label: state ? NPC_MIND_STATE_LABELS[state] : '상태 미확인', surface: typeof emotion.surface === 'string' ? emotion.surface : '', inner: typeof emotion.inner === 'string' ? emotion.inner : '', physical_reaction: typeof emotion.physical_reaction === 'string' ? emotion.physical_reaction : '', updated_turn: Number.isInteger(emotion.updated_turn) ? emotion.updated_turn : null },
       location: { known: Boolean(location?.location_label), location_label: location?.location_label || '', ward: location?.ward || '', floor: location?.floor || '', building: location?.building || '', updated_turn: Number.isInteger(location?.updated_turn) ? location.updated_turn : null },
@@ -4564,7 +4577,7 @@ function planAppTransaction(previousSave, master, action, { turnNumber, today })
   });
   const canonicalOperations = [];
   const suggestionActivations = [];
-  const currentPresent = Array.isArray(previousSave?.last_npcs_present) ? previousSave.last_npcs_present : [];
+  const currentSuggestionTarget = resolveCurrentSuggestionTarget(previousSave, characters);
 
   for (const { operation: raw, index } of ordered) {
     if (!isPlainObject(raw) || !['suggestion', 'csa'].includes(raw.domain) || !['activate', 'update', 'deactivate'].includes(raw.operation) || typeof raw.client_id !== 'string' || !raw.client_id.trim() || raw.client_id.length > 80) {
@@ -4595,7 +4608,7 @@ function planAppTransaction(previousSave, master, action, { turnNumber, today })
       const characterId = typeof raw.character_id === 'string' ? raw.character_id.trim() : '';
       if (raw.operation === 'activate') {
         if (!characterId || !isPlainObject(characters[characterId])) { issues.push(appIssue(raw, 'NPC_NOT_FOUND', '등록된 NPC만 대상으로 지정할 수 있습니다.', index)); continue; }
-        const isCurrent = previousSave?.last_character_id === characterId && (currentPresent.includes(characterId) || (!Array.isArray(previousSave?.last_npcs_present) && previousSave?.last_character_id === characterId));
+        const isCurrent = currentSuggestionTarget === characterId;
         if (!isCurrent) { issues.push(appIssue(raw, 'NPC_NOT_PRESENT', '새 개인 암시는 현재 함께 있는 NPC에게만 등록할 수 있습니다.', index)); continue; }
         const storageStrength = validateStrength();
         if (!validateContent() || !storageStrength) continue;

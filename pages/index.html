@@ -939,6 +939,18 @@
           await window.hypnosisApp?.open(error.details.app_route.tab, { characterId: error.details.app_route.character_id, notice: error.details.app_route.notice || error.message });
           return;
         }
+        if (pending.structuredAction?.type === 'app_transaction') {
+          ui.failCurrentNarrative();
+          const code = error.details?.error_code || error.status || 'UNKNOWN';
+          ui.showPendingTurnActions(
+            `최면 어플 변경사항을 적용하지 못했습니다. 변경사항은 저장되지 않았습니다. [${code}]`,
+            [
+              { label: '최면 어플 다시 열기', onClick: () => window.hypnosisApp?.open('suggestions') },
+              { label: '이번 시도 버리기', onClick: () => discardFailedTurn() }
+            ]
+          );
+          return;
+        }
         ui.failCurrentNarrative();
         const code = error.status || 'UNKNOWN';
         const suffix = error.requestId ? ` · 요청 ${error.requestId}` : '';
@@ -992,6 +1004,19 @@
       } catch (error) {
         failed = true;
         if (await handleTurnFailureAsRollback(pending, '피드백 재생성에 실패하여 기존 턴을 복구했습니다.')) return;
+        if (pending.structuredAction?.type === 'app_transaction') {
+          const code = error.details?.error_code || error.status || 'UNKNOWN';
+          await finalizeRenderedNarrative(pending);
+          ui.markLastNarrativeUncommitted();
+          ui.showPendingTurnActions(
+            `최면 어플 변경사항을 적용하지 못했습니다. 변경사항은 저장되지 않았습니다. [${code}]`,
+            [
+              { label: '최면 어플 다시 열기', onClick: () => window.hypnosisApp?.open('suggestions') },
+              { label: '이번 시도 버리기', onClick: () => discardFailedTurn() }
+            ]
+          );
+          return;
+        }
         const code = error.details?.error_code || error.status || 'UNKNOWN';
         const requestId = error.details?.request_id;
         const suffix = requestId ? ` · 요청 ${requestId}` : '';
@@ -1090,6 +1115,19 @@
         });
       } catch (error) {
         if (await handleTurnFailureAsRollback(pending, '피드백 재생성에 실패하여 기존 턴을 복구했습니다.')) return;
+        if (pending.structuredAction?.type === 'app_transaction') {
+          const code = error.details?.error_code || error.status || 'UNKNOWN';
+          await finalizeRenderedNarrative(pending);
+          ui.markLastNarrativeUncommitted();
+          ui.showPendingTurnActions(
+            `최면 어플 변경사항을 적용하지 못했습니다. 변경사항은 저장되지 않았습니다. [${code}]`,
+            [
+              { label: '최면 어플 다시 열기', onClick: () => window.hypnosisApp?.open('suggestions') },
+              { label: '이번 시도 버리기', onClick: () => discardFailedTurn() }
+            ]
+          );
+          return;
+        }
         if (error.status === 409) {
           document.getElementById('chat-input').value = pending.input;
           ui.showSystemMessage('다른 창에서 게임이 먼저 진행되었습니다. 최신 상태를 다시 불러왔습니다.');

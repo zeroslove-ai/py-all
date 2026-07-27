@@ -130,7 +130,21 @@ window.hypnosisApp = (() => {
     const add = el('button', 'choice-btn', domain === 'suggestion' ? '+ 새 개인 암시' : '+ 새 상식개변');
     if (domain === 'suggestion') {
       const current = appState.npcs?.find(npc => npc.can_add_suggestion);
-      add.disabled = !current; add.onclick = () => { if (!current) return; draft.suggestions.push({ _new:true, client_id:`draft_suggestion_${crypto.randomUUID()}`, character_id:current.character_id, strength:'weak', content:'' }); renderTab(kind); };
+      const present = (appState.npcs || []).filter(npc => npc.present_now);
+      add.disabled = !current;
+      add.onclick = () => {
+        if (!current) return;
+        const defaultStrength = (appState.strength_options || []).find(option => option.available)?.id || 'weak';
+        draft.suggestions.push({ _new:true, client_id:`draft_suggestion_${crypto.randomUUID()}`, character_id:current.character_id, strength:defaultStrength, content:'' });
+        validationIssues=[];
+        renderTab(kind);
+      };
+      if (!current) {
+        const names = present.map(npc => npc.name).filter(Boolean).join(', ');
+        body.appendChild(el('p', 'hypnosis-app-error', names
+          ? `새 개인 암시는 현재 메인 NPC로 확정된 대상에게만 등록할 수 있습니다. 현재 함께 있는 NPC: ${names}. 해당 NPC와 상호작용한 턴을 완료한 뒤 다시 열어 주세요.`
+          : '현재 함께 있는 NPC가 없어 새 개인 암시를 등록할 수 없습니다.'));
+      }
     } else add.onclick = () => { draft.csa.push({ _new:true, client_id:`draft_csa_${crypto.randomUUID()}`, strength:'weak', scope_type:'ward', content:'' }); renderTab(kind); };
     body.appendChild(add);
     const selected = domain === 'suggestion' ? selectedSuggestionIds : selectedCsaIds;
@@ -163,7 +177,28 @@ window.hypnosisApp = (() => {
     const count=(domain, operation)=>requested.filter(item=>item.domain===domain&&item.operation===operation).length;
     const summary=[['개인 암시 신규',count('suggestion','activate')],['개인 암시 수정',count('suggestion','update')],['개인 암시 삭제',count('suggestion','deactivate')],['상식개변 신규',count('csa','activate')],['상식개변 수정',count('csa','update')],['상식개변 해제',count('csa','deactivate')]].filter(([,value])=>value).map(([label,value])=>`- ${label} ${value}개`);
     const daily=count('csa','activate')+count('csa','update'); if(daily) summary.push(`상식개변 일일 사용 ${daily}회가 소비됩니다.`); summary.push('전체 변경사항은 게임 1턴으로 처리됩니다.');
-    const proceed = async () => { if (typeof window.runHypnosisStructuredAction !== 'function') return showDialog('오류','구조화 턴 실행 함수를 찾지 못했습니다.',[{label:'확인',run:()=>{}}]); isApplying=true; validationIssues=[]; refreshDraftBar(); try { const result=await api.validateAppAction(state.gameId,action); if(!result?.canonical_action||!result?.display_input) throw new Error('검증 응답이 올바르지 않습니다.'); forceCloseAfterValidation(); window.runHypnosisStructuredAction(result.canonical_action,result.display_input); } catch(error) { isApplying=false; validationIssues=Array.isArray(error.details?.issues)?error.details.issues:[{message:error.details?.error||error.message}]; const first=validationIssues[0]; const tab=first?.domain==='suggestion'?'suggestions':first?.domain==='csa'?'csa':draft.tab; renderTab(tab); const card=first?.client_id&&[...overlay.querySelectorAll('[data-client-id]')].find(node=>node.dataset.clientId===first.client_id); card?.scrollIntoView({block:'center'}); } };
+    const proceed = async () => {
+      if (typeof window.runHypnosisStructuredAction !== 'function') return showDialog('오류','구조화 턴 실행 함수를 찾지 못했습니다.',[{label:'확인',run:()=>{}}]);
+      if (state.isStreaming) return showDialog('적용할 수 없습니다.','현재 턴이 끝난 뒤 다시 적용해 주세요. 변경사항은 아직 저장되지 않았습니다.',[{label:'확인',run:()=>{}}]);
+      isApplying=true;
+      validationIssues=[];
+      refreshDraftBar();
+      try {
+        const result=await api.validateAppAction(state.gameId,action);
+        if(!result?.canonical_action||!result?.display_input) throw new Error('검증 응답이 올바르지 않습니다.');
+        forceCloseAfterValidation();
+        window.runHypnosisStructuredAction(result.canonical_action,result.display_input);
+      } catch(error) {
+        isApplying=false;
+        validationIssues=Array.isArray(error.details?.issues)?error.details.issues:[{message:error.details?.error||error.message||'변경사항을 확인하지 못했습니다.'}];
+        const first=validationIssues[0];
+        const tab=first?.domain==='suggestion'?'suggestions':first?.domain==='csa'?'csa':draft.tab;
+        renderTab(tab);
+        const card=first?.client_id&&[...overlay.querySelectorAll('[data-client-id]')].find(node=>node.dataset.clientId===first.client_id);
+        card?.scrollIntoView({block:'center'});
+        showDialog('변경사항을 적용하지 못했습니다.',`${first?.message || '변경사항을 확인하지 못했습니다.'}\n변경사항은 저장되지 않았습니다. 내용을 확인한 뒤 다시 적용해 주세요.`,[{label:'확인',run:()=>{}}]);
+      }
+    };
     showDialog('변경사항 적용',summary.join('\n'),[{label:'계속 편집',run:()=>{}},{label:'적용',run:proceed}]);
   }
 

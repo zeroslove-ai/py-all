@@ -28,6 +28,17 @@ window.hypnosisApp = (() => {
   const nameFor = (id) => appState?.npcs?.find(npc => npc.character_id === id)?.name || id;
   const copy = value => JSON.parse(JSON.stringify(value || []));
   const normalizeDraftContent = value => String(value || '').trim().replace(/\s+/g, ' ');
+  const suggestionNeedsResolution = item => {
+    if (item?._new) return true;
+    const original = (draft?.originalSuggestions || []).find(row => row.id === item?.id);
+    return Boolean(original) && (normalizeDraftContent(original.content) !== normalizeDraftContent(item.content) || original.strength !== item.strength);
+  };
+  const suggestionChance = item => {
+    if (!suggestionNeedsResolution(item) || item?._deleted) return null;
+    const npc = (appState?.npcs || []).find(row => row.character_id === item.character_id);
+    const chance = npc?.suggestion_success_chance?.[item.strength];
+    return Number.isInteger(chance) ? chance : null;
+  };
   const currentSuggestionTargets = () => (appState?.npcs || []).filter(npc => npc?.present_now === true && npc?.can_add_suggestion === true && typeof npc.character_id === 'string');
   function resolveDefaultSuggestionTarget() {
     const candidates = currentSuggestionTargets();
@@ -193,15 +204,24 @@ window.hypnosisApp = (() => {
     if (!list?.filter(item => !item._deleted).length) body.append(el('p', '', '현재 활성 항목이 없습니다.'));
     list.forEach(item => {
       const card = el('article', `hypnosis-app-effect-card${item._deleted ? ' pending-delete' : ''}`); card.dataset.clientId=item._new?item.client_id:`${domain}:${item.id}`; if (item.character_id) card.dataset.characterId=item.character_id;
-      const title = domain === 'suggestion' ? `${item.character_name || nameFor(item.character_id)} · ${item.strength_label || item.strength}` : `${item.scope_label || item.scope_type} · ${item.strength_label || item.strength}`;
+      const strengthLabel = (appState.strength_options || []).find(meta => meta.id === item.strength)?.label || item.strength_label || item.strength;
+      const title = domain === 'suggestion' ? `${item.character_name || nameFor(item.character_id)} · ${strengthLabel}` : `${item.scope_label || item.scope_type} · ${strengthLabel}`;
       const strength = el('select'); (appState.strength_options || []).forEach(meta => { const option=el('option','',meta.label); option.value=meta.id; option.selected=item.strength===meta.id; option.disabled=!meta.available && !option.selected; strength.appendChild(option); });
       const content = el('textarea'); content.value=item.content || ''; content.rows=3; strength.disabled=item._deleted; content.disabled=item._deleted;
-      strength.onchange=()=>{ item.strength=strength.value; refreshDraftBar(); }; content.oninput=()=>{ item.content=content.value; refreshDraftBar(); };
+      strength.onchange=()=>{ item.strength=strength.value; renderTab(kind); }; content.oninput=()=>{ item.content=content.value; refreshDraftBar(); }; content.onchange=()=>renderTab(kind);
       const check=el('input'); check.type='checkbox'; check.checked=selected.has(item.id || item.client_id); check.disabled=item._deleted; check.onchange=()=>{ const key=item.id||item.client_id; check.checked?selected.add(key):selected.delete(key); renderTab(kind); };
       const remove=el('button','choice-btn',item._deleted?'복구':(item._new?'취소':'해제')); remove.onclick=()=>{ if(item._deleted) item._deleted=false; else if(item._new){ const target=domain==='suggestion'?draft.suggestions:draft.csa; target.splice(target.indexOf(item),1); } else item._deleted=true; selected.delete(item.id||item.client_id); renderTab(kind); };
       if (domain === 'csa') { const scope=el('select'); (appState.scope_options||[]).forEach(meta=>{const option=el('option','',meta.available?meta.label:`${meta.label} · Lv.${meta.unlock_level}`);option.value=meta.id;option.selected=item.scope_type===meta.id;option.disabled=!meta.available&&!option.selected;scope.appendChild(option);}); scope.disabled=item._deleted; scope.onchange=()=>{item.scope_type=scope.value;refreshDraftBar();}; card.appendChild(scope); }
       const issue=validationIssues.find(entry=>entry.client_id===card.dataset.clientId); if(issue) { card.appendChild(el('p','hypnosis-app-error',[issue.message, issue.reason].filter(Boolean).join(' '))); if(issue.suggested_strength && (appState.strength_options||[]).some(meta=>meta.id===issue.suggested_strength&&meta.available)) { const quick=el('button','choice-btn',`${(appState.strength_options||[]).find(meta=>meta.id===issue.suggested_strength)?.label || issue.suggested_strength}으로 변경`); quick.onclick=()=>{item.strength=issue.suggested_strength; validationIssues=validationIssues.filter(entry=>entry!==issue); renderTab(kind);}; card.appendChild(quick); } }
-      card.append(check,el('strong','',title),item._deleted?el('span','pending-badge',domain==='suggestion'?'삭제 예정':'해제 예정'):document.createTextNode(''),strength,content,remove); body.appendChild(card);
+      card.append(check,el('strong','',title),item._deleted?el('span','pending-badge',domain==='suggestion'?'삭제 예정':'해제 예정'):document.createTextNode(''),strength,content);
+      if (domain === 'suggestion') {
+        const chance = suggestionChance(item);
+        if (chance !== null) {
+          card.appendChild(el('p', 'hypnosis-app-suggestion-chance', `예상 성공률 ${chance}% · ${item.character_name || nameFor(item.character_id)} · ${(appState.strength_options || []).find(meta => meta.id === item.strength)?.label || item.strength}`));
+          card.appendChild(el('small', '', '성공률은 어플 레벨, 대상의 순응도·최면깊이·최면저항력에 따라 결정됩니다.'));
+        }
+      }
+      card.append(remove); body.appendChild(card);
     });
   }
 

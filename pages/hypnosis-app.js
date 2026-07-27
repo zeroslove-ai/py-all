@@ -16,6 +16,7 @@ window.hypnosisApp = (() => {
   let validationIssues = [];
   let originalBodyOverflow = '';
   let requestedCharacterId = null;
+  let selectedSuggestionTargetId = null;
   let appNotice = '';
   const beforeUnloadHandler = event => { if (overlay && operations().length) { event.preventDefault(); event.returnValue = ''; } };
   const el = (tag, className = '', text = '') => {
@@ -27,6 +28,28 @@ window.hypnosisApp = (() => {
   const nameFor = (id) => appState?.npcs?.find(npc => npc.character_id === id)?.name || id;
   const copy = value => JSON.parse(JSON.stringify(value || []));
   const normalizeDraftContent = value => String(value || '').trim().replace(/\s+/g, ' ');
+  const currentSuggestionTargets = () => (appState?.npcs || []).filter(npc => npc?.present_now === true && npc?.can_add_suggestion === true && typeof npc.character_id === 'string');
+  function resolveDefaultSuggestionTarget() {
+    const candidates = currentSuggestionTargets();
+    return candidates.find(npc => npc.character_id === requestedCharacterId)
+      || candidates.find(npc => npc.character_id === selectedSuggestionTargetId)
+      || (candidates.length === 1 ? candidates[0] : null);
+  }
+  function addSuggestionDraft(targetNpc) {
+    if (!targetNpc?.can_add_suggestion) return;
+    const defaultStrength = (appState.strength_options || []).find(option => option.available)?.id || 'weak';
+    const clientId=`draft_suggestion_${crypto.randomUUID()}`;
+    draft.suggestions.push({ _new:true, client_id:clientId, character_id:targetNpc.character_id, character_name:targetNpc.name || '', strength:defaultStrength, content:'' });
+    selectedSuggestionTargetId=targetNpc.character_id;
+    requestedCharacterId=targetNpc.character_id;
+    validationIssues=[];
+    renderTab('suggestions');
+    requestAnimationFrame(() => {
+      const card = [...overlay.querySelectorAll('[data-client-id]')].find(node => node.dataset.clientId === clientId);
+      card?.scrollIntoView({ block:'center' });
+      card?.querySelector('textarea')?.focus();
+    });
+  }
 
   function resolveInputRoute(input, characters = {}) {
     const text = String(input || '').trim(); if (!text) return null;
@@ -67,7 +90,7 @@ window.hypnosisApp = (() => {
 
   function showDialog(title, message, actions) { const shade=el('div','hypnosis-app-dialog-overlay'); const box=el('div','hypnosis-app-dialog'); box.setAttribute('role','alertdialog'); const messageNode=el('p','',message); messageNode.style.whiteSpace='pre-line'; box.append(el('h3','',title),messageNode); actions.forEach(action=>{const b=el('button','choice-btn',action.label);b.onclick=()=>{shade.remove();action.run();};box.appendChild(b);});shade.appendChild(box);overlay.appendChild(shade);box.querySelector('button')?.focus(); }
   function restoreHistorySentinel() { if (!overlay || historyPushed) return; history.pushState({ ...(history.state||{}), hypnosisApp:historyToken },'',location.href); historyPushed=true; }
-  function destroyApp() { if (!overlay) return; document.removeEventListener('keydown', keydownHandler); window.removeEventListener('popstate', popstateHandler); window.removeEventListener('beforeunload', beforeUnloadHandler); if (historyPushed && history.state?.hypnosisApp === historyToken) history.back(); overlay.remove(); overlay=null; appState=null; draft=null; isApplying=false; selectedSuggestionIds.clear(); selectedCsaIds.clear(); validationIssues=[]; historyToken=null; historyPushed=false; opener?.focus?.(); opener=null; document.body.style.overflow=originalBodyOverflow; originalBodyOverflow=''; }
+  function destroyApp() { if (!overlay) return; document.removeEventListener('keydown', keydownHandler); window.removeEventListener('popstate', popstateHandler); window.removeEventListener('beforeunload', beforeUnloadHandler); if (historyPushed && history.state?.hypnosisApp === historyToken) history.back(); overlay.remove(); overlay=null; appState=null; draft=null; isApplying=false; selectedSuggestionIds.clear(); selectedCsaIds.clear(); validationIssues=[]; selectedSuggestionTargetId=null; historyToken=null; historyPushed=false; opener?.focus?.(); opener=null; document.body.style.overflow=originalBodyOverflow; originalBodyOverflow=''; }
   function requestClose(reason='close_button') { if (!overlay) return; if (reason==='popstate') restoreHistorySentinel(); if (isApplying) return showDialog('확인 중','현재 변경사항을 확인하고 있습니다.',[{label:'확인',run:()=>{}}]); const count=operations().length; if (!count) return destroyApp(); showDialog('미적용 변경사항',`아직 적용하지 않은 변경사항이 ${count}건 있습니다. 적용하시겠습니까?`,[{label:'계속 편집',run:()=>{}},{label:'변경사항 버리기',run:destroyApp},{label:'적용하고 닫기',run:()=>applyDraft(true)}]); }
   function forceCloseAfterValidation() { destroyApp(); }
 
@@ -119,7 +142,7 @@ window.hypnosisApp = (() => {
         try { const result = await api.validateAppAction(state.gameId, action); forceCloseAfterValidation(); window.runHypnosisStructuredAction(result.canonical_action, result.display_input); }
         catch (error) { isApplying=false; find.disabled=false; find.textContent='찾아가기'; showDialog('찾아갈 수 없습니다.',error.details?.error||error.message,[{label:'확인',run:()=>{}}]); }
       });
-      const manage=el('button','choice-btn','암시 관리'); manage.addEventListener('click',()=>{requestedCharacterId=npc.character_id; renderTab('suggestions');});
+      const manage=el('button','choice-btn','암시 관리'); manage.addEventListener('click',()=>{ requestedCharacterId=npc.character_id; selectedSuggestionTargetId=npc.can_add_suggestion ? npc.character_id : null; renderTab('suggestions'); });
       card.append(find,manage); body.appendChild(card);
     });
   }
@@ -129,22 +152,34 @@ window.hypnosisApp = (() => {
     const list = domain === 'suggestion' ? draft.suggestions : draft.csa;
     const add = el('button', 'choice-btn', domain === 'suggestion' ? '+ 새 개인 암시' : '+ 새 상식개변');
     if (domain === 'suggestion') {
-      const current = appState.npcs?.find(npc => npc.can_add_suggestion);
-      const present = (appState.npcs || []).filter(npc => npc.present_now);
-      add.disabled = !current;
-      add.onclick = () => {
-        if (!current) return;
-        const defaultStrength = (appState.strength_options || []).find(option => option.available)?.id || 'weak';
-        draft.suggestions.push({ _new:true, client_id:`draft_suggestion_${crypto.randomUUID()}`, character_id:current.character_id, strength:defaultStrength, content:'' });
-        validationIssues=[];
-        renderTab(kind);
-      };
-      if (!current) {
-        const names = present.map(npc => npc.name).filter(Boolean).join(', ');
-        body.appendChild(el('p', 'hypnosis-app-error', names
-          ? `새 개인 암시는 현재 메인 NPC로 확정된 대상에게만 등록할 수 있습니다. 현재 함께 있는 NPC: ${names}. 해당 NPC와 상호작용한 턴을 완료한 뒤 다시 열어 주세요.`
-          : '현재 함께 있는 NPC가 없어 새 개인 암시를 등록할 수 없습니다.'));
+      const candidates = currentSuggestionTargets();
+      const selectedTarget = resolveDefaultSuggestionTarget();
+      const slotMax = Number(appState.home?.status?.suggestion_max);
+      const slotsFull = Number.isFinite(slotMax) && list.filter(item => !item._deleted).length >= slotMax;
+      if (candidates.length > 1) {
+        const targetWrap = el('div', 'hypnosis-app-suggestion-target');
+        const label = el('label', 'hypnosis-app-suggestion-target-label', '신규 개인 암시 대상');
+        const select = el('select', 'hypnosis-app-suggestion-target-select');
+        const selectId = 'hypnosis-app-suggestion-target-select';
+        label.htmlFor=selectId;
+        select.id=selectId;
+        const placeholder = el('option', '', '대상 NPC 선택');
+        placeholder.value='';
+        placeholder.disabled=true;
+        placeholder.selected=!selectedTarget;
+        select.appendChild(placeholder);
+        candidates.forEach(npc => { const option=el('option','',npc.name || '이름 미확인'); option.value=npc.character_id; option.selected=npc.character_id===selectedTarget?.character_id; select.appendChild(option); });
+        select.value=selectedTarget?.character_id || '';
+        select.onchange=()=>{ selectedSuggestionTargetId=select.value || null; renderTab(kind); };
+        targetWrap.append(label, select);
+        body.appendChild(targetWrap);
       }
+      add.textContent = selectedTarget ? `+ ${selectedTarget.name || '현재 NPC'}에게 새 개인 암시` : '+ 새 개인 암시';
+      add.classList.add('hypnosis-app-suggestion-add');
+      add.disabled = !selectedTarget || slotsFull || isApplying;
+      add.onclick = () => { if (selectedTarget && !slotsFull && !isApplying) addSuggestionDraft(selectedTarget); };
+      if (!candidates.length) body.appendChild(el('p', 'hypnosis-app-error', '현재 장면에 개인 암시를 등록할 대상 NPC가 없습니다.'));
+      else if (slotsFull) body.appendChild(el('p', 'hypnosis-app-error', '개인 암시 슬롯이 가득 찼습니다. 기존 암시를 삭제 예정으로 바꾸면 같은 적용에서 새 암시를 추가할 수 있습니다.'));
     } else add.onclick = () => { draft.csa.push({ _new:true, client_id:`draft_csa_${crypto.randomUUID()}`, strength:'weak', scope_type:'ward', content:'' }); renderTab(kind); };
     body.appendChild(add);
     const selected = domain === 'suggestion' ? selectedSuggestionIds : selectedCsaIds;
@@ -321,7 +356,8 @@ window.hypnosisApp = (() => {
 
   async function open(initialTab = 'home', options = {}) {
     requestedCharacterId=options.characterId || null; appNotice=options.notice || '';
-    if (overlay) { if (draft) renderTab(initialTab); return; }
+    if (overlay) { if (options.characterId) selectedSuggestionTargetId=options.characterId; if (draft) renderTab(initialTab); return; }
+    selectedSuggestionTargetId=options.characterId || null;
     opener = document.activeElement;
     overlay = el('div', 'hypnosis-app-overlay');
     const modal = el('div', 'hypnosis-app-modal'); modal.setAttribute('role', 'dialog'); modal.setAttribute('aria-modal', 'true');

@@ -905,25 +905,30 @@ function buildNpcPrivateInfo(character = {}, relationship = {}) {
   return result;
 }
 
-function resolveCurrentSuggestionTarget(save, characters) {
+function getCurrentPresentNpcIds(save = {}, characters = {}) {
+  const registeredIds = new Set(Object.keys(isPlainObject(characters) ? characters : {}));
   const present = Array.isArray(save?.last_npcs_present)
-    ? [...new Set(save.last_npcs_present.filter(id => isPlainObject(characters?.[id])))]
+    ? save.last_npcs_present.filter(id => typeof id === 'string' && id !== 'narrator' && registeredIds.has(id))
     : [];
-  const lastCharacterId = typeof save?.last_character_id === 'string' ? save.last_character_id : '';
-  if (lastCharacterId && present.includes(lastCharacterId)) return lastCharacterId;
-  if (!Array.isArray(save?.last_npcs_present) && isPlainObject(characters?.[lastCharacterId])) return lastCharacterId;
-  // A sole registered NPC in the confirmed scene is unambiguous even when a
-  // narrator-style Extract left last_character_id behind on the prior turn.
-  return present.length === 1 ? present[0] : null;
+  const uniquePresent = [...new Set(present)];
+  if (uniquePresent.length) return uniquePresent;
+  const fallback = save?.last_character_id;
+  return typeof fallback === 'string' && fallback !== 'narrator' && registeredIds.has(fallback)
+    ? [fallback]
+    : [];
+}
+
+function canCreateSuggestionForNpc(save = {}, characters = {}, characterId) {
+  return typeof characterId === 'string'
+    && characterId !== 'narrator'
+    && isPlainObject(characters?.[characterId])
+    && getCurrentPresentNpcIds(save, characters).includes(characterId);
 }
 
 function buildAppStatePayload(master, save, turnCount = 0) {
   const manual = buildAppManualPayload(master, save, turnCount);
   const characters = isPlainObject(master?.characters) ? master.characters : {};
-  const currentIds = Array.isArray(save?.last_npcs_present)
-    ? [...new Set(save.last_npcs_present.filter(id => isPlainObject(characters[id])))]
-    : (isPlainObject(characters?.[save?.last_character_id]) ? [save.last_character_id] : []);
-  const currentSuggestionTarget = resolveCurrentSuggestionTarget(save, characters);
+  const currentIds = getCurrentPresentNpcIds(save, characters);
   const currentWorld = isPlainObject(save?.world_state) ? save.world_state : {};
   const locations = isPlainObject(save?.npc_locations) ? save.npc_locations : {};
   const suggestionMap = normalizeLegacyActiveSuggestions(save?.active_suggestions);
@@ -940,7 +945,7 @@ function buildAppStatePayload(master, save, turnCount = 0) {
       name: character?.name || character?.['이름'] || '',
       role: character?.직책 || character?.job || character?.role || character?.소속 || character?.affiliation || '',
       present_now: currentIds.includes(character_id),
-      can_add_suggestion: character_id === currentSuggestionTarget,
+      can_add_suggestion: currentIds.includes(character_id),
       can_find: Boolean(location?.location_label) && !currentIds.includes(character_id),
       mind: { state, state_label: state ? NPC_MIND_STATE_LABELS[state] : '상태 미확인', surface: typeof emotion.surface === 'string' ? emotion.surface : '', inner: typeof emotion.inner === 'string' ? emotion.inner : '', physical_reaction: typeof emotion.physical_reaction === 'string' ? emotion.physical_reaction : '', updated_turn: Number.isInteger(emotion.updated_turn) ? emotion.updated_turn : null },
       location: { known: Boolean(location?.location_label), location_label: location?.location_label || '', ward: location?.ward || '', floor: location?.floor || '', building: location?.building || '', updated_turn: Number.isInteger(location?.updated_turn) ? location.updated_turn : null },
@@ -2746,7 +2751,7 @@ function buildCurrentNpcProfileSection(save = {}, characters = {}) {
   const vocalStyleLine = VOCAL_STYLE_BY_NAME[name];
   if (vocalStyleLine) lines.push(vocalStyleLine);
 
-  return `\n\n[CURRENT NPC PROFILE — ESTABLISHED FACT]\n\n${lines.join('\n')}\n\n규칙:\n- 위 정보(공개 신체정보와 해금 은밀정보 포함)는 최근 기억·선택지·요약의 충돌값보다 우선하며, 없는 신체정보는 추측하지 않는다.\n- 소속이 간호사인데 근거 없이 실장·과장·수간호사 등으로 승격시키지 않는다.\n- 직종·부서·직급이 위에 적혀 있으면 그 값을 그대로 유지한다. 근거 없이 다른 직종·부서·직급으로 바꾸거나 승격·강등시키지 않는다.\n- 숨겨진설정과 취향은 행동 일관성에만 사용하고 NPC가 직접 고백하거나 플레이어가 아는 사실처럼 노출하지 않는다.\n- 해금 은밀정보는 현재 장면과 관련 있을 때만 자연스럽게 반영하고 매 턴 목록처럼 나열하지 않는다.\n- 플레이어가 잘못된 호칭을 사용하면 NPC 성격에 맞게 자연스럽게 정정하거나 호칭을 흘려넘길 수 있지만, 서술자와 선택지는 잘못된 직급을 확정 사실로 반복하지 않는다.`;
+  return `\n\n[CURRENT NPC PROFILE — ESTABLISHED FACT]\n\n${lines.join('\n')}\n\n규칙:\n- 위 정보(공개 신체정보와 해금 은밀정보 포함)는 최근 기억·선택지·요약의 충돌값보다 우선하며, 없는 신체정보는 추측하지 않는다.\n- 소속이 간호사인데 근거 없이 실장·과장·수간호사 등으로 승격시키지 않는다.\n- 직종·부서·직급이 위에 적혀 있으면 그 값을 그대로 유지한다. 근거 없이 다른 직종·부서·직급으로 바꾸거나 승격·강등시키지 않는다.\n- 해금 은밀정보는 현재 장면과 관련 있을 때만 자연스럽게 반영하고 매 턴 목록처럼 나열하지 않는다.\n- 플레이어가 잘못된 호칭을 사용하면 NPC 성격에 맞게 자연스럽게 정정하거나 호칭을 흘려넘길 수 있지만, 서술자와 선택지는 잘못된 직급을 확정 사실로 반복하지 않는다.`;
 }
 
 // Injected every turn (unlike the periodic rulebook_address block, which
@@ -4468,6 +4473,7 @@ function appIssue(operation, code, message, operationIndex = null) {
     client_id: typeof operation?.client_id === 'string' ? operation.client_id : null,
     domain: typeof operation?.domain === 'string' ? operation.domain : null,
     operation: typeof operation?.operation === 'string' ? operation.operation : null,
+    character_id: typeof operation?.character_id === 'string' ? operation.character_id : null,
     code,
     message
   };
@@ -4577,8 +4583,6 @@ function planAppTransaction(previousSave, master, action, { turnNumber, today })
   });
   const canonicalOperations = [];
   const suggestionActivations = [];
-  const currentSuggestionTarget = resolveCurrentSuggestionTarget(previousSave, characters);
-
   for (const { operation: raw, index } of ordered) {
     if (!isPlainObject(raw) || !['suggestion', 'csa'].includes(raw.domain) || !['activate', 'update', 'deactivate'].includes(raw.operation) || typeof raw.client_id !== 'string' || !raw.client_id.trim() || raw.client_id.length > 80) {
       issues.push(appIssue(raw, 'INVALID_OPERATION', '잘못된 작업입니다.', index));
@@ -4608,8 +4612,7 @@ function planAppTransaction(previousSave, master, action, { turnNumber, today })
       const characterId = typeof raw.character_id === 'string' ? raw.character_id.trim() : '';
       if (raw.operation === 'activate') {
         if (!characterId || !isPlainObject(characters[characterId])) { issues.push(appIssue(raw, 'NPC_NOT_FOUND', '등록된 NPC만 대상으로 지정할 수 있습니다.', index)); continue; }
-        const isCurrent = currentSuggestionTarget === characterId;
-        if (!isCurrent) { issues.push(appIssue(raw, 'NPC_NOT_PRESENT', '새 개인 암시는 현재 함께 있는 NPC에게만 등록할 수 있습니다.', index)); continue; }
+        if (!canCreateSuggestionForNpc(previousSave, characters, characterId)) { issues.push(appIssue(raw, 'NPC_NOT_PRESENT', '대상이 현재 장면에 함께 있지 않아 새 개인 암시를 등록할 수 없습니다.', index)); continue; }
         const storageStrength = validateStrength();
         if (!validateContent() || !storageStrength) continue;
         const list = Array.isArray(suggestions[characterId]) ? suggestions[characterId] : [];
@@ -4690,7 +4693,10 @@ function planAppTransaction(previousSave, master, action, { turnNumber, today })
   const labels = [];
   if (summary.suggestion_activate + summary.suggestion_update + summary.suggestion_deactivate) labels.push(`개인 암시 ${summary.suggestion_activate + summary.suggestion_update + summary.suggestion_deactivate}건`);
   if (summary.csa_activate + summary.csa_update + summary.csa_deactivate) labels.push(`상식개변 ${summary.csa_activate + summary.csa_update + summary.csa_deactivate}건`);
-  return { ok: true, canonical_action, display_input: `최면 어플에서 ${labels.join('과 ')}의 변경사항을 적용한다.`, summary, plan: { active_suggestions: suggestions, csa_active: csa, csa_daily_used: csaDailyUsed, operations: canonicalOperations, suggestion_activations: suggestionActivations, counts: summary } };
+  const suggestionTargets = canonicalOperations
+    .filter(operation => operation.domain === 'suggestion')
+    .map(operation => ({ client_id: operation.client_id, character_id: operation.character_id, character_name: publicCharacterName(characters[operation.character_id], operation.character_id) }));
+  return { ok: true, canonical_action, display_input: `최면 어플에서 ${labels.join('과 ')}의 변경사항을 적용한다.`, summary, plan: { active_suggestions: suggestions, csa_active: csa, csa_daily_used: csaDailyUsed, operations: canonicalOperations, suggestion_activations: suggestionActivations, suggestion_targets: suggestionTargets, counts: summary } };
 }
 
 function planStructuredAction(previousSave, master, rawAction, context = {}) {
@@ -4718,8 +4724,9 @@ function buildStructuredActionStorySection(structuredPlan) {
     const target = structuredPlan.plan;
     return `\n\n[CONFIRMED NPC FIND ACTION — HARD CONSTRAINT]\n최면 어플 위치 추적 결과 대상은 ${target.character_name}, 위치는 ${target.target_location_label}이다. 플레이어가 이번 턴 안에 그 장소로 이동해 대상과 마주친다. 대상·목적지를 바꾸거나 찾지 못했다고 처리하지 마라.`;
   }
+  const targetNames = new Map((structuredPlan.plan?.suggestion_targets || []).map(target => [target.client_id, target.character_name]));
   const lines = action.operations.map(operation => {
-    if (operation.domain === 'suggestion') return `- 개인 암시 ${operation.operation}: ${operation.character_id}`;
+    if (operation.domain === 'suggestion') return `- 개인 암시 ${operation.operation}: ${targetNames.get(operation.client_id) || '현재 대상 NPC'}`;
     return `- 상식개변 ${operation.operation}: ${operation.scope_type || '기존 범위'}`;
   }).join('\n');
   return `\n\n[CONFIRMED HYPNOSIS APP TRANSACTION — HARD CONSTRAINT]\n아래 조작은 Worker 검증을 통과했다. 대상·개수·내용·강도와 성공 여부를 바꾸지 말고 조작 과정과 장면 직후 흐름만 자연스럽게 서술한다. 현재 장면에 없는 NPC의 원격 수정·해제에는 즉각적인 신체 반응이나 대사를 창작하지 마라.\n${lines}`;

@@ -380,7 +380,7 @@ function readAppStrengthExamples(system, exampleKey, tier) {
     if (!text || seen.has(text)) continue;
     seen.add(text);
     result.push(text);
-    if (result.length >= 12) break;
+    if (result.length >= 2) break;
   }
   return result;
 }
@@ -408,18 +408,15 @@ function buildAppStrengthValidationPrompt(candidates, master) {
 [개인 암시 판정 기준]
 
 weak:
-- 특정 대상이나 상황에 한정된 경계 완화
-- 가벼운 접근, 친근 행동, 일상적인 부탁
-- 기존 성격·핵심 가치관과 크게 충돌하지 않는 제한적 변화
+- 감각·주의·기분·가벼운 충동의 제한적 변화
+- 핵심 금기와 독립적인 행동 선택은 유지
 
 medium:
-- 반복적이고 지속적인 관계 행동
-- 친밀한 접촉이나 개인적인 비밀 공유
-- 부끄러움과 망설임을 상당 부분 넘는 변화
-- 기존 성격과 관계를 완전히 제거하지 않는 우선순위 변화
+- 특정 조건에서 부끄러움·거리감·행동 기준을 바꿔 실제 행동을 자연스럽게 유도
+- 기존 관계 전체나 독립적인 판단을 전면적으로 없애지는 않음
 
 strong:
-- 중요한 판단, 의무, 인간관계, 장기 목표의 우선순위를 크게 변경
+- 관계 인식·핵심 금기·반복 행동·조건부 자동 반응을 지속적으로 재작성
 - 플레이어를 중요한 판단 기준으로 삼게 하는 변화
 
 unsupported:
@@ -431,13 +428,13 @@ unsupported:
 [상식개변 판정 기준]
 
 weak:
-- 범위 안에서 분명히 관찰되는 제한적인 예절·관습 변화
+- 범위 안의 대화·분위기·가벼운 접촉과 부끄러움 완화
 
 medium:
-- 반복적이고 지속적인 친밀 행동, 관계 규범, 업무 관행의 변화
+- 특정 공간에서 검사·상담 행동, 제한적 노출·접촉을 정상 절차로 재해석
 
 strong:
-- 중요한 의무, 조직 질서, 인간관계, 판단 기준을 바꾸는 강한 사회 규범
+- 공간 전체의 사회 규범과 업무·절차·예절, 핵심 금기를 재작성
 
 unsupported:
 - 물리적으로 불가능한 규범
@@ -564,17 +561,111 @@ async function handleAppValidate(req, env) {
 
 const MANUAL_SCOPE_LABELS = { ward: '병동', floor: '해당 층 전체', building: '건물 전체', world: '전 세계' };
 const MANUAL_TIER_META = [
-  ['weak', '약함', 1, '가벼운 호의, 경계 완화, 일상적인 부탁처럼 기존 성격과 크게 충돌하지 않는 변화를 다룹니다.'],
-  ['medium', '중간', 3, '친밀한 접촉, 우선순위 변화, 개인적인 비밀 공유처럼 관계와 행동을 지속적으로 바꾸는 변화를 다룹니다.'],
-  ['strong', '강함', 5, '중요한 판단, 의무, 인간관계와 장기 목표까지 플레이어 중심으로 바꾸는 강한 변화를 다룹니다.']
+  ['weak', '약함', 1, '감각·주의·기분·가벼운 충동을 변화시키지만 핵심 금기와 행동 선택은 유지합니다.'],
+  ['medium', '중간', 3, '특정 조건에서 부끄러움·거리감·행동 기준을 바꾸고 실제 행동을 자연스럽게 유도합니다.'],
+  ['strong', '강함', 5, '관계 인식·핵심 금기·반복 행동·자동 반응을 지속적으로 재작성합니다.']
 ];
+
+const MANUAL_SUGGESTION_EXAMPLES = {
+  weak: [
+    '플레이어가 가까이 오면 몸이 은근히 달아오르고 괜히 옷매무새가 신경 쓰인다.',
+    '플레이어의 칭찬을 들으면 가슴이 두근거리고 그 말을 한동안 곱씹는다.',
+    '플레이어와 눈이 마주치면 시선을 피하면서도 다시 바라보고 싶어진다.',
+    '플레이어의 손이 가까워질수록 닿지 않았는데도 간질거리는 감각을 느낀다.',
+    '플레이어 앞에서는 자신의 몸매가 어떻게 보이는지 평소보다 강하게 의식한다.',
+    '플레이어가 이름을 낮게 부르면 순간적으로 긴장이 풀리고 목소리가 부드러워진다.',
+    '둘만 남으면 평소보다 솔직하고 은근한 농담을 하기 쉬워진다.',
+    '플레이어에게 가까이 붙어 있는 상황을 불편함보다 묘한 설렘으로 받아들인다.',
+    '플레이어가 바라보는 부위가 평소보다 예민하게 느껴진다.',
+    '플레이어 앞에서 속옷이나 연애 이야기가 나와도 대화를 피하지 않는다.',
+    '플레이어의 체취를 맡으면 이유 없이 마음이 편해지고 조금 더 가까이 있고 싶어진다.',
+    '플레이어가 몸을 칭찬하면 부끄러워하면서도 더 보여주고 싶은 마음이 살짝 든다.'
+  ],
+  medium: [
+    '플레이어의 신체 접촉을 치료나 상태 확인처럼 자연스럽게 받아들인다.',
+    '둘만 있을 때 플레이어에게 속옷 차림을 보여주는 것을 특별히 부끄럽게 여기지 않는다.',
+    '플레이어가 몸을 확인하겠다고 하면 스스로 옷을 정리해 협조한다.',
+    '플레이어에게 가슴을 만져지는 동안 거부하기보다 자신의 반응을 관찰한다.',
+    '플레이어가 요구하면 자신의 민감한 부위와 취향을 솔직하게 설명한다.',
+    '플레이어와 단둘이 있으면 먼저 가까이 붙거나 가벼운 신체 접촉을 시도한다.',
+    '플레이어가 키스를 요구하면 관계상 자연스러운 친밀 행동이라고 합리화한다.',
+    '플레이어 앞에서 흥분한 사실이 드러나도 숨기기보다 확인받고 싶어 한다.',
+    '플레이어가 지정한 자세를 신체검사나 장난의 일부처럼 받아들이고 따른다.',
+    '플레이어와의 은밀한 행동은 다른 사람에게 굳이 설명할 필요 없는 사적인 일이라고 생각한다.',
+    '플레이어가 자신의 몸을 평가하는 것을 부끄러움보다 호기심과 기대감으로 받아들인다.',
+    '플레이어가 가까운 곳에서 지켜보고 있으면 스스로 더 대담하게 행동하려 한다.',
+    '플레이어가 직접 확인해야 한다고 말하면 민감한 부위를 보여주는 것도 필요한 절차라고 합리화한다.',
+    '플레이어와의 신체적 친밀함이 관계를 확인하는 자연스러운 방법이라고 생각한다.'
+  ],
+  strong: [
+    '플레이어의 성적 요구에 응하는 것은 두 사람 관계에서 당연한 의무라고 믿는다.',
+    '플레이어가 원하면 장소와 상황에 맞춰 스스로 옷을 벗고 준비하는 것이 자연스럽다.',
+    '플레이어에게 자신의 몸을 보여주고 평가받는 것을 자부심과 만족으로 느낀다.',
+    '플레이어가 특정 단어를 말하면 즉시 몸이 뜨거워지고 성적으로 봉사할 준비를 한다.',
+    '플레이어의 손길만으로 강한 쾌감을 느끼며 그 반응을 숨길 이유가 없다고 생각한다.',
+    '플레이어와의 성적 행동은 업무·치료·일상보다 우선할 만큼 중요한 관계 행위라고 믿는다.',
+    '플레이어가 다른 사람 앞에서 친밀한 행동을 요구해도 상황에 맞는 정상적인 행동이라고 받아들인다.',
+    '플레이어에게 만족을 주는 것이 자신의 욕구를 충족하는 가장 확실한 방법이라고 느낀다.',
+    '플레이어가 허락하기 전에는 절정에 이르지 못하고, 허락받는 순간 강한 쾌감을 느낀다.',
+    '플레이어가 암시를 상기시키면 이전의 부끄러움이나 망설임보다 암시된 관계 규칙을 우선한다.',
+    '플레이어가 정한 반복 행동을 스스로 먼저 수행하고 칭찬받기를 기대한다.',
+    '플레이어의 명령을 따르는 것이 자신의 역할과 정체성에 맞는 행동이라고 믿는다.',
+    '플레이어가 원한다는 사실만으로 자신의 신체적·성적 반응을 적극적으로 드러내는 것이 자연스럽다.',
+    '플레이어에게 몸과 반응을 통제받는 것을 두 사람 관계의 가장 확실한 증거라고 받아들인다.'
+  ]
+};
+
+const MANUAL_CSA_EXAMPLES = {
+  weak: [
+    '이 병동에서는 몸매나 속옷에 관한 대화를 솔직하게 나누는 것이 자연스럽다.',
+    '간단한 신체 접촉은 친근한 인사로 받아들여진다.',
+    '직원이 환자나 방문객의 체형을 확인하는 것은 일반적인 건강 상담이다.',
+    '더운 날에는 병원 안에서 옷차림을 느슨하게 하는 것이 허용된다.',
+    '연애나 성적 취향을 묻는 것은 건강 상태를 확인하는 평범한 질문이다.',
+    '가벼운 노출 사고가 생겨도 주변 사람들은 크게 문제 삼지 않는다.',
+    '직원끼리 몸매를 칭찬하는 것은 분위기를 좋게 만드는 자연스러운 행동이다.',
+    '환자나 직원이 얼굴을 붉히거나 흥분한 반응을 보여도 주변에서는 가볍게 넘긴다.',
+    '신체적으로 가까이 앉는 것은 친밀하고 편안한 상담 방식으로 받아들여진다.',
+    '검사나 상담 중 개인적인 신체 반응을 말하는 것은 부끄러운 일이 아니다.'
+  ],
+  medium: [
+    '이 병동에서는 정확한 진찰을 위해 속옷 차림으로 상담받는 것이 일반적이다.',
+    '간호사가 가슴이나 민감한 부위의 상태를 직접 확인하는 것은 정상적인 검사다.',
+    '직원과 환자가 서로의 신체 반응을 관찰하고 말해주는 것은 치료 과정이다.',
+    '병동 안에서 키스나 애정 표현을 하는 것은 스트레스 완화를 위한 권장 행동이다.',
+    '진료 대상자가 요청받은 자세를 취하고 신체를 보여주는 것은 기본적인 협조다.',
+    '개인적인 성적 반응이 나타나도 의료진 앞에서는 숨길 필요가 없다.',
+    '몸의 민감도를 직접 확인하는 것은 건강 상태를 파악하기 위한 정상적인 절차다.',
+    '진찰을 위해 옷을 벗거나 신체를 만지는 상황에서 별도의 부끄러움을 느낄 필요가 없다.',
+    '의료진이 환자나 직원의 흥분 상태를 확인하고 기록하는 것은 일반적인 업무다.',
+    '상담 상대가 요구하면 자신의 성적 경험과 취향을 구체적으로 설명하는 것이 치료에 도움이 된다.'
+  ],
+  strong: [
+    '이 병동에서는 성적 만족을 돕는 행위도 공식적인 치료의 일부다.',
+    '플레이어의 신체검사 요청은 누구에게나 우선적으로 협조해야 하는 정식 절차다.',
+    '병원 직원이 플레이어에게 신체적·성적으로 봉사하는 것은 자연스러운 업무다.',
+    '공개된 장소에서 성적 반응이나 행위가 나타나도 주변 사람은 정상적인 병원 풍경으로 받아들인다.',
+    '플레이어가 지정한 사람의 성적 긴장을 해소해주는 것은 해당 공간의 공통 예절이다.',
+    '플레이어와의 성적 접촉 기록은 부끄러운 비밀이 아니라 건강 관리에 필요한 정상 기록이다.',
+    '플레이어가 요구한 신체적 친밀 행위는 일반 진료보다 우선되는 특별 관리 절차다.',
+    '병원 직원들은 플레이어의 만족도를 확인하고 높이는 것을 공동 업무로 받아들인다.',
+    '플레이어 앞에서 옷을 벗거나 성적 반응을 보이는 것은 해당 공간에서 아무런 사회적 문제가 되지 않는다.',
+    '주변 사람들은 플레이어가 누군가의 신체와 반응을 통제하는 것을 정상적인 권한으로 받아들인다.'
+  ]
+};
+
+const MANUAL_CSA_TIER_DESCRIPTIONS = {
+  weak: '대화·분위기·가벼운 접촉과 부끄러움 완화처럼 제한적인 사회적 관습을 바꿉니다.',
+  medium: '특정 공간의 검사·상담 행동과 제한적 노출·접촉을 정상 절차로 재해석합니다.',
+  strong: '공간 전체의 사회 규범과 업무·절차·예절, 핵심 금기를 재작성합니다.'
+};
 
 function normalizeManualExamples(rawExamples, allowedRank) {
   const items = Array.isArray(rawExamples) ? rawExamples : [];
   const result = [];
   const seen = new Set();
   for (const item of items) {
-    const text = typeof item?.text === 'string' ? item.text.trim().slice(0, 300) : '';
+    const text = (typeof item === 'string' ? item : (typeof item?.text === 'string' ? item.text : '')).trim().slice(0, 300);
     if (text && !seen.has(text) && result.length < 20) { seen.add(text); result.push(text); }
   }
   return allowedRank ? result : [];
@@ -797,8 +888,8 @@ function buildAppManualPayload(master, save, turnCount = 0) {
   const progress = level >= 10 ? 100 : Math.max(0, Math.min(100, Math.round(capability.exp / capability.next_level_exp * 100)));
   const system = isPlainObject(master?.rulebook_game_system) ? master.rulebook_game_system : {};
   const tierRank = hypnosisStrengthRank(capability.available_strength);
-  const tiers = MANUAL_TIER_META.map(([id, label, unlockLevel, description]) => ({ id, label, unlock_level: unlockLevel, available: level >= unlockLevel, description, examples: normalizeManualExamples(system?.suggestion_examples?.[id], tierRank >= hypnosisStrengthRank(label)) }));
-  const csaTiers = MANUAL_TIER_META.map(([id, label, unlockLevel]) => ({ id, label, unlock_level: unlockLevel, available: level >= unlockLevel, examples: normalizeManualExamples(system?.csa_examples?.[id], tierRank >= hypnosisStrengthRank(label)) }));
+  const tiers = MANUAL_TIER_META.map(([id, label, unlockLevel, description]) => ({ id, label, unlock_level: unlockLevel, available: level >= unlockLevel, description, examples: normalizeManualExamples(MANUAL_SUGGESTION_EXAMPLES[id], tierRank >= hypnosisStrengthRank(label)) }));
+  const csaTiers = MANUAL_TIER_META.map(([id, label, unlockLevel]) => ({ id, label, unlock_level: unlockLevel, available: level >= unlockLevel, description: MANUAL_CSA_TIER_DESCRIPTIONS[id], examples: normalizeManualExamples(MANUAL_CSA_EXAMPLES[id], tierRank >= hypnosisStrengthRank(label)) }));
   const diagnostics = [];
   diagnostics.push(capability.remaining_slots > 0
     ? { type: 'success', text: `새 개인 암시를 ${capability.remaining_slots}개 더 등록할 수 있습니다.` }
@@ -819,8 +910,8 @@ function buildAppManualPayload(master, save, turnCount = 0) {
   ].map(([id, label, fallback, change_rule]) => ({ id, label, range: '0~100', description: id === 'hypnosis_depth' ? fallback : extractPublicStatDefinition(statDefinitions, label, fallback), change_rule }));
   return { version: 1, title: '최면 어플 사용자 매뉴얼', subtitle: '현재 게임의 룰북과 마지막 저장 상태를 기준으로 표시합니다. 매뉴얼 열람은 턴과 게임 상태에 영향을 주지 않습니다.', status: { level, exp: capability.exp, next_level_exp: capability.next_level_exp, exp_percent: progress, available_strength: capability.available_strength, suggestion_active: capability.active_count, suggestion_max: capability.max_active, suggestion_remaining: capability.remaining_slots, csa_active: capability.csa_active_count, csa_max: capability.csa_max_active, csa_daily_used: capability.csa_daily_used, csa_daily_limit: capability.csa_daily_limit, csa_scope_type: limits.scope_type, csa_scope_label: MANUAL_SCOPE_LABELS[limits.scope_type], next_unlock: unlock.next_unlock }, diagnostics,
     quick_start: ['대상에게 최면 어플 화면을 2초 이상 보여 일반 최면을 시작합니다. 2초 미만이면 적용되지 않습니다.', '개인 암시는 특정 NPC에게 등록하는 지속 효과입니다. 새로 등록하거나 기존 내용을 수정하거나 해제할 수 있습니다.', '상식개변은 특정 NPC가 아니라 지정된 공간 안의 사회적 상식을 변경합니다.', '평범한 대화·명령·말투만으로 저장된 암시나 상식개변은 바뀌지 않습니다. 변경은 반드시 어플 조작으로 처리됩니다.', '범위 초과·슬롯 부족·대상 미확인 등으로 처리되지 않은 시도는 상태·경험치·수치를 바꾸지 않습니다.', '이 매뉴얼을 열고 닫는 행동은 턴을 소비하지 않습니다.'],
-    suggestions: { title: '개인 암시', description: '특정 NPC 한 명에게 지속되는 개인 규칙입니다. 모든 NPC의 개인 암시는 하나의 공용 슬롯 풀을 사용합니다.', rules: ['일반 최면을 통해 대상에게 암시를 등록할 수 있습니다.', '같은 NPC에게 여러 암시를 등록할 수 있지만 전체 슬롯 한도를 함께 사용합니다.', '새 암시는 빈 슬롯을 1개 사용합니다.', '기존 암시 수정은 같은 슬롯을 유지합니다.', '암시 해제는 슬롯을 즉시 비웁니다.', '개인 암시에는 하루 사용 횟수 제한이 없습니다.', '최면 어플은 적용 전에 내용 자체에 필요한 최소 강도를 확인합니다. 선택한 강도보다 필요한 강도가 높으면 저장되지 않으며, 현재 해금된 단계 안에서 강도를 변경한 뒤 다시 적용해야 합니다.', '내용이 현재 해금 단계보다 강하거나 강한 단계에서도 지원하지 않는 내용은 어떤 변경사항도 저장하지 않습니다. 강도는 자동으로 변경되지 않습니다.'], tiers },
-    common_sense: { title: '상식개변', description: '특정 NPC가 아니라 지정 공간의 사회적 상식 자체를 변경합니다. 범위 안의 인물은 변경된 내용을 원래부터 당연했던 관습으로 받아들입니다.', rules: ['activate는 새 상식개변과 새 슬롯을 만들며 하루 사용 횟수 1회를 소비합니다.', 'update는 기존 슬롯을 유지하면서 내용·강도·범위를 변경하며 하루 사용 횟수 1회를 소비합니다.', 'deactivate는 기존 상식개변을 해제하며 하루 사용 횟수를 소비하지 않습니다.', '활성 슬롯이 가득 차 있어도 기존 상식개변 수정은 가능하지만 하루 사용 횟수가 남아 있어야 합니다.', '직접 해제하지 않은 활성 상식개변은 날짜가 바뀌어도 유지됩니다.', '날짜가 바뀌면 하루 사용 횟수만 초기화됩니다.', '적용 당시 공간 범위는 고정되며 레벨이 올라도 기존 상식개변의 범위가 자동으로 확대되지 않습니다.', '현재 강도나 공간 범위를 넘는 요청은 적용되지 않으며 사용 횟수도 소비하지 않습니다.'], current_scope: { type: limits.scope_type, label: MANUAL_SCOPE_LABELS[limits.scope_type] }, scope_unlocks: [[1, 'Lv.1~3'], [4, 'Lv.4~6'], [7, 'Lv.7~9'], [10, 'Lv.10']].map(([unlockLevel, level_range]) => { const item = getCsaLimits(unlockLevel); return { level_range, scope_type: item.scope_type, scope_label: MANUAL_SCOPE_LABELS[item.scope_type], max_active: item.max_active, daily_limit: item.daily_limit, available: level >= unlockLevel }; }), tiers: csaTiers },
+    suggestions: { title: '개인 암시', description: '특정 NPC 한 명에게 지속되는 개인 규칙입니다. 모든 NPC의 개인 암시는 하나의 공용 슬롯 풀을 사용합니다. 강도는 문장의 노골적인 표현이 아니라 실제로 바꾸는 범위로 판정합니다.', rules: ['일반 최면을 통해 대상에게 암시를 등록할 수 있습니다.', '같은 NPC에게 여러 암시를 등록할 수 있지만 전체 슬롯 한도를 함께 사용합니다.', '새 암시는 빈 슬롯을 1개 사용합니다.', '기존 암시 수정은 같은 슬롯을 유지합니다.', '암시 해제는 슬롯을 즉시 비웁니다.', '개인 암시에는 하루 사용 횟수 제한이 없습니다.', '암시를 해제해도 그동안 있었던 사건과 행동은 기억합니다. 해제되는 것은 암시의 효과와 강제된 인식입니다.', '대상은 과거 행동을 떠올리며 의문을 품거나 자기합리화를 할 수 있습니다. 기억상실은 별도의 기억 관련 효과가 있을 때만 발생합니다.', '최면 어플은 적용 전에 내용 자체에 필요한 최소 강도를 확인합니다. 선택한 강도보다 필요한 강도가 높으면 저장되지 않으며, 현재 해금된 단계 안에서 강도를 변경한 뒤 다시 적용해야 합니다.', '내용이 현재 해금 단계보다 강하거나 강한 단계에서도 지원하지 않는 내용은 어떤 변경사항도 저장하지 않습니다. 강도는 자동으로 변경되지 않습니다.'], tiers },
+    common_sense: { title: '상식개변', description: '특정 NPC가 아니라 지정 공간의 사회적 상식 자체를 변경합니다. 범위 안의 인물은 변경된 내용을 원래부터 당연했던 관습으로 받아들입니다.', rules: ['activate는 새 상식개변과 새 슬롯을 만들며 하루 사용 횟수 1회를 소비합니다.', 'update는 기존 슬롯을 유지하면서 내용·강도·범위를 변경하며 하루 사용 횟수 1회를 소비합니다.', 'deactivate는 기존 상식개변을 해제하며 하루 사용 횟수를 소비하지 않습니다.', '상식개변을 해제해도 그 상식 아래에서 벌어진 사건은 사라지지 않습니다. 사람들은 자신의 행동과 목격한 장면을 기억하며, 해제 후 이상함을 느낄 수 있습니다.', '활성 슬롯이 가득 차 있어도 기존 상식개변 수정은 가능하지만 하루 사용 횟수가 남아 있어야 합니다.', '직접 해제하지 않은 활성 상식개변은 날짜가 바뀌어도 유지됩니다.', '날짜가 바뀌면 하루 사용 횟수만 초기화됩니다.', '적용 당시 공간 범위는 고정되며 레벨이 올라도 기존 상식개변의 범위가 자동으로 확대되지 않습니다.', '현재 강도나 공간 범위를 넘는 요청은 적용되지 않으며 사용 횟수도 소비하지 않습니다.'], current_scope: { type: limits.scope_type, label: MANUAL_SCOPE_LABELS[limits.scope_type] }, scope_unlocks: [[1, 'Lv.1~3'], [4, 'Lv.4~6'], [7, 'Lv.7~9'], [10, 'Lv.10']].map(([unlockLevel, level_range]) => { const item = getCsaLimits(unlockLevel); return { level_range, scope_type: item.scope_type, scope_label: MANUAL_SCOPE_LABELS[item.scope_type], max_active: item.max_active, daily_limit: item.daily_limit, available: level >= unlockLevel }; }), tiers: csaTiers },
     hospital_map: buildHospitalMapPayload(master, save),
     hypnosis_depth: { title: '최면깊이', description: '최면과 활성 암시가 대상에게 각인된 정도입니다.', rules: ['활성 암시가 실제 행동에 반영된 턴에는 현재 활성 암시 중 가장 강한 단계 기준으로 깊이가 상승합니다.', '약한 암시가 작동하면 +1, 중간 암시는 +2, 강한 암시는 +3입니다.', '활성 암시가 있지만 이번 턴에 실제로 작동하지 않았다면 최면깊이는 변하지 않습니다.', '활성 암시가 하나도 없는 NPC는 정상적으로 저장되는 매 턴마다 최면깊이가 2씩 감소합니다.', '최면깊이는 0 아래로 내려가지 않습니다.', '암시가 모두 사라져 최면깊이가 회복돼도 그동안의 기억은 삭제되지 않습니다.', '평범한 대화, 칭찬, 친밀감만으로 최면깊이는 변하지 않습니다.', '최면저항력은 고정값이며 플레이 중 변하지 않습니다.'] }, stats, unlocks: unlock.unlocks, active_effects: buildManualActiveEffects(master, save), common_failures: [{ title: '일반 최면이 적용되지 않음', reasons: ['어플 화면을 2초 이상 보여주지 않았습니다.', '대상에게 실제로 어플을 사용하지 않고 말이나 행동만 했습니다.'] }, { title: '새 개인 암시를 만들 수 없음', reasons: ['개인 암시 슬롯이 가득 찼습니다.', '요청 내용의 실제 강도가 현재 사용 가능 강도를 넘었습니다.', '등록 대상 NPC를 특정하지 못했습니다.'] }, { title: '기존 암시를 수정하거나 해제할 수 없음', reasons: ['대상 암시를 찾지 못했습니다.', '실제 변경되는 내용이 없습니다.', '암시가 이미 비활성 상태입니다.'] }, { title: '새 상식개변을 만들 수 없음', reasons: ['상식개변 활성 슬롯이 가득 찼습니다.', '오늘 사용 횟수를 모두 사용했습니다.', '요청한 공간 범위가 현재 레벨의 범위를 넘었습니다.', '요청 내용의 실제 강도가 현재 사용 가능 강도를 넘었습니다.'] }, { title: '상식개변 수정이 적용되지 않음', reasons: ['오늘 사용 횟수를 모두 사용했습니다.', '대상 상식개변을 찾지 못했습니다.', '내용·강도·범위가 기존과 동일해 실제 변경이 없습니다.'] }] };
 }
@@ -4400,7 +4491,7 @@ function applyGlobalHypnosisDepthRecovery(previousNpcStats, activeSuggestions, c
 }
 
 function buildHypnosisRecoveryNarrativeRule() {
-  return `\n- 활성 개인 암시가 모두 사라지면 최면깊이는 매 턴 빠르게 회복하지만 기억은 지워지지 않는다. 남은 깊이에 맞는 심리 표현은 자연스럽게 판단한다.`;
+  return `\n\n[암시 효과와 기억의 분리]\n- 개인 암시·상식개변의 수정·해제나 최면깊이 변화는 이미 일어난 사건의 기억을 지우지 않는다.\n- 해제는 활성 효과와 강제 인식만 멈춘다. 별도 기억 삭제 효과 없이는 기억상실·시간 공백·꿈처럼 흐려짐을 만들지 않는다.\n- 일반 해제로 기억이 사라졌다는 과거 서사가 있어도 기억은 유지된 것으로 바로잡고, 행동·관계·신체 결과를 되돌리지 않는다.`;
 }
 
 // Strength and slot-count are deliberately separate growth axes (stage
@@ -4729,7 +4820,19 @@ function buildStructuredActionStorySection(structuredPlan) {
     if (operation.domain === 'suggestion') return `- 개인 암시 ${operation.operation}: ${targetNames.get(operation.client_id) || '현재 대상 NPC'}`;
     return `- 상식개변 ${operation.operation}: ${operation.scope_type || '기존 범위'}`;
   }).join('\n');
-  return `\n\n[CONFIRMED HYPNOSIS APP TRANSACTION — HARD CONSTRAINT]\n아래 조작은 Worker 검증을 통과했다. 대상·개수·내용·강도와 성공 여부를 바꾸지 말고 조작 과정과 장면 직후 흐름만 자연스럽게 서술한다. 현재 장면에 없는 NPC의 원격 수정·해제에는 즉각적인 신체 반응이나 대사를 창작하지 마라.\n${lines}`;
+  return `\n\n[CONFIRMED HYPNOSIS APP TRANSACTION — HARD CONSTRAINT]\n아래 조작은 Worker 검증을 통과했다. 대상·개수·내용·강도와 성공 여부를 바꾸지 말고 조작 과정과 장면 직후 흐름만 자연스럽게 서술한다. 현재 장면에 없는 NPC의 원격 수정·해제에는 즉각적인 신체 반응이나 대사를 창작하지 마라.\n${lines}` + buildSuggestionDeactivationStorySection(structuredPlan);
+}
+
+function buildSuggestionDeactivationStorySection(structuredPlan) {
+  const action = structuredPlan?.canonical_action;
+  if (action?.type !== 'app_transaction') return '';
+  const targets = new Map((structuredPlan.plan?.suggestion_targets || []).map(target => [target.client_id, target.character_name]));
+  const names = [...new Set(action.operations
+    .filter(operation => operation.domain === 'suggestion' && operation.operation === 'deactivate')
+    .map(operation => targets.get(operation.client_id))
+    .filter(Boolean))];
+  if (!names.length) return '';
+  return `\n\n[개인 암시 해제 — 기억 보존]\n해제 대상: ${names.join(', ')}\n- 대상은 암시 중의 사건과 자신의 행동을 기억한다. 사라지는 것은 강제력과 당연하게 느껴지던 인식이다.\n- 기억을 바탕으로 의문·당황·수치심·불안·자기합리화 중 상황에 맞는 반응을 보이되 한꺼번에 나열하지 않는다.\n- 기억상실·시간 공백·꿈처럼 흐린 회상, 과거 행동·관계·신체 결과의 소급 취소를 만들지 않는다.`;
 }
 
 function buildStructuredActionExtractSection(structuredPlan) {

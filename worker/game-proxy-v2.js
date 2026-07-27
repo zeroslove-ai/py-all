@@ -3044,18 +3044,85 @@ function buildCurrentNpcProfileSection(save = {}, characters = {}) {
   return `\n\n[CURRENT NPC PROFILE — ESTABLISHED FACT]\n\n${lines.join('\n')}\n\n규칙:\n- 위 정보(공개 신체정보와 해금 은밀정보 포함)는 최근 기억·선택지·요약의 충돌값보다 우선하며, 없는 신체정보는 추측하지 않는다.\n- 소속이 간호사인데 근거 없이 실장·과장·수간호사 등으로 승격시키지 않는다.\n- 직종·부서·직급이 위에 적혀 있으면 그 값을 그대로 유지한다. 근거 없이 다른 직종·부서·직급으로 바꾸거나 승격·강등시키지 않는다.\n- 해금 은밀정보는 현재 장면과 관련 있을 때만 자연스럽게 반영하고 매 턴 목록처럼 나열하지 않는다.\n- 플레이어가 잘못된 호칭을 사용하면 NPC 성격에 맞게 자연스럽게 정정하거나 호칭을 흘려넘길 수 있지만, 서술자와 선택지는 잘못된 직급을 확정 사실로 반복하지 않는다.`;
 }
 
-function normalizeRelationshipMemoryItems(items, limit = 5) {
-  const seen = new Set();
-  const result = [];
-  for (const item of Array.isArray(items) ? items : []) {
-    if (typeof item !== 'string') continue;
-    const text = item.trim().replace(/\s+/g, ' ').slice(0, 100);
-    if (!text || seen.has(text)) continue;
-    seen.add(text);
-    result.push(text);
-    if (result.length >= limit) break;
+const RELATIONSHIP_MEMORY_LIMITS = { total: 10, permanent: 4, regular: 6 };
+
+function normalizeRelationshipMemoryItem(item, defaultTurn = null) {
+  const source = isPlainObject(item) ? item : null;
+  const rawText = typeof item === 'string' ? item : source?.text;
+  const text = typeof rawText === 'string' ? rawText.trim().replace(/\s+/g, ' ').slice(0, 100) : '';
+  if (!text) return null;
+  const rawTurn = source?.turn;
+  return {
+    text,
+    permanent: source?.permanent === true,
+    turn: Number.isInteger(rawTurn) && rawTurn >= 0
+      ? rawTurn
+      : (Number.isInteger(defaultTurn) && defaultTurn >= 0 ? defaultTurn : null)
+  };
+}
+
+function relationshipMemoryComparisonKey(text) {
+  return String(text || '')
+    .toLocaleLowerCase('ko-KR')
+    .replace(/[^\p{L}\p{N}]+/gu, '');
+}
+
+function relationshipMemoryTokens(text) {
+  return [...new Set(String(text || '')
+    .toLocaleLowerCase('ko-KR')
+    .split(/[^\p{L}\p{N}]+/gu)
+    .filter(token => token.length >= 2))];
+}
+
+function isNearlySameRelationshipMemory(left, right) {
+  const leftKey = relationshipMemoryComparisonKey(left?.text);
+  const rightKey = relationshipMemoryComparisonKey(right?.text);
+  if (!leftKey || !rightKey) return false;
+  if (leftKey === rightKey || leftKey.includes(rightKey) || rightKey.includes(leftKey)) return true;
+  const leftTokens = relationshipMemoryTokens(left?.text);
+  const rightTokens = relationshipMemoryTokens(right?.text);
+  if (leftTokens.length < 3 || rightTokens.length < 3) return false;
+  const rightSet = new Set(rightTokens);
+  const overlap = leftTokens.filter(token => rightSet.has(token)).length;
+  return overlap >= 3 && overlap / Math.min(leftTokens.length, rightTokens.length) >= 0.8;
+}
+
+function preferRelationshipMemory(existing, candidate) {
+  const existingTurn = Number.isInteger(existing?.turn) ? existing.turn : -1;
+  const candidateTurn = Number.isInteger(candidate?.turn) ? candidate.turn : -1;
+  let preferred = existing;
+  if (candidateTurn > existingTurn || (candidateTurn === existingTurn && candidate.text.length > existing.text.length)) {
+    preferred = candidate;
   }
-  return result;
+  return { ...preferred, permanent: existing?.permanent === true || candidate?.permanent === true };
+}
+
+function sortRelationshipMemoriesNewestFirst(items) {
+  return [...items].sort((left, right) => {
+    const turnDifference = (Number.isInteger(right.turn) ? right.turn : -1) - (Number.isInteger(left.turn) ? left.turn : -1);
+    if (turnDifference) return turnDifference;
+    return right.text.length - left.text.length;
+  });
+}
+
+function normalizeRelationshipMemoryItems(items, options = {}) {
+  const normalizedOptions = typeof options === 'number' ? { limit: options } : options;
+  const defaultTurn = normalizedOptions?.defaultTurn;
+  const totalLimit = Math.min(
+    RELATIONSHIP_MEMORY_LIMITS.total,
+    Math.max(1, Number.isInteger(normalizedOptions?.limit) ? normalizedOptions.limit : RELATIONSHIP_MEMORY_LIMITS.total)
+  );
+  const unique = [];
+  for (const item of Array.isArray(items) ? items : []) {
+    const memory = normalizeRelationshipMemoryItem(item, defaultTurn);
+    if (!memory) continue;
+    const duplicateIndex = unique.findIndex(existing => isNearlySameRelationshipMemory(existing, memory));
+    if (duplicateIndex === -1) unique.push(memory);
+    else unique[duplicateIndex] = preferRelationshipMemory(unique[duplicateIndex], memory);
+  }
+  const permanent = sortRelationshipMemoriesNewestFirst(unique.filter(item => item.permanent)).slice(0, RELATIONSHIP_MEMORY_LIMITS.permanent);
+  const regular = sortRelationshipMemoriesNewestFirst(unique.filter(item => !item.permanent)).slice(0, RELATIONSHIP_MEMORY_LIMITS.regular);
+  return [...permanent, ...regular].slice(0, totalLimit);
 }
 
 function buildRelationshipMemoryFacts(relationship = {}) {
@@ -3066,9 +3133,9 @@ function buildRelationshipMemoryFacts(relationship = {}) {
     || npcOrgasmCount > 0 || playerEjaculationCount > 0;
   const hasReceivedPlayerEjaculation = relationship?.has_received_player_ejaculation === true || playerEjaculationCount > 0;
   const deterministic = [];
-  if (hasHadSexWithPlayer) deterministic.push('플레이어와 친밀한 성적 경험을 가진 적이 있다.');
-  if (npcOrgasmCount > 0) deterministic.push('플레이어와의 성행위 중 절정한 경험이 있다.');
-  if (hasReceivedPlayerEjaculation) deterministic.push('플레이어의 사정을 경험했다.');
+  if (hasHadSexWithPlayer) deterministic.push({ text: '플레이어와 친밀한 성적 경험을 가진 적이 있다.', permanent: true, turn: null });
+  if (npcOrgasmCount > 0) deterministic.push({ text: '플레이어와의 성행위 중 절정한 경험이 있다.', permanent: true, turn: null });
+  if (hasReceivedPlayerEjaculation) deterministic.push({ text: '플레이어의 사정을 경험했다.', permanent: true, turn: null });
   return {
     npc_orgasm_count: npcOrgasmCount,
     player_ejaculation_count: playerEjaculationCount,
@@ -3098,11 +3165,11 @@ function buildCurrentNpcRelationshipMemorySection(save = {}, characters = {}) {
     lines.push(`  누적 기록: NPC 절정 ${facts.npc_orgasm_count}회 · 플레이어 사정 ${facts.player_ejaculation_count}회`);
     if (facts.first_intimate_turn !== null) lines.push(`  최초 친밀 기록: ${facts.first_intimate_turn}턴`);
     if (facts.last_intimate_turn !== null) lines.push(`  최근 친밀 기록: ${facts.last_intimate_turn}턴`);
-    if (memories.length) lines.push(...memories.map(memory => `  기억: ${memory}`));
+    if (memories.length) lines.push(...memories.map(memory => `  ${memory.permanent ? '영구 기억' : '기억'}: ${memory.text}`));
     return lines.join('\n');
   }).filter(Boolean);
   if (!entries.length) return '';
-  return `\n\n[CURRENT NPC PERSISTENT RELATIONSHIP MEMORY — ESTABLISHED FACT]\n\n${entries.join('\n')}\n\n규칙:\n- 이 기록은 최근 요약보다 우선하는 영구 사실이며, 최근 기억에 없다는 이유로 잊거나 처음 경험처럼 묘사하지 않는다.\n- 정확한 과거 장면 세부는 저장된 기억 범위에서만 사용하고, 횟수를 매 턴 대사로 억지로 언급하지 않는다.\n- 현재 장면과 관련 있을 때만 자연스럽게 반영한다. 과거 경험이 현재 동의·흥분·연인 관계·복종이나 모든 부탁 수락을 자동 보장하지 않는다.`;
+  return `\n\n[CURRENT NPC RELATIONSHIP MEMORY — ESTABLISHED FACT]\n\n${entries.join('\n')}\n\n규칙:\n- permanent 기억은 현재 캐릭터 설정과 같은 수준의 확정 사실이다. 최근 요약에 없다는 이유로 잊거나 처음 경험처럼 묘사하지 않는다.\n- 이미 경험했다고 기록된 행위를 다시 첫 경험·경험 없음·처녀 상태로 묘사하지 않는다. 순수함·수줍음·미숙함은 경험 없음과 같지 않으며, 경험이 있어도 서투르거나 부끄러울 수 있다.\n- 명시적인 기억상실 사건이 없다면 해당 경험을 잊지 않는다. 정확한 과거 장면 세부는 저장된 기억 범위에서만 사용하고, 횟수를 매 턴 대사로 억지로 언급하지 않는다.\n- 현재 장면과 관련 있을 때만 자연스럽게 반영한다. 과거 경험이 현재 동의·흥분·연인 관계·복종이나 모든 부탁 수락을 자동 보장하지 않는다.`;
 }
 
 function buildCurrentNpcPhysicalSceneStateSection(save = {}, characters = {}) {
@@ -3489,7 +3556,7 @@ npc_stat_changes만 반환한다. 서사에 숫자가 없어도 대사·행동·
 [CURRENT NPC RELATIONSHIP RECORD]
 현재 메인 NPC의 직전 누적값: player_ejaculation_count=${Math.max(0, Number(save?.npc_relationship_state?.[save?.last_character_id]?.player_ejaculation_count) || 0)}, npc_orgasm_count=${Math.max(0, Number(save?.npc_relationship_state?.[save?.last_character_id]?.npc_orgasm_count) || 0)}.
 npc_relationship_state는 현재 메인 NPC와의 누적 절대값 두 개만 반환한다. 명확히 완료된 플레이어 사정 또는 현재 NPC 오르가즘만 증가시키고, 직전·실패·중단·가짜·상상·회상·다른 NPC 사건은 증가시키지 않는다. 값을 모르면 직전값을 유지하고 감소·초기화하지 않는다. narrator에는 반환하지 않는다.
-relationship_memory_patch는 최종 Story에서 실제로 완료된 중요한 친밀 사건이 있을 때만 현재 메인 NPC에 대해 짧은 사실 문장으로 최대 2개 반환한다. 플레이어 입력만의 결과 선언, 실패·추측·감정 과장, 매 턴 반복되는 일반 사실은 넣지 않는다.
+relationship_memory_patch는 최종 Story에서 실제로 완료된 중요한 관계 사건이 있을 때만 현재 메인 NPC에 대해 {text, permanent} 형태로 최대 2개 반환한다. permanent:true는 첫 키스·첫 질/구강/항문 삽입·첫 질내 사정 또는 임신 가능 사건, 결혼·이혼·임신·출산·가족관계 변화, 중대한 배신·용서·고백·약속처럼 관계를 영구적으로 바꾼 완료 사건에만 쓴다. 애매하면 false다. 플레이어 입력만의 결과 선언, 실패·추측·감정 과장, 매 턴 반복되는 일반 사실은 넣지 않는다.
 
 [NPC PHYSICAL SCENE STATE PATCH]
 npc_scene_state_patch는 최종 Story에서 등록 NPC가 실제로 옷을 입거나 벗고, 열고 잠그고, 올리거나 내리고, 갈아입거나 자세를 바꾼 완료 사건만 반영한다. 플레이어 입력만의 선언, 실패·시도·계획, 상식개변의 생성·해제만으로는 반환하지 않는다. 기존 상태를 유지할 키는 생략하고, 등록 NPC·허용 enum만 사용한다.
@@ -3549,7 +3616,7 @@ ${JSON.stringify(imageCatalog)}
   "world_state_patch": {"building": "이동 완료 시 기존 또는 새 건물명, 이동 없으면 전체 비움", "floor": "이동 완료 시 기존 또는 새 층 명칭", "ward": "이동 완료 시 기존 또는 새 병동 명칭", "location_label": "이동 완료 시 도착한 새 장소, 이동 없으면 전체 비움"},
   "csa_omission": ["조건을 충족했는데도 실행되지 않은 강제 상식개변에 대한 짧은 설명. 누락이 없으면 []"],
   "npc_relationship_state": {"player_ejaculation_count": 0, "npc_orgasm_count": 0},
-  "relationship_memory_patch": ["최종 Story에서 실제 완료된 중요한 친밀 사건의 짧은 사실. 없으면 []"],
+  "relationship_memory_patch": [{"text": "최종 Story에서 실제 완료된 중요한 관계 사건의 짧은 사실", "permanent": false}],
   "npc_scene_state_patch": {"heroine1": {"clothing": {"uniform_top": "worn|removed|open|unknown", "uniform_bottom": "worn|removed|open|unknown", "underwear_top": "worn|removed|unknown", "underwear_bottom": "worn|removed|unknown"}, "posture": "standing|sitting|kneeling|lying|unknown", "current_action": "실제 현재 행동, 없으면 생략"}},
   "turn_summary": "이번 턴에서 변한 핵심 사실 1~3문장",
   "is_sexual": false,
@@ -3898,7 +3965,7 @@ function buildSavePatch(extract, enginePatch = {}, summaryPlan = null, previousS
       updated_turn: turnNumber
     };
     patch.npc_emotion = { [characterId]: normalizedEmotion };
-    if (isPlainObject(extract.npc_relationship_state) || extract.is_sexual === true) {
+    if (isPlainObject(extract.npc_relationship_state) || extract.is_sexual === true || extract.relationship_memory_patch?.length) {
       patch.npc_relationship_state = { [characterId]: normalizeRelationshipState(
         previousSave?.npc_relationship_state?.[characterId],
         extract.npc_relationship_state || {},
@@ -4138,7 +4205,7 @@ function normalizeExtract(extract) {
       )
     : [];
   normalized.npc_relationship_state = normalizeRelationshipExtract(normalized.npc_relationship_state);
-  normalized.relationship_memory_patch = normalizeRelationshipMemoryItems(normalized.relationship_memory_patch, 2);
+  normalized.relationship_memory_patch = normalizeRelationshipMemoryItems(normalized.relationship_memory_patch, { limit: 2 });
   normalized.npc_scene_state_patch = normalizeNpcSceneStatePatch(normalized.npc_scene_state_patch);
   if (!isPlainObject(normalized.first_encounter_stats)) normalized.first_encounter_stats = null;
   if (!isPlainObject(normalized.world_state_patch)) normalized.world_state_patch = null;
@@ -4175,12 +4242,22 @@ function normalizeRelationshipState(previous = {}, patch = {}, turnNumber = 0, r
     || playerEjaculationCount > 0
     || npcOrgasmCount > 0
     || isSexual === true;
-  const allowPatch = hasNewCounter || isSexual === true;
+  const hasRelationshipMemoryPatch = Array.isArray(relationshipMemoryPatch) && relationshipMemoryPatch.length > 0;
+  const finalFacts = buildRelationshipMemoryFacts({
+    player_ejaculation_count: playerEjaculationCount,
+    npc_orgasm_count: npcOrgasmCount,
+    intimate_info_unlocked: previous?.intimate_info_unlocked === true || hasIntimateExperience
+  });
+  const memoryTurn = hasNewCounter && Number.isInteger(turnNumber) && turnNumber > 0
+    ? turnNumber
+    : finalFacts.last_intimate_turn;
   const relationshipMemory = normalizeRelationshipMemoryItems([
-    ...(allowPatch ? relationshipMemoryPatch : []),
-    ...buildRelationshipMemoryFacts({ player_ejaculation_count: playerEjaculationCount, npc_orgasm_count: npcOrgasmCount }).deterministic_memory,
+    ...(hasRelationshipMemoryPatch
+      ? normalizeRelationshipMemoryItems(relationshipMemoryPatch, { limit: 2, defaultTurn: Number.isInteger(turnNumber) && turnNumber > 0 ? turnNumber : null })
+      : []),
+    ...finalFacts.deterministic_memory.map(memory => ({ ...memory, turn: memoryTurn })),
     ...(previous?.relationship_memory || [])
-  ]);
+  ], { limit: RELATIONSHIP_MEMORY_LIMITS.total });
   const firstIntimateTurn = Number.isInteger(previous?.first_intimate_turn) && previous.first_intimate_turn >= 0
     ? previous.first_intimate_turn
     : (!previousFacts.has_had_sex_with_player && hasIntimateExperience && Number.isInteger(turnNumber) && turnNumber > 0 ? turnNumber : null);
@@ -4276,7 +4353,10 @@ function sanitizeCsaDeactivationMemoryExtract(extract = {}, structuredPlan = nul
   if (!hasStructuredCsaDeactivation(structuredPlan)) return extract;
   const sanitized = { ...extract };
   sanitized.relationship_memory_patch = (Array.isArray(sanitized.relationship_memory_patch) ? sanitized.relationship_memory_patch : [])
-    .filter(item => typeof item === 'string' && !CSA_DEACTIVATION_MEMORY_LOSS_RE.test(item));
+    .filter(item => {
+      const text = typeof item === 'string' ? item : item?.text;
+      return typeof text === 'string' && !CSA_DEACTIVATION_MEMORY_LOSS_RE.test(text);
+    });
   const summary = typeof sanitized.turn_summary === 'string' ? sanitized.turn_summary : '';
   if (CSA_DEACTIVATION_MEMORY_LOSS_RE.test(summary)) {
     const kept = summary.split(/(?<=[.!?。！？])\s*|\n+/)

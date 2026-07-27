@@ -2691,6 +2691,9 @@ function buildCurrentNpcProfileSection(save = {}, characters = {}) {
     const value = character[key];
     if (typeof value === 'string' && value.trim()) lines.push(`${label}: ${value.trim()}`);
   };
+  const pushValue = (label, value) => {
+    if (value !== undefined && value !== null && String(value).trim()) lines.push(`${label}: ${String(value).trim()}`);
+  };
   pushField('소속/직급', '소속');
   // Public profile fields (item 1) — every one is optional; a field that
   // isn't set on this character simply never appears here. None are ever
@@ -2709,16 +2712,28 @@ function buildCurrentNpcProfileSection(save = {}, characters = {}) {
   pushField('공개 역할', 'public_role_summary');
   pushField('성격', '성격');
   pushField('말투', '말투');
-  pushField('연인관계', '연인관계');
-  pushField('취향(비노출 참고용)', '취향');
-  pushField('숨겨진설정(비노출 참고용)', '숨겨진설정');
   pushField('관찰 가능 특징', '외형');
-  pushField('체형', '체형');
+  const publicBody = buildPublicNpcBody(character);
+  pushValue('키', publicBody.height_cm);
+  pushValue('몸무게', publicBody.weight_kg);
+  pushValue('체형', publicBody.body_type);
+  pushValue('가슴 컵', publicBody.cup);
+  const privateInfo = buildNpcPrivateInfo(character, save?.npc_relationship_state?.[characterId]);
+  if (privateInfo.unlocked) {
+    lines.push('[해금 은밀정보]');
+    pushValue('유두', privateInfo.nipple);
+    pushValue('유륜 크기', privateInfo.areola_size);
+    pushValue('유륜 색', privateInfo.areola_color);
+    pushValue('음모 상태', privateInfo.pubic_hair);
+    pushValue('과거 남성 경험', privateInfo.past_partner_count);
+    pushValue('과거 오르가즘 경험', privateInfo.past_orgasm_count);
+    pushValue('연인 관계', privateInfo.relationship);
+  }
   // 현재 NPC 1줄만 — 전체 V1 목록은 절대 프롬프트에 넣지 않는다.
   const vocalStyleLine = VOCAL_STYLE_BY_NAME[name];
   if (vocalStyleLine) lines.push(vocalStyleLine);
 
-  return `\n\n[CURRENT NPC PROFILE — ESTABLISHED FACT]\n\n${lines.join('\n')}\n\n규칙:\n- 위 정보는 최근 기억·선택지·요약에 섞인 잘못된 이름, 나이, 직급, 말투보다 우선한다.\n- 소속이 간호사인데 근거 없이 실장·과장·수간호사 등으로 승격시키지 않는다.\n- 직종·부서·직급이 위에 적혀 있으면 그 값을 그대로 유지한다. 근거 없이 다른 직종·부서·직급으로 바꾸거나 승격·강등시키지 않는다.\n- 숨겨진설정과 취향은 행동 일관성에만 사용하고 NPC가 직접 고백하거나 플레이어가 아는 사실처럼 노출하지 않는다.\n- 플레이어가 잘못된 호칭을 사용하면 NPC 성격에 맞게 자연스럽게 정정하거나 호칭을 흘려넘길 수 있지만, 서술자와 선택지는 잘못된 직급을 확정 사실로 반복하지 않는다.`;
+  return `\n\n[CURRENT NPC PROFILE — ESTABLISHED FACT]\n\n${lines.join('\n')}\n\n규칙:\n- 위 정보(공개 신체정보와 해금 은밀정보 포함)는 최근 기억·선택지·요약의 충돌값보다 우선하며, 없는 신체정보는 추측하지 않는다.\n- 소속이 간호사인데 근거 없이 실장·과장·수간호사 등으로 승격시키지 않는다.\n- 직종·부서·직급이 위에 적혀 있으면 그 값을 그대로 유지한다. 근거 없이 다른 직종·부서·직급으로 바꾸거나 승격·강등시키지 않는다.\n- 숨겨진설정과 취향은 행동 일관성에만 사용하고 NPC가 직접 고백하거나 플레이어가 아는 사실처럼 노출하지 않는다.\n- 해금 은밀정보는 현재 장면과 관련 있을 때만 자연스럽게 반영하고 매 턴 목록처럼 나열하지 않는다.\n- 플레이어가 잘못된 호칭을 사용하면 NPC 성격에 맞게 자연스럽게 정정하거나 호칭을 흘려넘길 수 있지만, 서술자와 선택지는 잘못된 직급을 확정 사실로 반복하지 않는다.`;
 }
 
 // Injected every turn (unlike the periodic rulebook_address block, which

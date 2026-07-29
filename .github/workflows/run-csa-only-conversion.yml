@@ -1,0 +1,49 @@
+name: Run CSA Only Conversion
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - .github/workflows/run-csa-only-conversion.yml
+
+permissions:
+  contents: write
+
+jobs:
+  convert:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout CSA-only branch
+        uses: actions/checkout@v4
+        with:
+          ref: feature/csa-only
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Apply CSA-only conversion
+        run: python .github/scripts/convert_csa_only.py
+
+      - name: Static checks
+        run: |
+          node --check worker/game-proxy-v2.js
+          node --check pages/sidebar.js
+          node --check pages/hypnosis-app.js
+          git diff --check
+
+      - name: Remove one-shot branch files
+        run: |
+          rm -f .github/scripts/convert_csa_only.py
+          rm -f .github/scripts/csa_only_trigger.txt
+          rm -f .github/workflows/convert-csa-only.yml
+
+      - name: Commit CSA-only branch
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git commit -m "refactor: convert game to csa-only mode"
+          git push origin HEAD:feature/csa-only

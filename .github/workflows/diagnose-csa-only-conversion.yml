@@ -23,6 +23,19 @@ jobs:
         with:
           python-version: '3.12'
 
+      - name: Patch converter replacement handling
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          path = Path('.github/scripts/convert_csa_only.py')
+          text = path.read_text(encoding='utf-8')
+          old = "updated, count = re.subn(pattern, replacement, text, count=1, flags=flags)"
+          new = "updated, count = re.subn(pattern, lambda _match: replacement, text, count=1, flags=flags)"
+          if old not in text:
+              raise SystemExit('sub_once implementation anchor not found')
+          path.write_text(text.replace(old, new, 1), encoding='utf-8')
+          PY
+
       - name: Apply conversion and record result
         id: conversion
         shell: bash
@@ -45,24 +58,14 @@ jobs:
             app_status=99
             diff_status=99
           fi
-          {
-            echo "convert_status=$convert_status"
-            echo "worker_check=$worker_status"
-            echo "sidebar_check=$sidebar_status"
-            echo "app_check=$app_status"
-            echo "diff_check=$diff_status"
-            echo
-            echo "--- log ---"
-            cat /tmp/csa-convert.log
-          } > .github/csa-only-conversion-result.txt
           if [[ $convert_status -eq 0 && $worker_status -eq 0 && $sidebar_status -eq 0 && $app_status -eq 0 && $diff_status -eq 0 ]]; then
             rm -f .github/scripts/convert_csa_only.py
             rm -f .github/scripts/csa_only_trigger.txt
             rm -f .github/workflows/convert-csa-only.yml
+            rm -f .github/csa-only-conversion-result.txt
             echo "success=true" >> "$GITHUB_OUTPUT"
           else
             git reset --hard HEAD
-            cp /tmp/csa-convert.log /tmp/csa-convert-only.log
             {
               echo "convert_status=$convert_status"
               echo "worker_check=$worker_status"
@@ -71,7 +74,7 @@ jobs:
               echo "diff_check=$diff_status"
               echo
               echo "--- log ---"
-              cat /tmp/csa-convert-only.log
+              cat /tmp/csa-convert.log
             } > .github/csa-only-conversion-result.txt
             echo "success=false" >> "$GITHUB_OUTPUT"
           fi

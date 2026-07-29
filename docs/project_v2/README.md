@@ -130,3 +130,4 @@
 | 2026-07-22 | v2 초기 설계 및 스키마 재구성 |
 | 2026-07-22 | PR #1: `/api/commit-turn`, 충돌 감지, 재시도 안전성 반영 |
 | 2026-07-22 | `game-proxy-v2` 배포 완료 상태와 7개 운영 API 기준으로 문서 정합성 갱신 |
+> LEGACY DOCUMENT — main/archive/pre-csa-only 전용. feature/csa-only 구현 기준으로 사용하지 않는다.

@@ -147,3 +147,4 @@ Worker는 다음 값을 프롬프트에 직접 삽입한다.
 - JSON 파싱 실패: `502`와 제한된 `raw` 미리보기 반환
 - 프론트는 저장을 진행하지 않고 오류를 표시한다.
 - 같은 입력의 커밋 재시도는 `commit_turn`의 replay 처리로 안전하게 응답한다.
+> LEGACY DOCUMENT — main/archive/pre-csa-only 전용. feature/csa-only 구현 기준으로 사용하지 않는다.

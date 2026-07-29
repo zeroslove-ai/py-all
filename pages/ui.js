@@ -394,14 +394,8 @@ const ui = {
     if (stats.location !== undefined) {
       document.getElementById('stat-location').textContent = stats.location || '-';
     }
-    if (stats['순응도'] !== undefined) {
-      document.getElementById('stat-순응도').textContent = stats['순응도'];
-    }
     if (stats['호감도'] !== undefined) {
       document.getElementById('stat-호감도').textContent = stats['호감도'];
-    }
-    if (stats['최면깊이'] !== undefined) {
-      document.getElementById('stat-최면깊이').textContent = stats['최면깊이'];
     }
     if (stats.csa_active !== undefined) {
       const csa = stats.csa_active;

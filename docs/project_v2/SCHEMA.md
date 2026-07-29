@@ -236,3 +236,4 @@ Worker의 `buildSavePatch()`는 추출 결과를 DB 구조에 맞게 바꾼다.
 ## JSONB deep merge migration
 
 `supabase/migrations/20260722095050_jsonb_deep_merge.sql` defines `public.jsonb_deep_merge(jsonb, jsonb)` before `commit_turn` is applied to a new database. When both values are JSON objects, it recursively merges their keys. Arrays, scalar values, and JSON `null` are replaced by the patch value. The migration uses `create or replace function` and `set search_path = public`, so it is idempotent.
+> LEGACY DOCUMENT — main/archive/pre-csa-only 전용. feature/csa-only 구현 기준으로 사용하지 않는다.

@@ -79,27 +79,61 @@ function sleep(ms) {
 }
 
 
-const CSA_ONLY_HIDDEN_NPC_STAT_KEYS = new Set([
-  '최면깊이', '순응도', '최면저항력',
+// LEGACY STORAGE ONLY — CSA-only mode never exposes, injects, renders, or
+// updates these historical mental-effect fields. They remain in old JSONB
+// saves solely so existing games stay readable.
+const LEGACY_MENTAL_EFFECT_SAVE_KEYS = new Set([
+  'active_suggestions', '최면깊이', '순응도', '최면저항력',
   'hypnosis_depth', 'compliance', 'resistance'
 ]);
+const LEGACY_DISABLED_SCENE_ROLES = new Set(['hypnosis_onset']);
+const LEGACY_MENTAL_EFFECT_PATTERNS = [
+  /개인\s*암시[^.!?。\n]*/gi,
+  /최면[^.!?。\n]*(?:성공|작동|영향|깊이|반응)[^.!?。\n]*/gi,
+  /암시[^.!?。\n]*(?:활성|성공|작동|때문)[^.!?。\n]*/gi,
+  /어플[^.!?。\n]*(?:감정|욕망)[^.!?。\n]*/gi
+];
 
 function csaOnlyNpcStats(stats = {}) {
   if (!isPlainObject(stats)) return {};
   return Object.fromEntries(Object.entries(stats)
-    .filter(([key]) => !CSA_ONLY_HIDDEN_NPC_STAT_KEYS.has(key)));
+    .filter(([key]) => !LEGACY_MENTAL_EFFECT_SAVE_KEYS.has(key)));
 }
 
 function csaOnlyNpcStatChanges(changes = {}) {
   if (!isPlainObject(changes)) return {};
   return Object.fromEntries(Object.entries(changes)
-    .filter(([key]) => !CSA_ONLY_HIDDEN_NPC_STAT_KEYS.has(key)));
+    .filter(([key]) => !LEGACY_MENTAL_EFFECT_SAVE_KEYS.has(key)));
+}
+
+function sanitizeLegacyMentalEffectText(value) {
+  if (typeof value !== 'string') return value;
+  return LEGACY_MENTAL_EFFECT_PATTERNS.reduce((text, pattern) => text.replace(pattern, '').replace(/\s{2,}/g, ' ').trim(), value);
+}
+
+function sanitizeLegacyMentalEffectMemories(value) {
+  if (!Array.isArray(value)) return value;
+  return value.map(item => {
+    if (typeof item === 'string') return sanitizeLegacyMentalEffectText(item);
+    if (!isPlainObject(item)) return item;
+    return { ...item, text: sanitizeLegacyMentalEffectText(item.text) };
+  }).filter(item => typeof item === 'string' ? Boolean(item) : !isPlainObject(item) || Boolean(item.text));
 }
 
 function buildCsaOnlySaveView(save = {}) {
   const source = isPlainObject(save) ? save : {};
   const view = { ...source };
-  delete view.active_suggestions;
+  for (const key of LEGACY_MENTAL_EFFECT_SAVE_KEYS) delete view[key];
+  for (const key of ['story_summary_overall', 'story_summary_recent100']) {
+    if (typeof view[key] === 'string') view[key] = sanitizeLegacyMentalEffectText(view[key]);
+  }
+  view.recent_memories = sanitizeLegacyMentalEffectMemories(view.recent_memories);
+  if (isPlainObject(view.npc_relationship_state)) {
+    view.npc_relationship_state = Object.fromEntries(Object.entries(view.npc_relationship_state).map(([id, relationship]) => [id, {
+      ...relationship,
+      relationship_memory: sanitizeLegacyMentalEffectMemories(relationship?.relationship_memory)
+    }]));
+  }
   if (isPlainObject(source.npc_stats)) {
     view.npc_stats = Object.fromEntries(Object.entries(source.npc_stats)
       .map(([characterId, stats]) => [characterId, csaOnlyNpcStats(stats)]));
@@ -402,59 +436,6 @@ async function verifyAppValidationProof(env, payload, signature) {
   return (await signAppValidationProof(env, payload)) === signature;
 }
 
-const SUGGESTION_STRENGTH_PENALTY = { weak: 0, medium: 15, strong: 30 };
-const SUGGESTION_CHANCE_CAP = {
-  weak: { min: 5, max: 95 },
-  medium: { min: 5, max: 90 },
-  strong: { min: 5, max: 85 }
-};
-
-function clampSuggestionNumber(value, minimum, maximum, fallback = minimum) {
-  const numeric = Number(value);
-  return Math.max(minimum, Math.min(maximum, Number.isFinite(numeric) ? numeric : fallback));
-}
-
-function resolveNpcHypnosisStats(save = {}, characters = {}, characterId) {
-  const character = isPlainObject(characters?.[characterId]) ? characters[characterId] : {};
-  const relationship = isPlainObject(save?.npc_relationship_state?.[characterId]) ? save.npc_relationship_state[characterId] : {};
-  const stats = isPlainObject(save?.npc_stats?.[characterId]) ? save.npc_stats[characterId] : {};
-  const initial = isPlainObject(character.initial_stats) ? character.initial_stats : {};
-  const firstFinite = (values, fallback) => {
-    for (const value of values) {
-      const numeric = Number(value);
-      if (Number.isFinite(numeric)) return numeric;
-    }
-    return fallback;
-  };
-  return {
-    compliance: clampSuggestionNumber(firstFinite([relationship.compliance, relationship['순응도'], stats.compliance, stats['순응도'], initial.compliance, initial['순응도'], character.compliance, character['순응도초기']], 0), 0, 100, 0),
-    hypnosis_depth: clampSuggestionNumber(firstFinite([stats.hypnosis_depth, stats['최면깊이'], initial.hypnosis_depth, initial['최면깊이'], character.hypnosis_depth, character['최면깊이초기']], 0), 0, 100, 0),
-    resistance: clampSuggestionNumber(firstFinite([stats.resistance, stats['최면저항력'], initial.resistance, initial['최면저항력'], character.resistance, character['최면저항력'], character['최면저항력초기']], 50), 0, 100, 50)
-  };
-}
-
-function calculateSuggestionSuccessChance({ level, compliance, hypnosisDepth, resistance, strength }) {
-  const normalizedStrength = Object.prototype.hasOwnProperty.call(SUGGESTION_STRENGTH_PENALTY, strength) ? strength : 'weak';
-  const safeLevel = clampSuggestionNumber(level, 1, 10, 1);
-  const safeCompliance = clampSuggestionNumber(compliance, 0, 100, 0);
-  const safeDepth = clampSuggestionNumber(hypnosisDepth, 0, 100, 0);
-  const safeResistance = clampSuggestionNumber(resistance, 0, 100, 50);
-  const highResistancePenalty = Math.max(0, safeResistance - 70) * 2.15;
-  const rawChance = 104 + (safeLevel * 3) + (safeCompliance * 0.25) + (safeDepth * 0.25) - (safeResistance * 0.35) - highResistancePenalty - SUGGESTION_STRENGTH_PENALTY[normalizedStrength];
-  const limits = SUGGESTION_CHANCE_CAP[normalizedStrength];
-  return Math.max(limits.min, Math.min(limits.max, Math.round(rawChance)));
-}
-
-async function deriveSuggestionRoll(env, { gameId, baseTurnCount, actionDigest, clientId, characterId, strength }) {
-  const secret = env.APP_ACTION_SIGNING_SECRET || env.SUPABASE_SECRET_KEY;
-  if (!secret) throw new Error('suggestion signing secret unavailable');
-  const message = ['gamebuilder-suggestion-roll-v1', gameId, baseTurnCount, actionDigest, clientId, characterId, strength].join('\n');
-  const key = await crypto.subtle.importKey('raw', new TextEncoder().encode(secret), { name: 'HMAC', hash: 'SHA-256' }, false, ['sign']);
-  const bytes = new Uint8Array(await crypto.subtle.sign('HMAC', key, new TextEncoder().encode(message)));
-  const value = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength).getUint32(0, false);
-  return (value % 100) + 1;
-}
-
 function collectSemanticStrengthCandidates(previousSave, canonicalAction) {
   const csa = Array.isArray(previousSave?.csa_active) ? previousSave.csa_active : [];
   return canonicalAction.operations.flatMap(operation => {
@@ -555,35 +536,8 @@ async function verifyStructuredActionValidation(env, gameId, structuredAction) {
   const results = Array.isArray(semantic.results) ? semantic.results : [];
   const mutableOperations = structuredAction.operations.filter(item => ['activate', 'update'].includes(item?.operation));
   const byClientId = new Map(mutableOperations.map(item => [item.client_id, item]));
-  const suggestionIds = new Set(mutableOperations.filter(item => item.domain === 'suggestion').map(item => item.client_id));
   if (new Set(results.map(item=>item?.client_id)).size !== results.length || results.some(item => !byClientId.has(item?.client_id) || !['weak','medium','strong','unsupported'].includes(item?.required_strength))) return { ok:false, reason:'semantic result mismatch' };
-  if (semantic.version === 2 && (results.filter(item => suggestionIds.has(item?.client_id)).length !== suggestionIds.size || [...suggestionIds].some(id => !results.some(item => item?.client_id === id)))) return { ok:false, reason:'missing suggestion semantic result' };
-  if (semantic.version !== 1 && semantic.version !== 2) return { ok:false, reason:'unsupported semantic validation version' };
-  if (semantic.version === 2) {
-    for (const result of results) {
-      const operation = byClientId.get(result.client_id);
-      if (operation.domain !== 'suggestion') {
-        if (result.resolution !== undefined) return { ok:false, reason:'unexpected csa resolution' };
-        continue;
-      }
-      const resolution = result.resolution;
-      if (!isPlainObject(resolution)
-        || resolution.version !== 1
-        || resolution.kind !== 'suggestion_application'
-        || resolution.character_id !== operation.character_id
-        || !APP_STRENGTHS.has(resolution.effective_strength)
-        || !Number.isInteger(resolution.chance_pct) || resolution.chance_pct < 5 || resolution.chance_pct > 95
-        || !Number.isInteger(resolution.roll) || resolution.roll < 1 || resolution.roll > 100
-        || !['success', 'failure'].includes(resolution.outcome)
-        || !isPlainObject(resolution.basis)
-        || !Number.isFinite(Number(resolution.basis.level))
-        || !Number.isFinite(Number(resolution.basis.compliance))
-        || !Number.isFinite(Number(resolution.basis.hypnosis_depth))
-        || !Number.isFinite(Number(resolution.basis.resistance))
-        || !Number.isFinite(Number(resolution.basis.high_resistance_penalty))) return { ok:false, reason:'invalid suggestion resolution' };
-      if ((resolution.roll <= resolution.chance_pct) !== (resolution.outcome === 'success')) return { ok:false, reason:'resolution outcome mismatch' };
-    }
-  }
+  if (semantic.version !== 1) return { ok:false, reason:'unsupported semantic validation version' };
   const payload = { game_id: gameId, base_turn_count: structuredAction.base_turn_count, action_digest: actionDigest, semantic_results: results };
   return (await verifyAppValidationProof(env, payload, structuredAction.validation_proof)) ? { ok:true } : { ok:false, reason:'signature mismatch' };
 }
@@ -637,7 +591,7 @@ async function handleAppValidate(req, env) {
       console.warn(JSON.stringify({ event: 'app_strength_validation_rejected', game_id, issue_codes: ['APP_STRENGTH_VALIDATION_FAILED'] }));
       return jsonResponse({ error: '상식개변 강도 확인에 실패했습니다. 잠시 후 다시 적용해 주세요.', error_code: 'APP_STRENGTH_VALIDATION_FAILED' }, 502);
     }
-    const capability = calculateHypnosisCapability(ctx.save, ctx.master);
+  const capability = calculateCsaCapability(ctx.save, ctx.master);
     const issues = semanticStrengthIssues(candidates, semanticResults, ({ '약함':'weak', '중간':'medium', '강함':'strong' })[capability.available_strength] || 'weak');
     if (issues.length) {
       console.warn(JSON.stringify({ event: 'app_strength_validation_rejected', game_id, issue_codes: issues.map(issue => issue.code) }));
@@ -655,7 +609,7 @@ async function handleAppValidate(req, env) {
   return jsonResponse({ ok: true, canonical_action: result.canonical_action, display_input: result.display_input, summary: result.summary });
 }
 
-const MANUAL_SCOPE_LABELS = { ward: '병동', floor: '해당 층 전체', building: '건물 전체', world: '전 세계' };
+const MANUAL_SCOPE_LABELS = { location: '현재 장소', ward: '병동', floor: '해당 층 전체', building: '건물 전체', world: '전 세계' };
 const MANUAL_TIER_META = [
   ['weak', '약함', 1, '감각·주의·기분·가벼운 충동을 변화시키지만 핵심 금기와 행동 선택은 유지합니다.'],
   ['medium', '중간', 3, '특정 조건에서 부끄러움·거리감·행동 기준을 바꾸고 실제 행동을 자연스럽게 유도합니다.'],
@@ -977,20 +931,20 @@ function buildHospitalLocationMemorySection(save) {
 }
 
 function buildAppManualPayload(master, save, turnCount = 0) {
-  const capability = calculateHypnosisCapability(save, master);
+  const capability = calculateCsaCapability(save, master);
   const level = capability.current_level;
   const limits = getCsaLimits(level);
   const progress = level >= 10
     ? 100
     : Math.max(0, Math.min(100, Math.round(capability.exp / capability.next_level_exp * 100)));
-  const tierRank = hypnosisStrengthRank(capability.available_strength);
+  const tierRank = csaStrengthRank(capability.available_strength);
   const csaTiers = MANUAL_TIER_META.map(([id, label, unlockLevel]) => ({
     id,
     label,
     unlock_level: unlockLevel,
     available: level >= unlockLevel,
     description: MANUAL_CSA_TIER_DESCRIPTIONS[id],
-    examples: normalizeManualExamples(MANUAL_CSA_EXAMPLES[id], tierRank >= hypnosisStrengthRank(label))
+    examples: normalizeManualExamples(MANUAL_CSA_EXAMPLES[id], tierRank >= csaStrengthRank(label))
   }));
   const remainingCsaSlots = Math.max(0, capability.csa_max_active - capability.csa_active_count);
   const diagnostics = [remainingCsaSlots > 0
@@ -1208,7 +1162,7 @@ function buildAppStatePayload(master, save, turnCount = 0) {
   });
   const strength_options = [['weak', '약함', 1], ['medium', '중간', 3], ['strong', '강함', 5]]
     .map(([id, label, unlock_level]) => ({ id, label, available: manual.status.level >= unlock_level, unlock_level }));
-  const scope_options = [['ward', '병동', 1], ['floor', '해당 층 전체', 4], ['building', '건물 전체', 7], ['world', '전 세계', 10]]
+  const scope_options = [['location', '현재 장소', 1], ['ward', '병동', 1], ['floor', '해당 층 전체', 4], ['building', '건물 전체', 7], ['world', '전 세계', 10]]
     .map(([id, label, unlock_level]) => ({ id, label, available: manual.status.level >= unlock_level, unlock_level }));
   const common_sense = (Array.isArray(save?.csa_active) ? save.csa_active : [])
     .filter(item => item?.active === true)
@@ -1946,7 +1900,7 @@ async function runExtractPipeline(env, { game_id, narrative_text, player_input, 
   let choiceValidationWarnings = [];
   if (isSetupComplete(compatCtx.save)) {
     const tChoices = Date.now();
-    const hypnosisCapability = calculateHypnosisCapability(effectiveCtx.save, compatCtx.master);
+    const csaCapability = calculateCsaCapability(effectiveCtx.save, compatCtx.master);
     // Captured before normalization mutates extract.choices in place — extract
     // and firstPass.extract are the same object (no second pass reassigns it
     // anymore), so this must be read now or it would always reflect the
@@ -1954,7 +1908,7 @@ async function runExtractPipeline(env, { game_id, narrative_text, player_input, 
     const firstPassChoicesWereArray = Array.isArray(extract.choices);
     const choiceResult = normalizeFinalChoicesDeterministically(extract.choices, {
       narrativeText: finalNarrativeText,
-      capability: hypnosisCapability,
+      capability: csaCapability,
       characters,
       playerName,
       playerJob
@@ -4570,7 +4524,6 @@ function sanitizeCsaDeactivationMemoryExtract(extract = {}, structuredPlan = nul
 }
 
 const NPC_STAT_KEYS = ['호감도', '신뢰도'];
-const CSA_SCOPE_RANK = { ward: 1, floor: 2, building: 3, world: 4 };
 
 function expForNextLevel(level) { return Math.max(1, level) * 10; }
 function calculateProgress(previous = {}, event = 'none') {
@@ -4602,12 +4555,16 @@ function applyNpcStatChanges(previous = {}, proposed = {}) {
   return { stats, changes, errors };
 }
 
+const CSA_SCOPE_RANK = { location: 1, ward: 2, floor: 3, building: 4, world: 5 };
+
 function getCsaLimits(level) {
   const clamped = Math.max(1, Number(level) || 1);
-  if (clamped >= 10) return { scope_type: 'world', max_active: 4 };
-  if (clamped >= 7) return { scope_type: 'building', max_active: 3 };
-  if (clamped >= 4) return { scope_type: 'floor', max_active: 2 };
-  return { scope_type: 'ward', max_active: 1 };
+  if (clamped >= 10) return { scope_type: 'world', max_active: 5 };
+  if (clamped >= 7) return { scope_type: 'building', max_active: 4 };
+  if (clamped >= 5) return { scope_type: 'floor', max_active: 4 };
+  if (clamped >= 4) return { scope_type: 'floor', max_active: 3 };
+  if (clamped >= 3) return { scope_type: 'ward', max_active: 3 };
+  return { scope_type: 'ward', max_active: 2 };
 }
 
 function currentUtcDateString() {
@@ -4628,6 +4585,13 @@ const CSA_SCOPE_LABELS = {
 // server-owned world_state so activation scope can never be forged by the model.
 function resolveCsaScopeId(scopeType, worldState = {}) {
   if (scopeType === 'world') return 'world';
+  if (scopeType === 'location') {
+    const building = typeof worldState?.building === 'string' ? worldState.building.trim() : '';
+    const floor = typeof worldState?.floor === 'string' ? worldState.floor.trim() : '';
+    const ward = typeof worldState?.ward === 'string' ? worldState.ward.trim() : '';
+    const label = normalizeLocationLabel(worldState?.location_label).replace(/\s+/g, '');
+    return building && floor && ward && label ? `location:${building}:${floor}:${ward}:${label}` : null;
+  }
   const value = worldState?.[scopeType];
   return typeof value === 'string' && value.trim() ? value.trim() : null;
 }
@@ -4658,8 +4622,8 @@ function applyCsaAction(save, action, level, turnNumber, worldState = {}) {
     if (typeof action.strength === 'string' && action.strength.trim()) {
       const normalizedStrength = normalizeStrengthForStorage(action.strength);
       if (!normalizedStrength) return null;
-      const { available_strength: availableCsaStrength } = getHypnosisSuggestionLimits(level);
-      if (hypnosisStrengthRank(normalizedStrength) > hypnosisStrengthRank(availableCsaStrength)) return null;
+      const { available_strength: availableCsaStrength } = getCsaStrengthLimits(level);
+      if (csaStrengthRank(normalizedStrength) > csaStrengthRank(availableCsaStrength)) return null;
       newStrength = normalizedStrength;
     }
 
@@ -4704,8 +4668,8 @@ function applyCsaAction(save, action, level, turnNumber, worldState = {}) {
   // deterministic backstop independent of whether Story's own narrative
   // used the strength-exceeded marker (see SUGGESTION_STRENGTH_EXCEEDED_MARKER).
   const strength = normalizeStrengthForStorage(action.strength);
-  const { available_strength: availableCsaStrength } = getHypnosisSuggestionLimits(level);
-  if (!strength || hypnosisStrengthRank(strength) > hypnosisStrengthRank(availableCsaStrength)) return null;
+  const { available_strength: availableCsaStrength } = getCsaStrengthLimits(level);
+  if (!strength || csaStrengthRank(strength) > csaStrengthRank(availableCsaStrength)) return null;
   const scopeId = resolveCsaScopeId(scope, worldState);
   if (!scopeId) {
     console.error('CSA activation rejected: world_state missing required scope', { scope, worldState });
@@ -4732,6 +4696,7 @@ function applyCsaAction(save, action, level, turnNumber, worldState = {}) {
 function isCsaApplicable(csa, worldState = {}) {
   if (csa?.active !== true) return false;
   if (csa.scope_type === 'world') return true;
+  if (csa.scope_type === 'location') return csa.scope_id === resolveCsaScopeId('location', worldState);
   return csa.scope_id === worldState[csa.scope_type];
 }
 
@@ -4747,7 +4712,7 @@ function getApplicableCsaEntries(save, activeCsa = getActiveCsaEntries(save)) {
 }
 
 function buildCurrentCsaStatusSnapshot(save = {}, master = {}, activeCsa = getActiveCsaEntries(save)) {
-  const capability = calculateHypnosisCapability(save, master, activeCsa);
+  const capability = calculateCsaCapability(save, master, activeCsa);
   const applicableCsa = getApplicableCsaEntries(save, activeCsa)
     .map(item => ({ strength: item.strength || '약함', scope_label: item.scope_label || '', content: typeof item.content === 'string' ? item.content.trim() : '' }))
     .filter(item => item.content);
@@ -4770,8 +4735,17 @@ const MIND_EFFECT_BOUNDARY_BASE = `
 - 직접 범위 밖 행동은 NPC의 성격·관계·기억·상황과 현재의 자발적 선택만으로 성립할 때만 허용한다.
 - 개변 수행·신체 반응만으로 호감·신뢰·복종·취향·동의·관계를 영구 확정하지 않는다.`;
 
+const CSA_ONLY_BOUNDARY = `
+[COMMON-SENSE CHANGE BOUNDARY — HIGHEST PRIORITY]
+- 상식개변은 지정 공간의 공동 사회 규범을 바꾸며 특정 개인의 감정·취향·기억을 직접 변경하지 않는다.
+- 문장의 직접 의미와 그 규범을 준수·유지·정리하기 위해 통상적으로 필요한 행동과 자연스러운 주변 반응까지 적용한다.
+- 강도는 대상·신체 부위·행동 종류를 넓히지 않지만, 같은 규범 범위 안에서 헌신·자발성·적극성·반복·사회적 협력은 높일 수 있다.
+- 여러 개변은 각각의 범위 안에서 동시에 누적 결과를 만들 수 있지만, 어느 항목에도 없는 새로운 독립 규칙은 만들지 않는다.
+- 개변 수행만으로 영구 호감·신뢰·취향·연애 관계·자발적 동의·범위 밖 행동을 만들지 않는다.
+- 범위를 벗어나거나 해제되면 현재 규범 적용은 멈추지만 이미 발생한 사건의 기억과 물리 상태는 유지된다.`;
+
 function buildMindEffectBoundarySection({ hasApplicableCsa = false } = {}) {
-  return hasApplicableCsa ? MIND_EFFECT_BOUNDARY_BASE : '';
+  return hasApplicableCsa ? CSA_ONLY_BOUNDARY : '';
 }
 
 function buildApplicableCsaSection(save, activeCsa = getActiveCsaEntries(save)) {
@@ -4971,7 +4945,7 @@ function nextSuggestionId(existingList, turnNumber) {
 // on old saves are left untouched by deactivate/update-without-strength,
 // but can never be (re)written going forward.
 function normalizeStrengthForStorage(value) {
-  return typeof value === 'string' && HYPNOSIS_STRENGTH_TIERS.includes(value.trim()) ? value.trim() : null;
+  return typeof value === 'string' && CSA_STRENGTH_TIERS.includes(value.trim()) ? value.trim() : null;
 }
 
 // Audited legacy helper: this function only ever
@@ -5124,10 +5098,10 @@ function buildCsaPanelText(save = {}, activeCsa = getActiveCsaEntries(save)) {
 
 // Exactly three tiers — a fourth "깊은 최면"(deep) tier existed before this
 // stage and is now removed entirely (stage 4-B item 2). Never reintroduce it.
-const HYPNOSIS_STRENGTH_TIERS = ['약함', '중간', '강함'];
+const CSA_STRENGTH_TIERS = ['약함', '중간', '강함'];
 
-function hypnosisStrengthRank(strength) {
-  const index = HYPNOSIS_STRENGTH_TIERS.indexOf(strength);
+function csaStrengthRank(strength) {
+  const index = CSA_STRENGTH_TIERS.indexOf(strength);
   return index === -1 ? 0 : index;
 }
 
@@ -5146,7 +5120,7 @@ function buildCsaDeactivationNarrativeRule() {
 // 4-B item 2): strength caps at Lv.5 ("강함", forever — Lv.6 adds no new
 // tier and Lv.7~10 never exceed it), while the slot count keeps its
 // existing Lv.7~10 growth curve unchanged.
-function getHypnosisSuggestionLimits(level) {
+function getCsaStrengthLimits(level) {
   const clamped = Math.max(1, Number(level) || 1);
   const availableStrength = clamped >= 5 ? '강함' : clamped >= 3 ? '중간' : '약함';
   const maxActive = clamped >= 8 ? 4 : clamped >= 5 ? 3 : clamped >= 3 ? 2 : 1;
@@ -5156,12 +5130,12 @@ function getHypnosisSuggestionLimits(level) {
 // active_count sums every registered NPC's active personal suggestions, not
 // just the current on-screen NPC — the slot pool is global, so a full pool
 // caused by NPC A must still block a new suggestion for NPC B.
-function calculateHypnosisCapability(save = {}, master = {}, activeCsa = getActiveCsaEntries(save)) {
+function calculateCsaCapability(save = {}, master = {}, activeCsa = getActiveCsaEntries(save)) {
   const level = Math.max(1, Number(save?.player_progress?.level) || 1);
   const exp = Math.max(0, Number(save?.player_progress?.exp) || 0);
   const nextLevelExp = level >= 10 ? 0 : expForNextLevel(level);
   const availableStrength = level >= 5 ? '강함' : level >= 3 ? '중간' : '약함';
-  const maxStrengthRank = hypnosisStrengthRank(availableStrength);
+  const maxStrengthRank = csaStrengthRank(availableStrength);
   const csaLimits = getCsaLimits(level);
   return {
     current_level: level,
@@ -5172,13 +5146,6 @@ function calculateHypnosisCapability(save = {}, master = {}, activeCsa = getActi
     can_use_weak: true,
     can_use_medium: maxStrengthRank >= 1,
     can_use_strong: maxStrengthRank >= 2,
-    active_count: 0,
-    max_active: 0,
-    remaining_slots: 0,
-    can_create_suggestion: false,
-    can_edit_same_strength: false,
-    can_disable_or_delete: false,
-    can_increase_strength: false,
     csa_active_count: activeCsa.length,
     csa_max_active: csaLimits.max_active
   };
@@ -5230,7 +5197,12 @@ function normalizeStructuredAction(rawAction) {
 }
 
 function buildAppScopeLabel(scopeId) {
-  return scopeId === 'world' ? '전 세계' : (CSA_SCOPE_LABELS[scopeId] || scopeId);
+  if (scopeId === 'world') return '전 세계';
+  if (typeof scopeId === 'string' && scopeId.startsWith('location:')) {
+    const label = scopeId.split(':').at(-1) || '';
+    return label || '현재 장소';
+  }
+  return CSA_SCOPE_LABELS[scopeId] || scopeId;
 }
 
 function nextAppSuggestionId(suggestionMap, turnNumber) {
@@ -5287,7 +5259,7 @@ function planAppTransaction(previousSave, master, action, { turnNumber }) {
   if (!rawOperations.length) return { ok: false, status: 422, error_code: 'NO_CHANGES', issues: [appIssue(action, 'NO_CHANGES', '적용할 변경사항이 없습니다.')] };
   if (rawOperations.length > 12) return { ok: false, status: 422, error_code: 'TOO_MANY_OPERATIONS', issues: [appIssue(action, 'TOO_MANY_OPERATIONS', '한 번에 최대 12개 작업만 적용할 수 있습니다.')] };
 
-  const capability = calculateHypnosisCapability(previousSave, master);
+  const capability = calculateCsaCapability(previousSave, master);
   const csaLimits = getCsaLimits(capability.current_level);
   const csa = cloneCsaList(previousSave?.csa_active);
   const issues = [];
@@ -7094,15 +7066,11 @@ export {
   normalizeFirstEncounterStats,
   buildFirstEncounterRepairPrompt,
   repairMissingFirstEncounterStats,
-  normalizeLegacyActiveSuggestions,
-  buildActiveSuggestionSection,
   buildApplicableCsaSection,
-  calculateHypnosisCapability,
-  getHypnosisSuggestionLimits,
-  hypnosisStrengthRank,
+  calculateCsaCapability,
+  getCsaStrengthLimits,
+  csaStrengthRank,
   normalizeStrengthForStorage,
-  resolveHypnosisStoryState,
-  buildHypnosisStatusPanelData,
   findInfeasibleChoices,
   repairInfeasibleChoices,
   repairRawJsonOutput,
@@ -7134,10 +7102,8 @@ export {
   findProfessionRankErrors,
   hasRoleWordNearName,
   buildAddressAbbreviationSection,
-  buildSuggestionStrengthBoundarySection,
   buildCsaNatureSection,
   readRulebookExampleTier,
-  buildSuggestionExampleSection,
   buildCsaExampleSection,
   currentUtcDateString,
   findUnregisteredNamedIndividualsInNarrative,

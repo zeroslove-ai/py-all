@@ -1,16 +1,11 @@
 # CSA-only branch
 
 - Branch: `feature/csa-only`
-- Preserved base SHA: `3e9716dd6c424dff8f850102eed76884d4e907fa`
-- Archive branch: `archive/pre-csa-only`
-- The only app-managed mental effect is spatial common-sense change (CSA).
-- Personal suggestion and hypnosis mechanics are not exposed by the UI, injected into Story or Extract prompts, accepted by app validation, or updated during commits.
-- NPC relationship stats exposed and updated by this branch are limited to affinity and trust.
-- Existing legacy save fields such as active suggestions and hypnosis-related NPC stats remain in storage for compatibility, but this branch removes them from runtime context and public payloads.
-- The frontend app is reduced to CSA creation, update, deactivation, status, map, and NPC navigation.
-- Story uses a compact CSA-only runtime contract and never injects the legacy mixed app usage text from game master data.
-- Extract uses a CSA-only memory firewall and excludes hypnosis-onset image candidates.
-- CSA deactivation preserves event memory and physical scene state.
+- Preserved baseline: `archive/pre-csa-only` (`3e9716dd6c424dff8f850102eed76884d4e907fa`)
+- The sole app-managed gameplay effect is spatial common-sense alteration (CSA).
+- CSA is created, updated, and deactivated only by a signed structured app action.
+- Level unlocks: Lv.1–2 weak/ward/2, Lv.3 medium/ward/3, Lv.4 medium/floor/3, Lv.5–6 strong/floor/4, Lv.7–9 strong/building/4, Lv.10 strong/world/5. Location scope is available from Lv.1.
+- Current location scope uses a server-derived ID from the exact world-state building, floor, ward, and location label.
+- CSA expiration or deactivation stops the current norm only; it does not rewrite memories or physical scene state.
+- Legacy mental-effect save keys are **LEGACY STORAGE ONLY — CSA-only 모드에서는 숨김·주입·표시·갱신하지 않음**.
 - No database migration is required.
-- Static checks passed for the Worker, sidebar, and CSA app client. Gameplay tests were not run.
-- This branch is not deployed automatically.

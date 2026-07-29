@@ -148,3 +148,4 @@ const state = {
 - 하단 선택지 버튼에는 `summarizeChoiceLabel(text, 30)` 축약문만 표시한다(줄바꿈→공백, 연속 공백 정리, 30자 초과 시 앞 29자+`…`, `❗`는 글자 수 계산 전 분리).
 - 클릭 콜백·`player_action`·DB/플레이 기록/MD·TXT에는 항상 선택지 원문 전체(`fullText`)가 전달·저장된다. 버튼 `title`/`aria-label`에도 원문 전체.
 - 모바일은 `span.choice-label`(nowrap + ellipsis)로 한 줄 표시.
+> LEGACY DOCUMENT — main/archive/pre-csa-only 전용. feature/csa-only 구현 기준으로 사용하지 않는다.

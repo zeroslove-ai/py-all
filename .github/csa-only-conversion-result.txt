@@ -1,0 +1,23 @@
+convert_status=1
+worker_check=99
+sidebar_check=99
+app_check=99
+diff_check=99
+
+--- log ---
+Traceback (most recent call last):
+  File "/home/runner/work/py-all/py-all/.github/scripts/convert_csa_only.py", line 298, in <module>
+    worker = sub_once(
+             ^^^^^^^^^
+  File "/home/runner/work/py-all/py-all/.github/scripts/convert_csa_only.py", line 15, in sub_once
+    updated, count = re.subn(pattern, replacement, text, count=1, flags=flags)
+                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/opt/hostedtoolcache/Python/3.12.13/x64/lib/python3.12/re/__init__.py", line 197, in subn
+    return _compile(pattern, flags).subn(repl, string, count)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/opt/hostedtoolcache/Python/3.12.13/x64/lib/python3.12/re/__init__.py", line 334, in _compile_template
+    return _sre.template(pattern, _parser.parse_template(repl, pattern))
+                                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/opt/hostedtoolcache/Python/3.12.13/x64/lib/python3.12/re/_parser.py", line 1075, in parse_template
+    raise s.error('bad escape %s' % this, len(this)) from None
+re.error: bad escape \s at position 152 (line 4, column 23)

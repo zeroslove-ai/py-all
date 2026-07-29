@@ -96,14 +96,18 @@ const LEGACY_MENTAL_EFFECT_PATTERNS = [
 
 function csaOnlyNpcStats(stats = {}) {
   if (!isPlainObject(stats)) return {};
-  return Object.fromEntries(Object.entries(stats)
-    .filter(([key]) => !LEGACY_MENTAL_EFFECT_SAVE_KEYS.has(key)));
+  const result = {};
+  for (const key of ['호감도', '상식수용도']) {
+    const value = Number(stats[key]);
+    if (Number.isFinite(value)) result[key] = Math.max(0, Math.min(100, value));
+  }
+  return result;
 }
 
 function csaOnlyNpcStatChanges(changes = {}) {
   if (!isPlainObject(changes)) return {};
   return Object.fromEntries(Object.entries(changes)
-    .filter(([key]) => !LEGACY_MENTAL_EFFECT_SAVE_KEYS.has(key)));
+    .filter(([key]) => key === '호감도' || key === '상식수용도'));
 }
 
 function sanitizeLegacyMentalEffectText(value) {
@@ -145,9 +149,23 @@ function buildCsaOnlySaveView(save = {}) {
   return view;
 }
 
+function buildCsaOnlyEffectiveSave(save = {}, master = {}) {
+  const view = buildCsaOnlySaveView(save);
+  const characters = isPlainObject(master?.characters) ? master.characters : {};
+  if (!isPlainObject(view.npc_stats)) return view;
+  view.npc_stats = Object.fromEntries(Object.entries(view.npc_stats).map(([characterId, stats]) => {
+    const next = { ...stats };
+    if (!Number.isFinite(Number(next['상식수용도']))) {
+      next['상식수용도'] = Math.max(0, Math.min(100, 100 - resolveCsaResistance(characters[characterId] || {})));
+    }
+    return [characterId, next];
+  }));
+  return view;
+}
+
 function buildCsaOnlyPublicContext(ctx = {}) {
   if (!isPlainObject(ctx)) return ctx;
-  return { ...ctx, save: buildCsaOnlySaveView(ctx.save) };
+  return { ...ctx, save: buildCsaOnlyEffectiveSave(ctx.save, ctx.master) };
 }
 
 // Only aborts the in-flight fetch itself (e.g. waiting for response headers);
@@ -997,7 +1015,8 @@ function buildAppManualPayload(master, save, turnCount = 0) {
     hospital_map: buildHospitalMapPayload(master, save),
     stats: [
       { id: 'affinity', label: '호감도', range: '0~100', description: 'NPC가 플레이어에게 느끼는 감정적 호의입니다.', change_rule: '턴당 최대 -5~+5' },
-      { id: 'trust', label: '신뢰도', range: '0~100', description: 'NPC가 플레이어의 말과 행동, 신분과 의도를 믿는 정도입니다.', change_rule: '턴당 최대 -5~+5' }
+      { id: 'acceptance', label: '상식수용도', range: '0~100', description: '현재 적용 중인 상식개변을 자연스럽게 받아들이고 자발적·협조적으로 실행하는 정도입니다.', change_rule: '실제 적용 장면에서만 변화' },
+      { id: 'resistance', label: '상식저항력', range: '0~100', description: '캐릭터에 고정된 상식개변 저항력입니다.', change_rule: '고정값' }
     ],
     unlocks: [
       { level: 1, items: ['약함 강도', '병원 전체 범위', '활성 2개'] },
@@ -2367,7 +2386,7 @@ async function runCommitPipeline(env, { game_id, turn_number, content: rawConten
       console.warn(JSON.stringify({ event: 'recent100_summary_fail_open', endpoint: '/api/commit-turn', request_id: requestId, error: error.message }));
     }
   }
-  const patch = buildSavePatch(safeExtract, engine_patch, summaryPlan, ctx?.save || {}, turn_number, player_input, structuredPlan);
+  const patch = buildSavePatch(safeExtract, engine_patch, summaryPlan, ctx?.save || {}, turn_number, player_input, structuredPlan, ctx?.master || {});
   // Reserved key (same convention as _turn_record) — commit_turn's SQL
   // strips this before merging into game_save.data and instead persists it
   // into this turn's own game_memories.pre_turn_save_snapshot column. Lets
@@ -3053,7 +3072,7 @@ function buildGeneralActionJudgmentSection() {
 
 [일반 행동 판정]
 - 플레이어 입력은 시도이며 NPC의 반응·동의·감정·관계·과거·오르가즘·스탯을 확정하지 않는다.
-- 일상 대화·업무 행동은 특별한 방해가 없으면 자연스럽게 진행한다. 부담 있는 부탁·설득·친밀 행동은 호감도·신뢰도, 성격·관계·장소·직전 사건으로 성공·부분 성공·실패를 판단한다.
+- 일상 대화·업무 행동은 특별한 방해가 없으면 자연스럽게 진행한다. 부담 있는 부탁·설득·친밀 행동은 호감도, 성격·관계·장소·직전 사건으로 성공·부분 성공·실패를 판단한다. 상식수용도는 현재 적용 중인 상식개변의 자발적·협조적 실행에만 영향을 주며 호감·동의·관계 수치를 대신하지 않는다.
 - 강압적·성적·위험한 행동은 명확한 자발적 참여나 직접 관련된 현재 장소의 상식개변이 없으면 성공시키지 않는다.
 - 상식개변은 적힌 직접 범위 밖의 복종·성적 행동·관계·기억 효과로 확장하지 않는다.`;
 }
@@ -3372,9 +3391,10 @@ function buildRegenerationFeedbackSection(regenerationFeedback) {
 function buildStoryPrompt(ctx, playerInput, currentTurn, feedback = [], regenerationFeedback = null, structuredPlan = null) {
   ctx = withSetupCompatibility(ctx);
   const master = ctx?.master || {};
-  const save = ctx?.__structured_effective_save === true
+  const rawSave = ctx?.__structured_effective_save === true
     ? (isPlainObject(ctx?.save) ? ctx.save : {})
     : buildStructuredEffectiveSave(ctx?.save, structuredPlan);
+  const save = buildCsaOnlyEffectiveSave(rawSave, master);
   const recentMemories = ctx?.recent_memories || [];
   const nextTurn = currentTurn + 1;
   const isReentry = !playerInput || playerInput.trim() === '' || playerInput.trim() === '/플레이';
@@ -3586,9 +3606,10 @@ function buildMindEffectExtractFirewallSection({ hasApplicableCsa = false, hasCs
 
 function buildExtractPrompt(narrativeText, playerInput, ctx, images, turnCount, structuredPlan = null) {
   const master = ctx?.master || {};
-  const save = ctx?.__structured_effective_save === true
+  const rawSave = ctx?.__structured_effective_save === true
     ? (isPlainObject(ctx?.save) ? ctx.save : {})
     : buildStructuredEffectiveSave(ctx?.save, structuredPlan);
+  const save = buildCsaOnlyEffectiveSave(rawSave, master);
   const applicableCsa = getApplicableCsaEntries(save);
   const hasCsaTransaction = structuredPlan?.canonical_action?.type === 'app_transaction'
     && structuredPlan.canonical_action.operations?.some(operation => operation?.domain === 'csa') === true;
@@ -3664,10 +3685,10 @@ character_id가 narrator가 아닌 등록 NPC이고 그 NPC가 방금 서사에 
 직전 저장된 npc_emotion 문장을 그대로 복사하거나 단어만 바꿔치기하지 마라. 이번 턴 서사에서 새로 일어난 인식·감정·신체 변화만 기록하고, 변화가 작더라도 직전 문장을 그대로 반복하지 마라. 일시적인 신체 반응이나 순간의 동요를 사랑, 영구 복종, 완전한 욕망으로 자동 확정하지 말고, 갈등·혼란·자기합리화가 남아 있다면 그대로 유지해라.
 
 [NPC STAT DELTA CONTRACT]
-npc_stat_changes에는 호감도와 신뢰도만 반환한다. 서사에 숫자가 없어도 대사·행동·표정·판단의 실제 변화를 근거로 판단하되 변화 없는 반복 대화는 0이다. 의미 있는 호의·편안함·자발적 대화 지속은 호감 +1~2, 의심 완화·정직성 확인·도움 수용은 신뢰 +1~2를 검토한다. 무례는 호감 -1~-2, 거짓말 발각·모순·신분 의심은 신뢰 -1~-3을 검토한다. 상식개변의 직접 효과만으로 수행된 행동은 호감도·신뢰도 상승 근거가 아니다. 개변 외에 독립적인 감정·관계 변화가 Story에 명확하지 않으면 0으로 둔다. 신체 반응, 거부하지 않음, 반복 수행, 자기합리화만으로 관계 수치를 올리지 않는다. 한도는 각각 -5~+5이고 ±4~5는 중요한 전환에만 쓴다. reason은 서사 근거 한 문장이다.
+npc_stat_changes에는 호감도와 상식수용도만 반환한다. 호감도는 실제 독립적 감정·관계 변화만 근거로 -5~+5 안에서 판단한다. 상식수용도는 현재 장면에 그 NPC에게 실제로 적용된 상식개변이 행동·판단에 반영된 경우에만 반환하며, 강도와 상식저항력을 고려한 범위 안에서 판단한다. 상식개변 생성·수정·해제 자체, 단순 반복, 플레이어 선언만으로는 올리지 않는다. reason은 서사 근거 한 문장이다.
 
 [FIRST ENCOUNTER CONTRACT]
-저장된 npc_encounters에 현재 NPC(character_id) 기록이 없고 이번이 실제로 처음 직접 조우한 장면일 때만 first_encounter_stats에 호감도·신뢰도를 0~35 사이 정수로 판단해 반환한다. 단순히 배경에 등장했거나 멀리서 본 것만으로는 첫 직접 조우가 아니다 — 직접 대화, 응대, 신체 접촉처럼 명확한 상호작용이 있어야 첫 직접 조우로 판단한다. 공식이나 랜덤 없이, 플레이어의 저장된 외형·복장·직업·말투·현재 태도와 NPC의 성격·가치관·경계심·현재 상황을 근거로 종합적으로 정한다. 제공되지 않은 정보를 지어내지 마라. 두 수치는 같을 필요가 없고 NPC 성격에 따라 결과가 달라져야 한다. 이미 조우한 NPC이거나 처음 만나는 장면이 아니면 first_encounter_stats는 반드시 null이다. 실제로 처음 직접 조우한 장면인데 이 판단을 빠뜨리지 마라 — 반드시 first_encounter_stats를 채워야 한다.
+저장된 npc_encounters에 현재 NPC(character_id) 기록이 없고 이번이 실제로 처음 직접 조우한 장면일 때만 first_encounter_stats에 호감도만 0~35 사이 정수로 판단해 반환한다. 단순히 배경에 등장했거나 멀리서 본 것만으로는 첫 직접 조우가 아니다 — 직접 대화, 응대, 신체 접촉처럼 명확한 상호작용이 있어야 한다. 상식수용도는 첫 조우에서 판단하거나 변경하지 않는다. 이미 조우한 NPC이거나 처음 만나는 장면이 아니면 first_encounter_stats는 반드시 null이다.
 
 [CURRENT NPC RELATIONSHIP RECORD]
 현재 메인 NPC의 직전 누적값: player_ejaculation_count=${Math.max(0, Number(save?.npc_relationship_state?.[save?.last_character_id]?.player_ejaculation_count) || 0)}, npc_orgasm_count=${Math.max(0, Number(save?.npc_relationship_state?.[save?.last_character_id]?.npc_orgasm_count) || 0)}.
@@ -3723,7 +3744,7 @@ ${JSON.stringify(imageCatalog)}
   "npcs_present": ["등장 NPC heroine ID 전부. 없으면 []"],
   "character_id": "npcs_present 안에서만 선택. 비어있을 때만 narrator.",
   "npc_emotion": {"surface": "“따옴표로 감싼 1인칭 내면 독백, 실질 길이 최소 40자”", "inner": "“따옴표로 감싼 1인칭 내면 독백, 실질 길이 최소 40자”", "physical_reaction": "관찰 가능한 신체적·행동적 반응, 최소 2문장", "state": "normal|questioning|conflicted|self_rationalizing|accepting|resisting|dependent"},
-  "npc_stat_changes": {"호감도": {"delta": 0, "reason": "변화 근거 없음"}, "신뢰도": {"delta": 0, "reason": "변화 근거 없음"}},
+  "npc_stat_changes": {"호감도": {"delta": 0, "reason": "변화 근거 없음"}, "상식수용도": {"delta": 0, "reason": "현재 상식개변 적용 근거 없음"}},
   "first_encounter_stats": null,
   "player_patch": {"name": "", "age": 0, "gender": "", "height_cm": 0, "weight_kg": 0, "job": "", "background": "", "location": "", "style": "", "penis_length_cm": 0},
   "player_recommendation": {"name": "", "age": 0, "gender": "", "job": "", "major": "", "rank": "", "height_cm": 0, "weight_kg": 0, "penis_length_cm": 0, "style": "", "personality": "", "speech_style": "", "background": "", "starting_location": "", "short_feature": "", "play_hook": ""},
@@ -4001,7 +4022,7 @@ function clampPlayerInputEchoedStatChanges({ patch, previousSave, characterId })
     const prior = previousSave?.npc_stats?.[characterId] || {};
     const stats = { ...patch.npc_stats[characterId] };
     const changes = { ...(patch.npc_stat_changes?.[characterId] || {}) };
-    for (const key of ['호감도', '신뢰도', '순응도', '최면깊이']) {
+    for (const key of ['호감도', '상식수용도']) {
       const delta = Number(changes?.[key]?.delta);
       const reason = String(changes?.[key]?.reason || '');
       if (Number.isFinite(delta) && delta > 0 && /플레이어.*(?:선언|입력|작성)|(?:이미\s*)?(?:좋아|복종|오르가즘).*(?:입력|작성|선언)/u.test(reason)) {
@@ -4015,7 +4036,7 @@ function clampPlayerInputEchoedStatChanges({ patch, previousSave, characterId })
   return patch;
 }
 
-function buildSavePatch(extract, enginePatch = {}, summaryPlan = null, previousSave = {}, turnNumber = 0, playerInput = '', structuredPlan = null) {
+function buildSavePatch(extract, enginePatch = {}, summaryPlan = null, previousSave = {}, turnNumber = 0, playerInput = '', structuredPlan = null, master = {}) {
   const characterId = typeof extract.character_id === 'string'
     ? extract.character_id
     : null;
@@ -4051,24 +4072,48 @@ function buildSavePatch(extract, enginePatch = {}, summaryPlan = null, previousS
     const structured = hasStructuredEncounter(previousSave, characterId);
     const legacy = !structured && hasLegacyEncounterEvidence(previousSave, characterId);
     const firstEncounterStats = !structured && !legacy ? normalizeFirstEncounterStats(extract.first_encounter_stats) : null;
-    const workerStatChangeInput = {
+    const character = isPlainObject(master?.characters?.[characterId]) ? master.characters[characterId] : {};
+    const resistance = resolveCsaResistance(character);
+    let workerStatChangeInput = {
       호감도: extract.npc_stat_changes?.호감도 || { delta: 0, reason: '' },
-      신뢰도: extract.npc_stat_changes?.신뢰도 || { delta: 0, reason: '' }
+      상식수용도: extract.npc_stat_changes?.상식수용도 || { delta: 0, reason: '' }
     };
+    const currentSceneCsa = getApplicableCsaEntries({ ...previousSave, world_state: mergedWorldState });
+    const currentSceneHasCsa = !degraded
+      && currentSceneCsa.length > 0
+      && (Array.isArray(extract.npcs_present) ? extract.npcs_present : []).includes(characterId);
+    if (!currentSceneHasCsa) {
+      workerStatChangeInput = { ...workerStatChangeInput, 상식수용도: { delta: 0, reason: '' } };
+    } else {
+      const strengthRank = Math.max(...currentSceneCsa.map(item => csaStrengthRank(item?.strength)), 1);
+      const maximumGain = strengthRank >= 3 ? 30 : strengthRank === 2 ? 18 : 10;
+      const multiplier = resistance <= 24 ? 1.4 : resistance <= 44 ? 1.2 : resistance <= 64 ? 1 : resistance <= 79 ? 0.7 : 0.4;
+      const requested = Math.trunc(Number(workerStatChangeInput.상식수용도?.delta) || 0);
+      const bounded = Math.max(-20, Math.min(maximumGain, requested));
+      workerStatChangeInput = {
+        ...workerStatChangeInput,
+        상식수용도: {
+          ...workerStatChangeInput.상식수용도,
+          delta: bounded > 0 ? Math.round(bounded * multiplier) : bounded
+        }
+      };
+    }
 
     const statChangeInput = firstEncounterStats
-      ? { ...workerStatChangeInput, 호감도: { delta: 0, reason: '' }, 신뢰도: { delta: 0, reason: '' } }
+      ? { ...workerStatChangeInput, 호감도: { delta: 0, reason: '' }, 상식수용도: { delta: 0, reason: '' } }
       : workerStatChangeInput;
-    const statUpdate = applyNpcStatChanges(previousSave?.npc_stats?.[characterId], statChangeInput);
+    const priorStats = previousSave?.npc_stats?.[characterId] || {};
+    const statUpdate = applyNpcStatChanges(priorStats, statChangeInput);
+    if (!Number.isFinite(Number(priorStats['상식수용도']))) {
+      statUpdate.stats['상식수용도'] = Math.max(0, Math.min(100, 100 - resistance));
+      statUpdate.changes['상식수용도'] = { delta: 0, reason: '' };
+    }
     if (statUpdate.errors.length) console.warn('NPC stat delta rejected:', { characterId, errors: statUpdate.errors });
 
     if (firstEncounterStats) {
       const priorAffinity = Math.max(0, Math.min(100, Number(previousSave?.npc_stats?.[characterId]?.['호감도']) || 0));
-      const priorTrust = Math.max(0, Math.min(100, Number(previousSave?.npc_stats?.[characterId]?.['신뢰도']) || 0));
       statUpdate.stats['호감도'] = firstEncounterStats['호감도'];
-      statUpdate.stats['신뢰도'] = firstEncounterStats['신뢰도'];
       statUpdate.changes['호감도'] = { delta: firstEncounterStats['호감도'] - priorAffinity, reason: firstEncounterStats.reason };
-      statUpdate.changes['신뢰도'] = { delta: firstEncounterStats['신뢰도'] - priorTrust, reason: firstEncounterStats.reason };
     }
 
     patch.npc_stats = { [characterId]: statUpdate.stats };
@@ -4095,14 +4140,12 @@ function buildSavePatch(extract, enginePatch = {}, summaryPlan = null, previousS
       patch.npc_encounters = { [characterId]: {
         first_turn: turnNumber,
         initial_affinity: firstEncounterStats['호감도'],
-        initial_trust: firstEncounterStats['신뢰도'],
         reason: firstEncounterStats.reason
       } };
     } else if (legacy) {
       patch.npc_encounters = { [characterId]: {
         first_turn: 0,
         initial_affinity: 0,
-        initial_trust: 0,
         reason: 'legacy encounter inferred from existing save state'
       } };
     }
@@ -4545,7 +4588,9 @@ function sanitizeCsaDeactivationMemoryExtract(extract = {}, structuredPlan = nul
   return sanitized;
 }
 
-const NPC_STAT_KEYS = ['호감도', '신뢰도'];
+const CSA_ONLY_MUTABLE_NPC_STATS = new Set(['호감도', '상식수용도']);
+const CSA_ONLY_FIXED_NPC_STATS = new Set(['상식저항력']);
+const NPC_STAT_KEYS = [...CSA_ONLY_MUTABLE_NPC_STATS];
 
 function expForNextLevel(level) { return Math.max(1, level) * 10; }
 function calculateProgress(previous = {}, event = 'none') {
@@ -4567,14 +4612,23 @@ function applyNpcStatChanges(previous = {}, proposed = {}) {
     const requested = Number(proposed?.[key]?.delta);
     const reason = typeof proposed?.[key]?.reason === 'string' ? proposed[key].reason.trim().slice(0, 240) : '';
     let delta = Number.isFinite(requested) ? Math.trunc(requested) : 0;
-    if (Math.abs(delta) > 5) {
-      errors.push(`${key}: delta ${delta} exceeds allowed ±5`);
+    const maximumDelta = key === '상식수용도' ? 30 : 5;
+    if (Math.abs(delta) > maximumDelta) {
+      errors.push(`${key}: delta ${delta} exceeds allowed ±${maximumDelta}`);
       delta = 0;
     }
     stats[key] = Math.max(0, Math.min(100, current + delta));
     changes[key] = { delta: stats[key] - current, reason: delta === 0 ? '' : reason };
   }
   return { stats, changes, errors };
+}
+
+function resolveCsaResistance(character = {}) {
+  const direct = Number(character['상식저항력']);
+  if (Number.isFinite(direct)) return Math.max(0, Math.min(100, direct));
+  const legacy = Number(character['최면저항력초기']);
+  if (Number.isFinite(legacy)) return Math.max(0, Math.min(100, legacy));
+  return 50;
 }
 
 function getCsaLimits(level) {
@@ -4890,12 +4944,10 @@ function clampStatValue(value, min, max) {
 function normalizeFirstEncounterStats(raw) {
   if (!isPlainObject(raw)) return null;
   const affinity = Number(raw['호감도']);
-  const trust = Number(raw['신뢰도']);
-  if (!Number.isFinite(affinity) || !Number.isFinite(trust)) return null;
+  if (!Number.isFinite(affinity)) return null;
   const reason = typeof raw.reason === 'string' ? raw.reason.trim().slice(0, 240) : '';
   return {
     호감도: clampStatValue(affinity, 0, 35),
-    신뢰도: clampStatValue(trust, 0, 35),
     reason
   };
 }
@@ -6510,11 +6562,11 @@ ${JSON.stringify(cleanForLlm(player))}
 ${JSON.stringify(cleanForLlm(npcProfile))}
 
 판정 규칙:
-- 첫 직접 조우가 맞으면 is_direct_first_encounter를 true로 하고, 플레이어의 외모·복장·직업·말투·현재 태도와 NPC의 성격·가치관·경계심·현재 상황을 근거로 호감도·신뢰도를 각각 0~35 사이 정수로 판단한다. 공식이나 랜덤 없이 종합 판단하고, 두 수치는 같을 필요가 없다.
-- 첫 직접 조우가 아니면 is_direct_first_encounter를 false로 하고 호감도·신뢰도는 null로 둔다.
+- 첫 직접 조우가 맞으면 is_direct_first_encounter를 true로 하고, 플레이어의 외모·복장·직업·말투·현재 태도와 NPC의 성격·가치관·경계심·현재 상황을 근거로 호감도만 0~35 사이 정수로 판단한다. 상식수용도는 첫 조우에서 판단하지 않는다.
+- 첫 직접 조우가 아니면 is_direct_first_encounter를 false로 하고 호감도는 null로 둔다.
 
 [요구 JSON 스키마]
-{"is_direct_first_encounter": true, "호감도": 0, "신뢰도": 0, "reason": "짧은 근거 한 문장"}`;
+{"is_direct_first_encounter": true, "호감도": 0, "reason": "짧은 근거 한 문장"}`;
 }
 
 // Story/Extract is expected to fill first_encounter_stats on a genuine first

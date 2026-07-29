@@ -1,19 +1,8 @@
 // ui.js — UI 렌더링 함수들
 
-// Gentle-follow scroll tuning — small per-chunk nudge, not a hard jump.
-const STREAM_SCROLL_STEP_PX = 24;
-const NEAR_BOTTOM_THRESHOLD_PX = 80;
-
 const ui = {
   // ─── DOM 참조 (캐싱) ───
   els: {},
-  // autoFollow: armed at the start of each new turn's narrative (only if the
-  // user was already near the bottom); gentle-follow only nudges the view
-  // while this is true. programmaticScroll: set right before *our own*
-  // scrollTop writes so the 'scroll' listener below can tell those apart
-  // from a real user-driven scroll (wheel/touch/scrollbar/keyboard all
-  // surface as native 'scroll' events either way).
-  scrollState: { autoFollow: true, programmaticScroll: false },
   init() {
     this.els = {
       storyStream: document.getElementById('story-stream'),
@@ -35,35 +24,10 @@ const ui = {
     // sidebar.init() calls ui.init() again on every side-panel re-render —
     // storyStream itself is never recreated, so guard against attaching a
     // second listener onto the same element.
-    if (!this._scrollListenerAttached && this.els.storyStream) {
-      this.els.storyStream.addEventListener('scroll', () => {
-        if (this.scrollState.programmaticScroll) { this.scrollState.programmaticScroll = false; return; }
-        // Any non-programmatic scroll re-evaluates auto-follow: moving away
-        // from the bottom suspends it, moving back near the bottom (or the
-        // user scrolling back down themselves) re-arms it.
-        this.scrollState.autoFollow = this.isNearBottom();
-      });
-      this._scrollListenerAttached = true;
-    }
-  },
-
-  isNearBottom(threshold = NEAR_BOTTOM_THRESHOLD_PX) {
-    const el = this.els.storyStream;
-    if (!el) return true;
-    return el.scrollHeight - el.scrollTop - el.clientHeight <= threshold;
   },
 
   // Nudges the view down by a small, fixed step — never jumps straight to
   // the bottom — and only while auto-follow is armed for this turn.
-  gentleFollowStream() {
-    if (!this.scrollState.autoFollow) return;
-    const el = this.els.storyStream;
-    if (!el) return;
-    const remaining = el.scrollHeight - el.scrollTop - el.clientHeight;
-    if (remaining <= 0) return;
-    this.scrollState.programmaticScroll = true;
-    el.scrollTop += Math.min(remaining, STREAM_SCROLL_STEP_PX);
-  },
 
   // ─── 메타 정보 ───
   updateMeta(title, turnCount) {
@@ -96,7 +60,6 @@ const ui = {
     div.style.fontWeight = 'bold';
     div.textContent = `> ${text}`;
     this.els.storyStream.appendChild(div);
-    this.scrollToBottom();
   },
 
   // ─── 서사 스트리밍 (한 글자씩) ───
@@ -119,8 +82,6 @@ const ui = {
       // the rest of this turn is armed only if the user was already near
       // the bottom when it started (typically true right after their own
       // just-sent message).
-      this.scrollState.autoFollow = this.isNearBottom();
-      this.scrollState.programmaticScroll = true;
       // Instant, not smooth — a smooth scroll fires many 'scroll' events
       // over its animation and the guard flag above only suppresses one,
       // which would otherwise mis-detect the tail of that animation as a
@@ -132,7 +93,6 @@ const ui = {
     const textNode = document.createTextNode(chunk);
     cursor.parentNode.insertBefore(textNode, cursor);
 
-    this.gentleFollowStream();
   },
 
   // ─── 서사 스트리밍 종료 ───
@@ -167,7 +127,6 @@ const ui = {
     div.style.fontStyle = 'italic';
     div.textContent = `[시스템] ${text}`;
     this.els.storyStream.appendChild(div);
-    this.scrollToBottom();
   },
 
   restoreNarrative(text) {
@@ -309,7 +268,6 @@ const ui = {
     button.addEventListener('click', onRetry, { once: true });
     div.appendChild(button);
     this.els.storyStream.appendChild(div);
-    this.scrollToBottom();
   },
 
   // A dedicated class (never .narrative) so this notice is never mistaken
@@ -359,7 +317,6 @@ const ui = {
       div.appendChild(detailsEl);
     }
     this.els.storyStream.appendChild(div);
-    this.scrollToBottom();
   },
 
   clearPendingTurnActions() {
@@ -525,9 +482,6 @@ const ui = {
     });
   },
 
-  scrollToBottom() {
-    this.els.storyStream.scrollTop = this.els.storyStream.scrollHeight;
-  }
 };
 
 // 초기화

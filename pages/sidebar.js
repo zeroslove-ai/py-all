@@ -1,7 +1,7 @@
 const sidebar = {
   stats: [
     { key: '호감도', label: '호감' },
-    { key: '신뢰도', label: '신뢰' }
+    { key: '상식수용도', label: '수용' }
   ],
   previousStats: {},
 
@@ -42,6 +42,7 @@ const sidebar = {
   updateCharacter(characterId, context = state.context) {
     if (!characterId || characterId === 'narrator') return;
     const character = context?.master?.characters?.[characterId] || {};
+    this.activeCharacter = character;
     this.activeCharacterId = characterId;
     document.getElementById('character-info-title').textContent = `${character.name || characterId} 기본정보`;
     document.getElementById('npc-status-title').textContent = `${character.name || characterId} 상태`;
@@ -70,11 +71,15 @@ const sidebar = {
     const root = document.getElementById('npc-status');
     const previous = this.previousStats[characterId] || {};
     const next = {};
+    const directResistance = Number(this.activeCharacter?.['상식저항력']);
+    const legacyResistance = Number(this.activeCharacter?.['최면저항력초기']);
+    const resistance = Number.isFinite(directResistance) ? directResistance : (Number.isFinite(legacyResistance) ? legacyResistance : 50);
     root.className = 'npc-status npc-status-inline';
     root.replaceChildren();
     this.stats.forEach((stat, index) => {
       if (index) root.append(document.createTextNode(' · '));
-      const value = Number(stats[stat.key]);
+      let value = Number(stats[stat.key]);
+      if (stat.key === '상식수용도' && !Number.isFinite(value)) value = Math.max(0, Math.min(100, 100 - resistance));
       const valueNode = document.createElement('span');
       valueNode.className = 'stat-value';
       valueNode.textContent = `${stat.label} ${Number.isFinite(value) ? value : '-'}`;
@@ -93,6 +98,11 @@ const sidebar = {
       }
       root.append(valueNode);
     });
+    root.append(document.createTextNode(' · '));
+    const resistanceNode = document.createElement('span');
+    resistanceNode.className = 'stat-value';
+    resistanceNode.textContent = `상식저항력 ${Math.max(0, Math.min(100, resistance))}`;
+    root.append(resistanceNode);
     if (characterId) this.previousStats[characterId] = next;
   },
 

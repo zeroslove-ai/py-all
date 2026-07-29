@@ -4,8 +4,6 @@
 // A backed-up queue (e.g. after a backgrounded tab) never speeds up the
 // visible typing; it only means the background branch below flushes it
 // immediately while the tab isn't visible anyway.
-const STREAM_RENDER_INTERVAL_MS = 10;
-const STREAM_RENDER_CHARS_PER_TICK = 1;
 
 // Collapses any run of 3+ '.'/'…' characters down to exactly '..' — the
 // only postprocessing this does is capping the *count* of ellipsis
@@ -102,7 +100,6 @@ const stream = {
         const ellipsisSanitizer = createEllipsisSanitizer();
         let buffer = '';
         let fullText = '';
-        let displayQueue = '';
         let firstContentMs = null;
         const recordFirstContent = () => {
           if (firstContentMs === null) firstContentMs = Date.now() - overallStart;
@@ -112,27 +109,8 @@ const stream = {
           if (!sanitized) return;
           fullText += sanitized;
           recordFirstContent();
-          displayQueue += sanitized;
+          onChunk(sanitized);
         };
-
-        let networkFinished = false;
-        (function drainTick() {
-          if (!displayQueue.length) {
-            if (networkFinished) { resolveRenderDone(); return; }
-            setTimeout(drainTick, STREAM_RENDER_INTERVAL_MS);
-            return;
-          }
-          if (document.hidden) {
-            // Backgrounded — no reason to animate an invisible tab; flush
-            // whatever's buffered immediately instead of pacing it out.
-            onChunk(displayQueue);
-            displayQueue = '';
-          } else {
-            onChunk(displayQueue.slice(0, STREAM_RENDER_CHARS_PER_TICK));
-            displayQueue = displayQueue.slice(STREAM_RENDER_CHARS_PER_TICK);
-          }
-          setTimeout(drainTick, STREAM_RENDER_INTERVAL_MS);
-        })();
 
         while (true) {
           const { done, value } = await reader.read();
@@ -180,7 +158,7 @@ const stream = {
         }
 
         const flushed = ellipsisSanitizer.flush();
-        if (flushed) { fullText += flushed; displayQueue += flushed; }
+        if (flushed) { fullText += flushed; onChunk(flushed); }
 
         resolveNetworkDone({
           text: fullText,
@@ -189,10 +167,7 @@ const stream = {
           timing: { fetch_headers_ms: fetchHeadersMs, first_content_ms: firstContentMs, stream_total_ms: Date.now() - overallStart }
         });
 
-        networkFinished = true;
-        // drainTick's own pending setTimeout will notice networkFinished and
-        // resolve renderDone once displayQueue is empty — nothing further to
-        // do here.
+        resolveRenderDone();
       } catch (error) {
         rejectNetworkDone(error);
         rejectRenderDone(error);

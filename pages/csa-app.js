@@ -16,6 +16,17 @@ window.csaApp = (() => {
   const presetCatalogItem = templateId => (appState?.csa_presets?.items || []).find(entry => entry.id === templateId) || null;
   const presetOptionLabel = (kind, id) => (appState?.csa_presets?.[`${kind}_options`] || []).find(entry => entry.id === id)?.label || '';
   const STRENGTH_LABELS = { weak: '약함', medium: '중간', strong: '강함' };
+  const STRENGTH_DESCRIPTIONS = {
+    weak: '민망한 자세·거리·비성기 접촉·속옷 미착용을 병원 전체의 정상적인 관행으로 만듭니다.',
+    medium: '강한 노출·민감 부위 확인·성적 생리현상 처리를 병원 전체의 정상 업무로 만듭니다.',
+    strong: '플레이어의 직접적인 성적 요구와 권한을 병원 전체의 최우선 규정으로 만듭니다.'
+  };
+  const normalizeStrengthId = value => {
+    const text = String(value || '').trim();
+    if (Object.prototype.hasOwnProperty.call(STRENGTH_LABELS, text)) return text;
+    return Object.entries(STRENGTH_LABELS).find(([, label]) => label === text)?.[0] || null;
+  };
+  const presetStrength = item => normalizeStrengthId(item?.strength || item?.minimum_strength);
   function hasKoreanBatchim(text) {
     const trimmed = String(text || '').trim();
     const code = trimmed.slice(-1).codePointAt(0) || 0;
@@ -29,7 +40,7 @@ window.csaApp = (() => {
   // this string), so a mismatch here is never a correctness risk.
   function presetPreviewContent(item) {
     const catalogItem = presetCatalogItem(item.template_id);
-    if (!catalogItem || !catalogItem.content_template) return '';
+    if (!catalogItem || !catalogItem.content_template || presetStrength(catalogItem) !== normalizeStrengthId(item.strength)) return '';
     const actorLabel = presetOptionLabel('actor', item.actor_group);
     const targetLabel = item.target_group ? presetOptionLabel('target', item.target_group) : '';
     const triggerLabel = presetOptionLabel('trigger', item.trigger);
@@ -45,10 +56,6 @@ window.csaApp = (() => {
     };
     return catalogItem.content_template.replace(/\{(\w+)\}/g, (match, key) => Object.prototype.hasOwnProperty.call(params, key) ? params[key] : '');
   }
-  function firstAvailablePresetItem(category) {
-    const items = appState?.csa_presets?.items || [];
-    return items.find(entry => entry.available && entry.category === category) || items.find(entry => entry.available) || null;
-  }
   function applyPresetDefaults(item, catalogItem) {
     if (!catalogItem) return;
     item.category = catalogItem.category;
@@ -58,16 +65,25 @@ window.csaApp = (() => {
     item.trigger = catalogItem.default_trigger;
     item.duration = catalogItem.default_duration;
     item.modifier = item.modifier || '';
-    item.strength = catalogItem.minimum_strength;
+    item.strength = presetStrength(catalogItem);
   }
-  function ensurePresetDefaults(item) {
-    if (item.template_id && presetCatalogItem(item.template_id)?.available) return;
-    applyPresetDefaults(item, firstAvailablePresetItem(item.category));
+  function resetPresetSelection(item, { preserveStrength = true } = {}) {
+    item.category = null;
+    item.template_id = null;
+    item.actor_group = null;
+    item.target_group = null;
+    item.trigger = null;
+    item.duration = null;
+    item.modifier = '';
+    item.content = '';
+    if (!preserveStrength) item.strength = null;
   }
   function hydrateDraftItem(item) {
     if (item.source_type === 'preset' && item.preset) {
       item.template_id = item.preset.template_id;
-      item.category = presetCatalogItem(item.template_id)?.category || null;
+      const catalogItem = presetCatalogItem(item.template_id);
+      item.strength = normalizeStrengthId(item.strength) || presetStrength(catalogItem);
+      item.category = catalogItem?.category || null;
       item.actor_group = item.preset.actor_group || null;
       item.target_group = item.preset.target_group || null;
       item.trigger = item.preset.trigger || null;
@@ -78,10 +94,11 @@ window.csaApp = (() => {
     }
     return item;
   }
-  function isPresetPayloadComplete(preset) {
+  function isPresetPayloadComplete(preset, selectedStrength) {
     if (!preset || !preset.template_id || !preset.actor_group || !preset.trigger || !preset.duration) return false;
     const catalogItem = presetCatalogItem(preset.template_id);
     if (!catalogItem) return false;
+    if (!normalizeStrengthId(selectedStrength) || presetStrength(catalogItem) !== normalizeStrengthId(selectedStrength)) return false;
     if (!catalogItem.actor_options.includes(preset.actor_group)) return false;
     if (catalogItem.target_options.length) {
       if (!preset.target_group || !catalogItem.target_options.includes(preset.target_group)) return false;
@@ -106,7 +123,8 @@ window.csaApp = (() => {
       && (item.target_group || null) === (beforePreset.target_group || null)
       && item.trigger === beforePreset.trigger
       && item.duration === beforePreset.duration
-      && normalize(item.modifier || '') === normalize(beforePreset.modifier || '');
+      && normalize(item.modifier || '') === normalize(beforePreset.modifier || '')
+      && normalizeStrengthId(item.strength) === presetStrength(presetCatalogItem(beforePreset.template_id));
   }
   const operations = () => {
     if (!draft) return [];
@@ -145,7 +163,8 @@ window.csaApp = (() => {
     undo.disabled = !dirty() || applying;
     undo.onclick = () => { draft.csa = clone(draft.original); draft.issues = []; renderTab(draft.tab); };
     const apply = el('button', 'choice-btn', applying ? '확인 중…' : '적용');
-    apply.disabled = !dirty() || applying || state.isStreaming;
+    const missingStrength = operations().some(item => item.operation !== 'deactivate' && !normalizeStrengthId(item.strength));
+    apply.disabled = !dirty() || applying || state.isStreaming || missingStrength;
     apply.onclick = applyDraft;
     bar.append(undo, apply);
   }
@@ -210,7 +229,7 @@ window.csaApp = (() => {
     fields.forEach(([label, value]) => { const card = el('div', 'csa-app-card'); card.append(el('small', '', label), el('strong', '', value === null || value === undefined || value === '' ? '미설정' : String(value))); grid.appendChild(card); });
     body.appendChild(grid);
   }
-  function selectField(label, value, options, onChange) {
+  function selectField(label, value, options, onChange, disabled = false) {
     const wrap = el('label', 'csa-app-field');
     wrap.append(el('span', 'csa-app-field-label', label));
     const select = el('select', 'csa-app-select');
@@ -219,7 +238,7 @@ window.csaApp = (() => {
       node.disabled = option.disabled === true; node.selected = option.id === value;
       select.appendChild(node);
     });
-    select.disabled = applying;
+    select.disabled = applying || disabled;
     select.onchange = () => onChange(select.value);
     wrap.appendChild(select);
     return wrap;
@@ -228,16 +247,53 @@ window.csaApp = (() => {
     const wrap = el('div', 'csa-app-preset-form');
     const presets = appState?.csa_presets;
     if (!presets) { wrap.append(el('p', 'csa-app-error', '프리셋 정보를 불러오지 못했습니다.')); return wrap; }
-    const categories = presets.categories.filter(cat => presets.items.some(entry => entry.category === cat.id));
-    wrap.appendChild(selectField('분류', item.category, categories, value => {
-      applyPresetDefaults(item, firstAvailablePresetItem(value)); renderTab('csa');
+    const selectedStrength = normalizeStrengthId(item.strength);
+    const strengthOptions = [
+      { id: '', label: '강도를 선택하세요', disabled: true },
+      ...(appState.strength_options || []).map(option => ({
+        id: option.id,
+        label: option.available || selectedStrength === option.id ? option.label : `${option.label} · Lv.${option.unlock_level} 해금`,
+        disabled: !option.available && selectedStrength !== option.id
+      }))
+    ];
+    wrap.appendChild(selectField('강도', selectedStrength || '', strengthOptions, value => {
+      if (value === selectedStrength) return;
+      item.strength = value || null;
+      resetPresetSelection(item);
+      renderTab('csa');
     }));
-    const categoryItems = presets.items.filter(entry => entry.category === item.category);
-    wrap.appendChild(selectField('프리셋', item.template_id, categoryItems.map(entry => ({ id: entry.id, label: entry.available ? entry.label : `${entry.label} · 잠김`, disabled: !entry.available })), value => {
+    if (selectedStrength && STRENGTH_DESCRIPTIONS[selectedStrength]) {
+      wrap.appendChild(el('p', 'csa-app-scope-label', STRENGTH_DESCRIPTIONS[selectedStrength]));
+    }
+    const strengthItems = selectedStrength
+      ? presets.items.filter(entry => presetStrength(entry) === selectedStrength)
+      : [];
+    const categories = presets.categories
+      .filter(category => strengthItems.some(entry => entry.category === category.id))
+      .map(category => ({ id: category.id, label: category.label }));
+    wrap.appendChild(selectField('분류', item.category || '', [
+      { id: '', label: selectedStrength ? '분류를 선택하세요' : '강도를 먼저 선택하세요', disabled: true },
+      ...categories
+    ], value => {
+      item.category = value || null;
+      item.template_id = null;
+      item.actor_group = null;
+      item.target_group = null;
+      item.trigger = null;
+      item.duration = null;
+      item.modifier = '';
+      item.content = '';
+      renderTab('csa');
+    }, !selectedStrength));
+    const categoryItems = item.category ? strengthItems.filter(entry => entry.category === item.category) : [];
+    wrap.appendChild(selectField('프리셋', item.template_id || '', [
+      { id: '', label: item.category ? '프리셋을 선택하세요' : (selectedStrength ? '분류를 먼저 선택하세요' : '강도를 먼저 선택하세요'), disabled: true },
+      ...categoryItems.map(entry => ({ id: entry.id, label: entry.label, disabled: !entry.available }))
+    ], value => {
       applyPresetDefaults(item, presetCatalogItem(value)); renderTab('csa');
-    }));
+    }, !selectedStrength || !item.category));
     const catalogItem = presetCatalogItem(item.template_id);
-    if (catalogItem) {
+    if (catalogItem && presetStrength(catalogItem) === selectedStrength) {
       wrap.appendChild(selectField('행동 주체', item.actor_group, catalogItem.actor_options.map(id => ({ id, label: presetOptionLabel('actor', id) })), value => {
         item.actor_group = value; syncDraftBar(); renderTab('csa');
       }));
@@ -266,26 +322,51 @@ window.csaApp = (() => {
       const previewText = el('p', '', presetPreviewContent(item) || previewPlaceholder);
       previewBox.append(el('small', '', '완성 문장 미리보기'), previewText);
       wrap.appendChild(previewBox);
-      wrap.appendChild(el('p', 'csa-app-scope-label', `강도: ${STRENGTH_LABELS[catalogItem.minimum_strength] || catalogItem.minimum_strength}`));
-      const synergyItems = (catalogItem.synergy_ids || []).map(presetCatalogItem).filter(entry => entry && entry.available);
+      const synergyItems = (catalogItem.synergy_ids || []).map(presetCatalogItem).filter(entry => entry && entry.available && presetStrength(entry) === selectedStrength);
       if (synergyItems.length) {
         const synergyBox = el('div', 'csa-app-synergy');
         synergyBox.append(el('small', '', '함께 쓰면 자연스러운 프리셋'));
         list(synergyBox, synergyItems.map(entry => entry.label));
         wrap.appendChild(synergyBox);
       }
+    } else {
+      const waiting = selectedStrength ? '프리셋을 먼저 선택하세요' : '강도를 먼저 선택하세요';
+      [['행동 주체', ''], ['상대', ''], ['발동 상황', ''], ['지속 조건', '']].forEach(([label, value]) => {
+        wrap.appendChild(selectField(label, value, [{ id: '', label: waiting, disabled: true }], () => {}, true));
+      });
+      const modifierLabel = el('label', 'csa-app-field');
+      const modifierInput = el('input', 'csa-app-select');
+      modifierInput.type = 'text'; modifierInput.disabled = true; modifierInput.placeholder = waiting;
+      modifierLabel.append(el('span', 'csa-app-field-label', '세부 수식어 (선택, 최대 60자)'), modifierInput);
+      const previewBox = el('div', 'csa-app-preview');
+      previewBox.append(el('small', '', '완성 문장 미리보기'), el('p', '', '항목을 모두 선택하면 문장이 완성됩니다.'));
+      wrap.append(modifierLabel, previewBox);
     }
     return wrap;
   }
   function renderCustomForm(item) {
     const wrap = el('div', 'csa-app-custom-form');
     const strength = el('select', 'csa-app-select'), scope = el('p', 'csa-app-scope-label', '적용 범위: 병원 전체'), content = el('textarea', 'csa-app-textarea');
-    (appState.strength_options || []).forEach(option => { const optionNode = el('option', '', option.available || item.strength === option.id ? option.label : `${option.label} · Lv.${option.unlock_level}`); optionNode.value = option.id; optionNode.disabled = !option.available && item.strength !== option.id; optionNode.selected = item.strength === option.id; strength.appendChild(optionNode); });
+    const selectedStrength = normalizeStrengthId(item.strength);
+    const options = [
+      { id: '', label: '강도를 선택하세요', disabled: true },
+      ...(appState.strength_options || []).map(option => ({
+        id: option.id,
+        label: option.available || selectedStrength === option.id ? option.label : `${option.label} · Lv.${option.unlock_level} 해금`,
+        disabled: !option.available && selectedStrength !== option.id
+      }))
+    ];
+    options.forEach(option => { const optionNode = el('option', '', option.label); optionNode.value = option.id; optionNode.disabled = option.disabled; optionNode.selected = option.id === (selectedStrength || ''); strength.appendChild(optionNode); });
     content.value = item.content || ''; content.placeholder = '이 공간에서 적용할 사회적 상식을 입력하세요.';
-    strength.disabled = applying; content.disabled = applying;
-    strength.onchange = () => { item.strength = strength.value; syncDraftBar(); };
+    strength.disabled = applying; content.disabled = applying || !selectedStrength;
+    strength.onchange = () => { item.strength = strength.value || null; renderTab('csa'); };
     content.oninput = () => { item.content = content.value; syncDraftBar(); };
-    wrap.append(strength, scope, content);
+    const strengthField = el('label', 'csa-app-field');
+    strengthField.append(el('span', 'csa-app-field-label', '강도'), strength);
+    wrap.append(strengthField, scope);
+    if (selectedStrength && STRENGTH_DESCRIPTIONS[selectedStrength]) wrap.appendChild(el('p', 'csa-app-scope-label', STRENGTH_DESCRIPTIONS[selectedStrength]));
+    if (!selectedStrength) wrap.appendChild(el('p', 'csa-app-scope-label', '먼저 강도를 선택하세요.'));
+    wrap.append(content);
     return wrap;
   }
   function renderCsaItem(item) {
@@ -301,7 +382,7 @@ window.csaApp = (() => {
     const presetTab = el('button', `choice-btn${item.source_type === 'preset' ? ' selected' : ''}`, '프리셋으로 만들기');
     const customTab = el('button', `choice-btn${item.source_type !== 'preset' ? ' selected' : ''}`, '직접 작성');
     presetTab.type = 'button'; customTab.type = 'button'; presetTab.disabled = applying; customTab.disabled = applying;
-    presetTab.onclick = () => { if (item.source_type !== 'preset') { item.source_type = 'preset'; ensurePresetDefaults(item); renderTab('csa'); } };
+    presetTab.onclick = () => { if (item.source_type !== 'preset') { item.source_type = 'preset'; resetPresetSelection(item); renderTab('csa'); } };
     customTab.onclick = () => {
       if (item.source_type !== 'preset') return;
       const switchToCustom = () => { item.content = presetPreviewContent(item) || item.content || ''; item.source_type = 'custom'; renderTab('csa'); };
@@ -317,9 +398,7 @@ window.csaApp = (() => {
     const max = Number(appState.home?.status?.csa_max), add = el('button', 'choice-btn', '+ 상식개변 추가');
     add.disabled = applying || (Number.isFinite(max) && active().length >= max);
     add.onclick = () => {
-      const strength = (appState.strength_options || []).find(item => item.available)?.id || 'weak';
-      const item = { _new: true, client_id: `draft_csa_${crypto.randomUUID()}`, source_type: 'preset', strength, scope_type: 'world', scope_label: '병원 전체', content: '', modifier: '' };
-      ensurePresetDefaults(item);
+      const item = { _new: true, client_id: `draft_csa_${crypto.randomUUID()}`, source_type: 'preset', strength: null, scope_type: 'world', scope_label: '병원 전체', content: '', modifier: '' };
       draft.csa.push(item); renderTab('csa');
     };
     body.appendChild(add); if (add.disabled && active().length >= max) body.appendChild(el('p', 'csa-app-error', '활성 슬롯이 가득 찼습니다. 기존 항목을 해제한 뒤 추가해 주세요.'));
@@ -349,10 +428,13 @@ window.csaApp = (() => {
   }
   async function applyDraft() {
     const ops = operations(); if (!ops.length || applying) return;
+    if (ops.some(item => item.operation !== 'deactivate' && !normalizeStrengthId(item.strength))) {
+      draft.issues = [{ message: '먼저 강도를 선택해 주세요.' }]; return renderTab('csa');
+    }
     if (ops.some(item => item.operation !== 'deactivate' && item.source_type === 'custom' && !normalize(item.content))) {
       draft.issues = [{ message: '상식개변 내용을 입력해 주세요.' }]; return renderTab('csa');
     }
-    if (ops.some(item => item.operation !== 'deactivate' && item.source_type === 'preset' && !isPresetPayloadComplete(item.preset))) {
+    if (ops.some(item => item.operation !== 'deactivate' && item.source_type === 'preset' && !isPresetPayloadComplete(item.preset, item.strength))) {
       draft.issues = [{ message: '프리셋의 모든 항목을 선택해 주세요.' }]; return renderTab('csa');
     }
     applying = true; renderTab(draft.tab);

@@ -463,7 +463,7 @@ function collectSemanticStrengthCandidates(previousSave, canonicalAction) {
   return canonicalAction.operations.flatMap(operation => {
     if (operation.domain !== 'csa' || !['activate', 'update'].includes(operation.operation)) return [];
     // Preset-sourced operations never reach the DeepSeek strength
-    // classifier — the catalog's fixed minimum_strength (already enforced
+    // classifier — the catalog's fixed strength (already enforced
     // in planAppTransaction via validateCsaPresetOperation) is the single
     // source of truth for these, per the "카탈로그 최소 강도" rule.
     if (operation.source_type === 'preset') return [];
@@ -600,8 +600,12 @@ async function handleAppValidate(req, env) {
     console.warn(JSON.stringify({ event: 'app_action_rejected', type: structured_action.type || null, game_id, error_code: result.error_code, issue_codes: result.issues.map(issue => issue.code) }));
     const stale = result.error_code === 'APP_STALE_STATE';
     return jsonResponse({
-      error: stale ? '상식개변 앱을 연 뒤 게임 상태가 변경되었습니다.' : '변경사항을 적용할 수 없습니다.',
-      error_code: stale ? 'APP_STALE_STATE' : 'APP_ACTION_INVALID',
+      error: stale
+        ? '상식개변 앱을 연 뒤 게임 상태가 변경되었습니다.'
+        : (result.error_code === 'CSA_PRESET_STRENGTH_MISMATCH'
+          ? '선택한 강도와 프리셋 등급이 일치하지 않습니다.'
+          : '변경사항을 적용할 수 없습니다.'),
+      error_code: stale ? 'APP_STALE_STATE' : (result.error_code || 'APP_ACTION_INVALID'),
       current_turn_count: stale ? ctx.turn_count : undefined,
       issues: result.issues
     }, result.status);
@@ -5971,10 +5975,8 @@ const CSA_PRESET_STAFF_ACTOR_OPTIONS = ['nurse', 'doctor', 'medical_staff', 'hos
 const CSA_PRESET_POSTURE_TRIGGERS = ['conversation_start', 'consultation_start', 'explanation_start', 'comforting', 'check_condition', 'on_request'];
 const CSA_PRESET_POSTURE_DURATIONS = ['until_conversation_ends', 'until_consultation_ends', 'until_explanation_ends', 'until_target_relaxed', 'until_explicit_position_change', 'continuous'];
 
-// Each item's minimum_strength is the deterministic ceiling used at
-// validation time (section 11) — a preset activation/update never triggers
-// the DeepSeek strength classifier by itself; only a non-trivial modifier
-// runs the (structural, LLM-free) safety check below.
+// `strength` is each preset's official fixed tier. `minimum_strength` is
+// retained alongside it for older clients and saved data.
 const CSA_PRESET_CATALOG = [
   // ── 약함 · 자세 ──
   {
@@ -6364,7 +6366,7 @@ const CSA_PRESET_CATALOG = [
     direct_meaning_tags: ['협업', '여러 직원', '수행'],
     content_template: '{actor_topic} {target_conj} {trigger_text} {modifier_clause}필요한 여러 직원이 함께 협업해 그 요구를 수행해야 한다.'
   }
-];
+].map(item => ({ ...item, strength: item.strength || item.minimum_strength }));
 
 const CSA_PRESET_BY_ID = new Map(CSA_PRESET_CATALOG.map(item => [item.id, item]));
 const CSA_PRESET_OPTION_LABELS = {
@@ -6393,8 +6395,9 @@ function buildCsaPresetCatalogPayload(availableStrength) {
       id: item.id,
       category: item.category,
       label: item.label,
+      strength: item.strength,
       minimum_strength: item.minimum_strength,
-      available: APP_STRENGTH_RANK[item.minimum_strength] <= availableRank,
+      available: APP_STRENGTH_RANK[item.strength] <= availableRank,
       actor_options: item.actor_options,
       target_options: item.target_options,
       default_actor: item.default_actor,
@@ -6458,17 +6461,24 @@ function csaPresetModifierExceedsTemplate(modifier, minimumStrength) {
 
 // Server-side single source of truth for a preset operation: re-derives
 // canonical content from the catalog template instead of trusting whatever
-// content the client sent, and never lets a client-declared strength sit
-// below the template's fixed minimum_strength.
+// content the client sent. A preset must use its one official catalog tier.
 function validateCsaPresetOperation(raw, { availableStrength } = {}) {
   const preset = isPlainObject(raw?.preset) ? raw.preset : null;
   if (!preset) return { ok: false, code: 'PRESET_REQUIRED', message: '프리셋 정보가 없습니다.' };
   const item = getCsaPresetCatalogItem(preset.template_id);
   if (!item) return { ok: false, code: 'PRESET_NOT_FOUND', message: '알 수 없는 프리셋입니다.' };
 
+  const requestedStrength = typeof raw?.strength === 'string' ? raw.strength.trim() : '';
+  const catalogStrength = item.strength || item.minimum_strength;
+  if (!Object.prototype.hasOwnProperty.call(APP_STRENGTH_RANK, requestedStrength)) {
+    return { ok: false, code: 'CSA_PRESET_STRENGTH_INVALID', message: '프리셋 강도를 선택해 주세요.' };
+  }
   const availableRank = APP_STRENGTH_RANK[availableStrength] || 1;
-  if (APP_STRENGTH_RANK[item.minimum_strength] > availableRank) {
+  if (APP_STRENGTH_RANK[requestedStrength] > availableRank || APP_STRENGTH_RANK[catalogStrength] > availableRank) {
     return { ok: false, code: 'STRENGTH_LOCKED', message: '현재 레벨에서 사용할 수 없는 프리셋입니다.' };
+  }
+  if (requestedStrength !== catalogStrength) {
+    return { ok: false, code: 'CSA_PRESET_STRENGTH_MISMATCH', message: '선택한 강도와 프리셋 등급이 일치하지 않습니다.' };
   }
 
   const actorId = typeof preset.actor_group === 'string' ? preset.actor_group : '';
@@ -6504,7 +6514,7 @@ function validateCsaPresetOperation(raw, { availableStrength } = {}) {
   if (modifier.length > CSA_PRESET_MODIFIER_MAX_LENGTH) {
     return { ok: false, code: 'PRESET_MODIFIER_TOO_LONG', message: `세부 수식어는 ${CSA_PRESET_MODIFIER_MAX_LENGTH}자 이하여야 합니다.` };
   }
-  if (csaPresetModifierExceedsTemplate(modifier, item.minimum_strength)) {
+  if (csaPresetModifierExceedsTemplate(modifier, catalogStrength)) {
     return { ok: false, code: 'PRESET_MODIFIER_EXCEEDS_STRENGTH', message: '세부 수식어가 이 프리셋의 강도를 넘어섭니다.' };
   }
 
@@ -6512,7 +6522,7 @@ function validateCsaPresetOperation(raw, { availableStrength } = {}) {
   return {
     ok: true,
     content,
-    strength: item.minimum_strength,
+    strength: catalogStrength,
     preset: {
       version: 1,
       template_id: item.id,
@@ -6698,7 +6708,12 @@ function planAppTransaction(previousSave, master, action, { turnNumber }) {
     canonicalOperations.push({ version: 1, client_id: raw.client_id, domain: 'csa', operation: 'update', id, strength, scope_type: 'world', content, source_type: 'custom' });
   }
 
-  if (issues.length) return { ok: false, status: 422, error_code: 'APP_ACTION_INVALID', issues };
+  if (issues.length) {
+    const error_code = issues.length === 1 && issues[0]?.code === 'CSA_PRESET_STRENGTH_MISMATCH'
+      ? 'CSA_PRESET_STRENGTH_MISMATCH'
+      : 'APP_ACTION_INVALID';
+    return { ok: false, status: 422, error_code, issues };
+  }
   const activeCsaCount = csa.filter(item => item?.active === true).length;
   if (activeCsaCount > csaLimits.max_active) return { ok: false, status: 422, error_code: 'CSA_SLOT_FULL', issues: [appIssue(action, 'CSA_SLOT_FULL', '상식개변 활성 슬롯이 부족합니다.')] };
 
@@ -6767,7 +6782,7 @@ function buildStructuredActionError(result, currentTurn = null) {
   const stale = result?.error_code === 'APP_STALE_STATE';
   return {
     error: stale ? '상식개변 앱을 연 뒤 게임 상태가 변경되었습니다.' : '상식개변 앱의 변경사항을 적용하지 못했습니다.',
-    error_code: stale ? 'APP_STALE_STATE' : 'APP_ACTION_INVALID',
+    error_code: stale ? 'APP_STALE_STATE' : (result?.error_code || 'APP_ACTION_INVALID'),
     current_turn_count: stale && Number.isInteger(currentTurn) ? currentTurn : undefined,
     issues: Array.isArray(result?.issues) ? result.issues : []
   };

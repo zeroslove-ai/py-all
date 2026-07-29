@@ -456,16 +456,19 @@ async function deriveSuggestionRoll(env, { gameId, baseTurnCount, actionDigest, 
 }
 
 function collectSemanticStrengthCandidates(previousSave, canonicalAction) {
-  const suggestions = normalizeLegacyActiveSuggestions(previousSave?.active_suggestions);
   const csa = Array.isArray(previousSave?.csa_active) ? previousSave.csa_active : [];
   return canonicalAction.operations.flatMap(operation => {
-    if (!['activate', 'update'].includes(operation.operation)) return [];
-    let previous = null;
-    if (operation.domain === 'suggestion' && operation.operation === 'update') previous = (suggestions[operation.character_id] || []).find(item => item?.id === operation.id);
-    if (operation.domain === 'csa' && operation.operation === 'update') previous = csa.find(item => item?.id === operation.id);
-    const contentChanged = operation.operation === 'activate' || normalizeAppContent(previous?.content) !== normalizeAppContent(operation.content);
-    const strengthChanged = operation.operation === 'activate' || normalizeStrengthForStorage(previous?.strength) !== normalizeStrengthForStorage(operation.strength);
-    return contentChanged || strengthChanged ? [{ client_id: operation.client_id, domain: operation.domain, operation: operation.operation, selected_strength: operation.strength, content: operation.content }] : [];
+    if (operation.domain !== 'csa' || !['activate', 'update'].includes(operation.operation)) return [];
+    const previous = operation.operation === 'update'
+      ? csa.find(item => item?.id === operation.id)
+      : null;
+    const contentChanged = operation.operation === 'activate'
+      || normalizeAppContent(previous?.content) !== normalizeAppContent(operation.content);
+    const strengthChanged = operation.operation === 'activate'
+      || normalizeStrengthForStorage(previous?.strength) !== normalizeStrengthForStorage(operation.strength);
+    return contentChanged || strengthChanged
+      ? [{ client_id: operation.client_id, domain: 'csa', operation: operation.operation, selected_strength: operation.strength, content: operation.content }]
+      : [];
   });
 }
 
@@ -538,7 +541,7 @@ function semanticStrengthIssues(candidates, results, availableStrength) {
     const result = byId.get(candidate.client_id); const requiredRank = APP_STRENGTH_RANK[result.required_strength] || 0; const selectedRank = APP_STRENGTH_RANK[candidate.selected_strength] || 0;
     if (result.required_strength === 'unsupported') return [{ client_id:candidate.client_id, domain:candidate.domain, operation:candidate.operation, code:'CONTENT_OUTSIDE_APP_CAPABILITY', message:'이 내용은 강한 단계에서도 적용할 수 없습니다.', selected_strength:candidate.selected_strength, required_strength:'unsupported' }];
     if (requiredRank > availableRank) return [{ client_id:candidate.client_id, domain:candidate.domain, operation:candidate.operation, code:'CONTENT_STRENGTH_LOCKED', message:`이 내용은 ${APP_STRENGTH_LABEL[result.required_strength]} 단계가 필요하지만 현재 사용 가능한 단계는 ${APP_STRENGTH_LABEL[availableStrength]}입니다.`, selected_strength:candidate.selected_strength, required_strength:result.required_strength, available_strength:availableStrength, suggested_strength:null, reason:result.reason }];
-    if (requiredRank > selectedRank) return [{ client_id:candidate.client_id, domain:candidate.domain, operation:candidate.operation, code:'CONTENT_REQUIRES_HIGHER_STRENGTH', message:`이 내용은 ${APP_STRENGTH_LABEL[result.required_strength]} 암시가 필요합니다. 선택 강도를 변경해 주세요.`, selected_strength:candidate.selected_strength, required_strength:result.required_strength, available_strength:availableStrength, suggested_strength:result.required_strength, reason:result.reason }];
+    if (requiredRank > selectedRank) return [{ client_id:candidate.client_id, domain:candidate.domain, operation:candidate.operation, code:'CONTENT_REQUIRES_HIGHER_STRENGTH', message:`이 내용은 ${APP_STRENGTH_LABEL[result.required_strength]} 상식개변 강도가 필요합니다. 선택 강도를 변경해 주세요.`, selected_strength:candidate.selected_strength, required_strength:result.required_strength, available_strength:availableStrength, suggested_strength:result.required_strength, reason:result.reason }];
     return [];
   });
 }
@@ -669,7 +672,7 @@ async function handleAppValidate(req, env) {
     console.warn(JSON.stringify({ event: 'app_action_rejected', type: structured_action.type || null, game_id, error_code: result.error_code, issue_codes: result.issues.map(issue => issue.code) }));
     const stale = result.error_code === 'APP_STALE_STATE';
     return jsonResponse({
-      error: stale ? '최면 어플을 연 뒤 게임 상태가 변경되었습니다.' : '변경사항을 적용할 수 없습니다.',
+      error: stale ? '상식개변 어플을 연 뒤 게임 상태가 변경되었습니다.' : '변경사항을 적용할 수 없습니다.',
       error_code: stale ? 'APP_STALE_STATE' : 'APP_ACTION_INVALID',
       current_turn_count: stale ? ctx.turn_count : undefined,
       issues: result.issues
@@ -685,7 +688,7 @@ async function handleAppValidate(req, env) {
       }
     } catch (error) {
       console.warn(JSON.stringify({ event: 'app_strength_validation_rejected', game_id, issue_codes: ['APP_STRENGTH_VALIDATION_FAILED'] }));
-      return jsonResponse({ error: '암시 강도 확인에 실패했습니다. 잠시 후 다시 적용해 주세요.', error_code: 'APP_STRENGTH_VALIDATION_FAILED' }, 502);
+      return jsonResponse({ error: '상식개변 강도 확인에 실패했습니다. 잠시 후 다시 적용해 주세요.', error_code: 'APP_STRENGTH_VALIDATION_FAILED' }, 502);
     }
     const capability = calculateHypnosisCapability(ctx.save, ctx.master);
     const issues = semanticStrengthIssues(candidates, semanticResults, ({ '약함':'weak', '중간':'medium', '강함':'strong' })[capability.available_strength] || 'weak');
@@ -694,8 +697,8 @@ async function handleAppValidate(req, env) {
       return jsonResponse({ error: '변경사항을 적용할 수 없습니다.', error_code: 'APP_ACTION_INVALID', issues }, 422);
     }
     const actionDigest = await sha256Base64url(stableStringify({ version: result.canonical_action.version, type: result.canonical_action.type, base_turn_count: result.canonical_action.base_turn_count, operations: result.canonical_action.operations }));
-    const resolvedSemanticResults = await buildSuggestionResolutions(env, game_id, result.canonical_action, semanticResults, ctx.save, ctx.master, actionDigest);
-    const semantic_validation = { version: 2, game_id, base_turn_count: result.canonical_action.base_turn_count, action_digest: actionDigest, results: resolvedSemanticResults };
+    const resolvedSemanticResults = semanticResults.map(item => ({ client_id: item.client_id, required_strength: item.required_strength }));
+    const semantic_validation = { version: 1, game_id, base_turn_count: result.canonical_action.base_turn_count, action_digest: actionDigest, results: resolvedSemanticResults };
     const validation_proof = await signAppValidationProof(env, { game_id, base_turn_count: result.canonical_action.base_turn_count, action_digest: actionDigest, semantic_results: semantic_validation.results });
     result.canonical_action = { ...result.canonical_action, semantic_validation, validation_proof };
     const counts = semanticResults.reduce((all, item) => { if (item.required_strength in all) all[item.required_strength] += 1; return all; }, { weak:0, medium:0, strong:0 });
@@ -1283,7 +1286,7 @@ function buildAppStatePayload(master, save, turnCount = 0) {
 
 const STORY_HEADERS_TIMEOUT_MS = 90000;
 
-function resolveHypnosisAppUiRoute(input, characters = {}) {
+function resolveCsaAppUiRoute(input, characters = {}) {
   const text = String(input || '').trim();
   if (!text) return null;
   const excluded = /하지\s*않|하지\s*말|말라고|할까|고민|생각해\s*본다|떠올린다|과거|예전에|말했다|물었다|뜻이\s*뭐|무엇인지/.test(text)
@@ -1347,20 +1350,19 @@ async function handleStory(req, env) {
 
   const currentTurn = ctx?.turn_count ?? 0;
   if (structured_action === null) {
-    const appRoute = resolveHypnosisAppUiRoute(player_input, ctx?.master?.characters || {});
-    if (appRoute) return jsonResponse({ error: '암시와 상식개변은 최면 어플에서 관리합니다.', error_code: 'APP_UI_REQUIRED', app_route: appRoute, request_id: requestId }, 409);
+    const appRoute = resolveCsaAppUiRoute(player_input, ctx?.master?.characters || {});
+    if (appRoute) return jsonResponse({ error: '상식개변은 상식개변 어플에서 관리합니다.', error_code: 'APP_UI_REQUIRED', app_route: appRoute, request_id: requestId }, 409);
   }
   let structuredPlan = null;
   if (structured_action !== null) {
     const proof = await verifyStructuredActionValidation(env, game_id, structured_action);
     if (!proof.ok) {
       console.warn(JSON.stringify({ event: 'app_validation_proof_rejected', endpoint: '/api/story', game_id, reason: proof.reason }));
-      return jsonResponse({ error: '최면 어플 검증 정보가 올바르지 않습니다. 어플을 다시 열어 적용해 주세요.', error_code: 'APP_VALIDATION_PROOF_INVALID', request_id: requestId }, 422);
+      return jsonResponse({ error: '상식개변 어플 검증 정보가 올바르지 않습니다. 어플을 다시 열어 적용해 주세요.', error_code: 'APP_VALIDATION_PROOF_INVALID', request_id: requestId }, 422);
     }
     structuredPlan = planStructuredAction(ctx?.save || {}, ctx?.master || {}, structured_action, { turnNumber: currentTurn + 1, turnCount: currentTurn });
     if (!structuredPlan.ok) return jsonResponse(buildStructuredActionError(structuredPlan, currentTurn), structuredPlan.status);
     if (structured_action.type === 'app_transaction') structuredPlan.canonical_action = structured_action;
-    structuredPlan = applySuggestionResolutionsToPlan(ctx?.save || {}, ctx?.master || {}, structuredPlan, { turnNumber: currentTurn + 1, turnCount: currentTurn });
   }
   const resolvedPlayerInput = structuredPlan?.ok ? structuredPlan.display_input : resolveMarkerChoiceInput(player_input, ctx?.save?.last_choices);
   const promptStart = Date.now();
@@ -1801,12 +1803,11 @@ async function runExtractPipeline(env, { game_id, narrative_text, player_input, 
     const proof = await verifyStructuredActionValidation(env, game_id, structured_action);
     if (!proof.ok) {
       console.warn(JSON.stringify({ event: 'app_validation_proof_rejected', endpoint: '/api/extract', game_id, reason: proof.reason }));
-      return { body: { error: '최면 어플 검증 정보가 올바르지 않습니다. 어플을 다시 열어 적용해 주세요.', error_code: 'APP_VALIDATION_PROOF_INVALID', request_id: requestId }, status: 422 };
+      return { body: { error: '상식개변 어플 검증 정보가 올바르지 않습니다. 어플을 다시 열어 적용해 주세요.', error_code: 'APP_VALIDATION_PROOF_INVALID', request_id: requestId }, status: 422 };
     }
     structuredPlan = planStructuredAction(compatCtx.save || {}, compatCtx.master || {}, structured_action, { turnNumber: nextTurn, turnCount: ctx?.turn_count ?? 0 });
     if (!structuredPlan.ok) return { body: buildStructuredActionError(structuredPlan, ctx?.turn_count ?? 0), status: structuredPlan.status };
     if (structured_action.type === 'app_transaction') structuredPlan.canonical_action = structured_action;
-    structuredPlan = applySuggestionResolutionsToPlan(compatCtx.save || {}, compatCtx.master || {}, structuredPlan, { turnNumber: nextTurn, turnCount: ctx?.turn_count ?? 0 });
   }
   const effectiveSave = buildStructuredEffectiveSave(compatCtx?.save, structuredPlan);
   const effectiveCtx = { ...compatCtx, save: effectiveSave, __structured_effective_save: true };
@@ -2395,12 +2396,11 @@ async function runCommitPipeline(env, { game_id, turn_number, content: rawConten
     const proof = await verifyStructuredActionValidation(env, game_id, structured_action);
     if (!proof.ok) {
       console.warn(JSON.stringify({ event: 'app_validation_proof_rejected', endpoint: '/api/commit-turn', game_id, reason: proof.reason }));
-      return { body: { error: '최면 어플 검증 정보가 올바르지 않습니다. 어플을 다시 열어 적용해 주세요.', error_code: 'APP_VALIDATION_PROOF_INVALID', request_id: requestId }, status: 422 };
+      return { body: { error: '상식개변 어플 검증 정보가 올바르지 않습니다. 어플을 다시 열어 적용해 주세요.', error_code: 'APP_VALIDATION_PROOF_INVALID', request_id: requestId }, status: 422 };
     }
     structuredPlan = planStructuredAction(ctx?.save || {}, ctx?.master || {}, structured_action, { turnNumber: turn_number, turnCount: ctx?.turn_count ?? 0 });
     if (!structuredPlan.ok) return { body: buildStructuredActionError(structuredPlan, ctx?.turn_count ?? 0), status: structuredPlan.status };
     if (structured_action.type === 'app_transaction') structuredPlan.canonical_action = structured_action;
-    structuredPlan = applySuggestionResolutionsToPlan(ctx?.save || {}, ctx?.master || {}, structuredPlan, { turnNumber: turn_number, turnCount: ctx?.turn_count ?? 0 });
   }
   if (turn_number !== (ctx?.turn_count ?? 0) + 1) return { body: { error: 'turn conflict', expected_turn: (ctx?.turn_count ?? 0) + 1, received_turn: turn_number, request_id: requestId }, status: 409 };
   const effectiveWorldStateForCommit = computeEffectiveWorldState(ctx?.save?.world_state, extract.world_state_patch);
@@ -3037,7 +3037,7 @@ function buildConfirmedPlayerSetupSection(profile = {}) {
 }
 
 function buildPlayerSetupGenerationSectionBase() {
-  return `\n\n[PLAYER SETUP PHASE — GENERATE 4 CANDIDATES — HIGHEST PRIORITY, NO QUESTIONS]\n사용자에게 "어떤 캐릭터를 원하시나요?", "어떤 세계에서 시작하고 싶나요?" 같은 열린 질문을 절대 하지 않는다. 사용자의 대답을 기다리지 말고, 지금 이 응답 안에서 아래 4개 후보를 전부 직접 만들어서 완성된 형태로 즉시 보여준다. "대기", "대기 중", "곧 결정됩니다", "캐릭터 생성 단계"처럼 후보 생성을 다음 턴으로 미루거나 진행 중이라고 암시하는 표현을 본문 어디에도 쓰지 않는다. [3. 선택지]를 비워두거나 다른 용도로 쓰지 않는다 — 반드시 아래 4번(플레이어 후보 4개의 짧은 선택지)으로 채운다. [3. 선택지]에 등록 NPC 이름이나 NPC를 고르는 선택지를 넣지 않는다 — 이건 플레이어 자신의 캐릭터를 고르는 단계이지 NPC를 고르는 단계가 아니다.\n1. 삭제되지 않는 최면 어플 발견과 핵심 기능을 2~3문장으로 짧게 알린다.\n2. 병원 장면이나 등록 NPC는 아직 등장시키지 않는다.\n3. 바로 이어서, 플레이어 캐릭터 후보 4개를 전부 확정해서 만든다(질문으로 대체하지 않는다). 네 후보 모두 성인 남성이다. 역할 슬롯은 고정한다:\n   1번(hospital_worker): 병원에서 근무하는 성인 남성 — 의사, 인턴, 간호사, 임상병리사, 방사선사, 물리치료사, 병원 행정직, 보안요원 등\n   2번(patient): 현재 입원 중이거나 외래 진료를 받는 성인 남성 환자. 질병·부상은 정상적인 플레이를 막지 않는 수준이어야 하며, 의식불명이나 심각한 인지장애 등 플레이가 어려운 설정은 금지한다.\n   3번(hospital_adjacent): 병원과 연결된 성인 남성 외부인 — 보호자, 면회객, 납품업자, 보험조사원, 기자, 실습생, 병원 재단 관계자 등\n   4번(wildcard): 앞의 세 역할과 플레이 방식이 겹치지 않으면서 병원 세계관에서 자연스럽게 시작할 수 있는 성인 남성\n4. 이름·나이·직업 세부 설정은 매번 새롭고 다양하게 만들되, 네 후보는 신분과 병원 접근 권한, NPC에게 접근하는 방식, 초반 난이도, 최면 어플을 쓸 동기, 시작 장소가 서로 확실히 달라야 한다.\n5. 모든 후보는 성인(만 19세 이상)이며 성별은 남성으로 고정한다.\n6. 네 후보 각각에 키(cm)·몸무게(kg)·성기 크기(cm)를 현실적인 성인 범위 안에서 반드시 정하고, 외형(style)·성격(personality)·말투(speech_style)도 각 후보가 서로 다르게 만든다.\n7. 네 후보 각각을 다음 카드 형식으로 짧고 정보 중심으로 출력한다 — 배경은 최대 2문장, 플레이 특징은 한 문장으로 압축한다(병원 접근 권한·초반 난이도·어플 활용 동기를 그 한 문장 안에 녹인다). 마크다운 굵게 **는 새로 쓰지 않는다:\n[후보 N · 역할 한글명]\n이름 · 나이 · 남성\n직업: 직업 / 전공·직급(있으면)\n신체: 키cm / 몸무게kg / 성기 크기cm\n외형: style\n성격·말투: personality / speech_style\n배경: 최대 2문장\n특징: 한 문장\n8. [선택지]에는 정확히 네 개, 각 후보를 "이름 · 직업" 형태로만 짧게 적는다(공백 포함 24자 이하 목표). 시작 장소·접근 방식·어플 활용 계획·배경 설명 등 긴 문장을 넣지 않는다. 번호나 마커 없이 "이름 · 직업" 문구 자체만 적는다. 카테고리를 묻는 질문형 선택지나 NPC 선택지를 만들지 않는다.\n9. 항목별로 하나씩 질문하지 않는다. 사용자가 특정 조건을 말하면 다음 응답에서 네 후보 전체를 그 조건에 맞게 다시 만든다.\n\n[출력 형태 예시 — 실제 이름·설정은 매번 새로 만들 것, 이 예시를 그대로 베끼지 말 것]\n[1. 서사 및 행동]\n(어플 발견 2~3문장)\n\n[후보 1 · 병원 직원]\n(이름) · (나이) · 남성\n직업: (직업)\n신체: (키)cm / (몸무게)kg / (성기 크기)cm\n외형: (style)\n성격·말투: (personality) / (speech_style)\n배경: (최대 2문장)\n특징: (한 문장)\n\n[후보 2 · 환자] ... (후보 3, 4도 동일한 형식으로 이어짐)\n\n[2. 플레이어 상황판]\n(간단한 상태 표시, "대기" 표현 없이)\n\n[3. 선택지]\n(후보1 이름) · (후보1 직업)\n(후보2 이름) · (후보2 직업)\n(후보3 이름) · (후보3 직업)\n(후보4 이름) · (후보4 직업)`;
+  return `\n\n[PLAYER SETUP PHASE — GENERATE 4 CANDIDATES — HIGHEST PRIORITY, NO QUESTIONS]\n사용자에게 "어떤 캐릭터를 원하시나요?", "어떤 세계에서 시작하고 싶나요?" 같은 열린 질문을 절대 하지 않는다. 사용자의 대답을 기다리지 말고, 지금 이 응답 안에서 아래 4개 후보를 전부 직접 만들어서 완성된 형태로 즉시 보여준다. "대기", "대기 중", "곧 결정됩니다", "캐릭터 생성 단계"처럼 후보 생성을 다음 턴으로 미루거나 진행 중이라고 암시하는 표현을 본문 어디에도 쓰지 않는다. [3. 선택지]를 비워두거나 다른 용도로 쓰지 않는다 — 반드시 아래 4번(플레이어 후보 4개의 짧은 선택지)으로 채운다. [3. 선택지]에 등록 NPC 이름이나 NPC를 고르는 선택지를 넣지 않는다 — 이건 플레이어 자신의 캐릭터를 고르는 단계이지 NPC를 고르는 단계가 아니다.\n1. 삭제되지 않는 상식개변 어플 발견과 핵심 기능을 2~3문장으로 짧게 알린다.\n2. 병원 장면이나 등록 NPC는 아직 등장시키지 않는다.\n3. 바로 이어서, 플레이어 캐릭터 후보 4개를 전부 확정해서 만든다(질문으로 대체하지 않는다). 네 후보 모두 성인 남성이다. 역할 슬롯은 고정한다:\n   1번(hospital_worker): 병원에서 근무하는 성인 남성 — 의사, 인턴, 간호사, 임상병리사, 방사선사, 물리치료사, 병원 행정직, 보안요원 등\n   2번(patient): 현재 입원 중이거나 외래 진료를 받는 성인 남성 환자. 질병·부상은 정상적인 플레이를 막지 않는 수준이어야 하며, 의식불명이나 심각한 인지장애 등 플레이가 어려운 설정은 금지한다.\n   3번(hospital_adjacent): 병원과 연결된 성인 남성 외부인 — 보호자, 면회객, 납품업자, 보험조사원, 기자, 실습생, 병원 재단 관계자 등\n   4번(wildcard): 앞의 세 역할과 플레이 방식이 겹치지 않으면서 병원 세계관에서 자연스럽게 시작할 수 있는 성인 남성\n4. 이름·나이·직업 세부 설정은 매번 새롭고 다양하게 만들되, 네 후보는 신분과 병원 접근 권한, NPC에게 접근하는 방식, 초반 난이도, 상식개변 어플을 쓸 동기, 시작 장소가 서로 확실히 달라야 한다.\n5. 모든 후보는 성인(만 19세 이상)이며 성별은 남성으로 고정한다.\n6. 네 후보 각각에 키(cm)·몸무게(kg)·성기 크기(cm)를 현실적인 성인 범위 안에서 반드시 정하고, 외형(style)·성격(personality)·말투(speech_style)도 각 후보가 서로 다르게 만든다.\n7. 네 후보 각각을 다음 카드 형식으로 짧고 정보 중심으로 출력한다 — 배경은 최대 2문장, 플레이 특징은 한 문장으로 압축한다(병원 접근 권한·초반 난이도·어플 활용 동기를 그 한 문장 안에 녹인다). 마크다운 굵게 **는 새로 쓰지 않는다:\n[후보 N · 역할 한글명]\n이름 · 나이 · 남성\n직업: 직업 / 전공·직급(있으면)\n신체: 키cm / 몸무게kg / 성기 크기cm\n외형: style\n성격·말투: personality / speech_style\n배경: 최대 2문장\n특징: 한 문장\n8. [선택지]에는 정확히 네 개, 각 후보를 "이름 · 직업" 형태로만 짧게 적는다(공백 포함 24자 이하 목표). 시작 장소·접근 방식·어플 활용 계획·배경 설명 등 긴 문장을 넣지 않는다. 번호나 마커 없이 "이름 · 직업" 문구 자체만 적는다. 카테고리를 묻는 질문형 선택지나 NPC 선택지를 만들지 않는다.\n9. 항목별로 하나씩 질문하지 않는다. 사용자가 특정 조건을 말하면 다음 응답에서 네 후보 전체를 그 조건에 맞게 다시 만든다.\n\n[출력 형태 예시 — 실제 이름·설정은 매번 새로 만들 것, 이 예시를 그대로 베끼지 말 것]\n[1. 서사 및 행동]\n(어플 발견 2~3문장)\n\n[후보 1 · 병원 직원]\n(이름) · (나이) · 남성\n직업: (직업)\n신체: (키)cm / (몸무게)kg / (성기 크기)cm\n외형: (style)\n성격·말투: (personality) / (speech_style)\n배경: (최대 2문장)\n특징: (한 문장)\n\n[후보 2 · 환자] ... (후보 3, 4도 동일한 형식으로 이어짐)\n\n[2. 플레이어 상황판]\n(간단한 상태 표시, "대기" 표현 없이)\n\n[3. 선택지]\n(후보1 이름) · (후보1 직업)\n(후보2 이름) · (후보2 직업)\n(후보3 이름) · (후보3 직업)\n(후보4 이름) · (후보4 직업)`;
 }
 
 function buildPlayerSetupGenerationSection() {
@@ -3084,10 +3084,10 @@ function buildPlayerSetupRedisplaySection(recommendations, customRecommendation 
 // and confines all hypnosis mechanics to the in-fiction app rather than
 // verbal suggestion, so ordinary persuasion never silently mutates state.
 function buildAppSystemRulesSection() {
-  return buildHypnosisRuntimeSection();
+  return buildCsaRuntimeSection();
 }
 
-function buildHypnosisRuntimeSection() {
+function buildCsaRuntimeSection() {
   return `
 
 [COMMON-SENSE CHANGE RUNTIME CONTRACT — HIGH PRIORITY]
@@ -3385,7 +3385,19 @@ const STORY_MASTER_ALWAYS_OMIT_KEYS = new Set([
 function isAppUsageInfoRequest(playerInput) {
   const input = typeof playerInput === 'string' ? playerInput.trim() : '';
   if (!input) return false;
-  return /(?:어플|앱|최면 어플).*(?:정보|사용법|설명|기능|예시)|(?:정보|사용법|설명|기능|예시).*(?:어플|앱|최면 어플)/.test(input);
+  return /(?:어플|앱|상식개변 어플).*(?:정보|사용법|설명|기능|예시)|(?:정보|사용법|설명|기능|예시).*(?:어플|앱|상식개변 어플)/.test(input);
+}
+
+
+function buildCsaOnlyAppUsageStorySection() {
+  return `
+
+[상식개변 어플 안내]
+- 이 어플은 특정 개인에게 암시나 최면을 거는 기능 없이, 지정 공간의 사회적 상식만 생성·수정·해제한다.
+- 현재 레벨이 허용하는 강도·공간 범위·활성 슬롯 안에서만 작동한다.
+- 강도는 직접 의미 범위 안의 확신과 사회적 압력만 바꾸며 의미 범위를 넓히지 않는다.
+- 범위를 벗어나면 현재 적용은 멈추지만 이미 벌어진 사건의 기억과 물리 상태는 유지된다.
+- 모든 관리는 상식개변 어플 UI에서만 한다.`;
 }
 
 function buildStoryMasterSnapshot(master = {}, { includeAppUsage = false, includeOpeningScenario = false } = {}) {
@@ -3502,63 +3514,31 @@ function buildStoryPrompt(ctx, playerInput, currentTurn, feedback = [], regenera
 [rulebook 주입 — ${nextTurn}턴]
 ${JSON.stringify({ rulebook_address: master.rulebook_address }, null, 2)}`;
   }
-  const openingScenarioSection = !setupComplete && master.opening_scenario
-    ? `\n\n[opening_scenario]\n${typeof master.opening_scenario === 'string' ? master.opening_scenario : JSON.stringify(master.opening_scenario, null, 2)}`
-    : '';
-  const appUsageRequested = isAppUsageInfoRequest(playerInput);
-  const appUsageSection = (!setupComplete || appUsageRequested) && master.app_usage
-    ? `\n\n[app_usage]\n${typeof master.app_usage === 'string' ? master.app_usage : JSON.stringify(master.app_usage, null, 2)}`
+  const openingScenarioSection = '';
+  const appUsageSection = (!setupComplete || appUsageRequested)
+    ? buildCsaOnlyAppUsageStorySection()
     : '';
 
   const activeCsa = getActiveCsaEntries(save);
-  const suggestionPanelData = buildActiveSuggestionPanelText(save, master.characters || {});
-  const csaPanelData = buildCsaPanelText(save, activeCsa);
-  const hypnosisCapability = calculateHypnosisCapability(save, master, activeCsa);
-  const hypnosisSummaryText = buildHypnosisStatusPanelData(hypnosisCapability, resolveHypnosisStoryState(save));
-  const legacyPlayerStatusPanel = `
-
-[PLAYER STATUS PANEL CONTRACT — HIGHEST PRIORITY FOR SECTION 2]
-[2. 플레이어 상황판]은 단순 키·값 나열표가 아니라 게임 속 최면 어플의 현재 화면처럼 작성한다. 이모지와 짧은 구분을 사용하되, 매 턴 문구와 배치를 기계적으로 복제하지 말고 현재 장면에 맞춰 자연스럽게 구성한다. 길이 상한은 없다 — 활성 최면과 상식 개변이 많으면 상황판도 그만큼 길어지는 것이 정상이다.
-저장값과 현재 장면에서 확인 가능한 정보를 우선 사용하며, 알 수 없는 값은 지어내지 않는다. 다음 항목을 모두 포함한다:
-- 🧑 플레이어: 이름, 나이, 성별, 직업 또는 역할
-- 📍 현재 장소
-- 아래 [STATUS PANEL DATA — 최면 어플 요약]의 네 줄을 숫자를 바꾸지 않고 정확히 그대로 옮겨 적는다. 레벨·경험치·슬롯·강도·상식 개변 숫자를 직접 세거나 추측해서 다시 계산하지 않는다.
-- 활성 암시가 하나 이상이면 그 아래에 "🌀 활성 암시 상세" 섹션을 만들어 아래 [STATUS PANEL DATA — 활성 최면]에 나열된 항목을 NPC 이름별로 묶어 하나도 빠짐없이 표시한다. "외 n개"처럼 일부만 보여주고 나머지를 생략하지 않는다. 활성 암시가 없으면 이 섹션 자체를 만들지 않는다.
-- 활성 상식 개변이 하나 이상이면 그 아래에 "🌐 상식 개변 상세" 섹션을 만들어 아래 [STATUS PANEL DATA — 상식 개변]에 나열된 각 항목의 적용 범위와 실제 내용을 하나도 빠짐없이 표시한다. 활성 상식 개변이 없으면 이 섹션 자체를 만들지 않는다.
-- 💭 플레이어 상황 독백: 플레이어 자신의 말투·성격·현재 욕망과 판단을 반영한 1인칭 직접 독백. 게임의 핵심 재미 요소이므로 반드시 포함한다. 반드시 한국어 큰따옴표 “…”로 감싸고, 공백과 따옴표를 제외한 실질 길이 40자 이상으로 쓴다(장면에 맞으면 더 길어도 된다). 해설문·시스템 분석문·제3자 분석문·NPC의 표면의식/잠재의식과 혼동하는 내용은 금지하며, 매턴 기계적으로 같은 독백을 반복하지 않는다. 이 독백은 [2]에만 출력한다.
-- 🔄 이번 턴: 실제로 일어난 사건을 정성적으로 서술한다. 예: "🔄 이번 턴: 한소영과 함께 면회실에서 3병동 복도로 이동했다." 순응 +2, 저항 -1, 호감도 +1처럼 숫자·기호로 된 수치 변화는 절대 쓰지 않는다.
-다음은 [2]에 절대 포함하지 않는다: 현재 접근 대상, NPC 순응도·저항력 등 NPC 수치 요약(우측 사이드바에 이미 표시되므로 중복이다), 이번 턴 예상 stat delta 숫자, (+1)·(-2) 같은 미확정 수치, 최면저항력 증감 추측, 아직 저장되지 않은 EXP와 레벨업 결과, 이번 턴 예상 증가량, 아직 Commit되지 않은 EXP, 예상 최면깊이 변화, 예상 암시 슬롯 변화, 저장되지 않은 시각의 임의 생성, 장식용 구분선의 반복, 같은 상태를 문장만 바꾼 중복 설명.
-턴 번호, 일반 최면의 하루 횟수 제한, 동시 최면 인원 제한, 1인당 중첩 암시 제한, NPC 5개 스탯 전체 표, 사정·오르가즘 누적값은 절대 출력하지 않는다.
-
-[STATUS PANEL DATA — 최면 어플 요약]
-${hypnosisSummaryText}
-
-[STATUS PANEL DATA — 활성 최면]
-${suggestionPanelData.count ? suggestionPanelData.lines : '없음'}
-
-[STATUS PANEL DATA — 상식 개변]
-활성 ${csaPanelData.count}개 / 최대 ${csaPanelData.maxActive}개
-${csaPanelData.count ? csaPanelData.lines : '없음'}`;
-
-  const currentHypnosisStatusText = buildCurrentHypnosisStatusPanelText(save, master, activeCsa);
+  const currentCsaStatusText = buildCurrentCsaStatusPanelText(save, master, activeCsa);
   const playerStatusPanel = `
 
 [PLAYER STATUS PANEL CONTRACT — HIGHEST PRIORITY FOR SECTION 2]
 [2. 플레이어 상황판]은 플레이어 이름·현재 장소·플레이어의 1인칭 직접 독백(한국어 큰따옴표, 실질 40자 이상)·이번 턴의 실제 변화와 아래 Worker 확정 스냅샷을 포함한다. NPC 수치, 예상 수치 변화, 턴 번호, 사정·오르가즘 누적값은 출력하지 않는다.
 
-[PLAYER STATUS HYPNOSIS SNAPSHOT — COPY EXACTLY]
+[PLAYER STATUS CSA SNAPSHOT — COPY EXACTLY]
 아래 블록은 Worker가 현재 저장 상태에서 계산한 확정 정보다. [2. 플레이어 상황판]에 내용·강도·범위·개수를 바꾸지 말고 그대로 출력한다. 요약, 생략, 각색, 추측, 내부 ID 추가를 하지 않는다.
 
-${currentHypnosisStatusText}
+${currentCsaStatusText}
 
-다른 NPC의 암시, 범위 밖 상식개변, 비활성 항목을 추가하지 않는다.`;
+범위 밖 상식개변과 비활성 항목을 추가하지 않는다.`;
 
   // ─── 섹션 5: 컨텍스트 ───
   // 최근 기억: 가장 최근 1개는 최대 5000자, 그 이전 항목은 최대 2500자로 앞·뒤를 모두 보존해 절단한다.
   const recentMemorySlice = recentMemories.slice(-3);
   const storyMasterSnapshot = buildStoryMasterSnapshot(master, {
-    includeAppUsage: !setupComplete || appUsageRequested,
-    includeOpeningScenario: !setupComplete
+    includeAppUsage: false,
+    includeOpeningScenario: false
   });
   const storyStateSnapshot = buildStoryStateSnapshot(save, master);
   if (shouldDeduplicateStorySummaries(save, currentTurn)) {
@@ -3635,7 +3615,7 @@ ${recentMemorySlice.map((m, index) => clipHeadTail(sanitizeRecentNarrativeForPro
   // everything above it, including [최근 기억]'s now-stale account of the
   // turn that was just rolled back.
   const regenerationFeedbackSection = buildRegenerationFeedbackSection(regenerationFeedback);
-  const systemPrompt = coreRules + playerGate + modeSection + rulebookSection + openingScenarioSection + appUsageSection + eligibleNpcRosterSection + buildHypnosisRuntimeSection() + buildGeneralActionJudgmentSection() + buildHypnosisRecoveryNarrativeRule() + currentSceneSection + hospitalLocationMemorySection + npcProfileSection + relationshipMemorySection + explicitMentionSection + csaSection + mindEffectBoundarySection + physicalSceneStateSection + narrativeLengthSection + npcDialogueSection + moanVocalReactionSection + antiRepetitionSection + playerStatusPanel + contextSection + feedbackSection + continuitySection + finalFormatRules + openingFlow + playerSetupReminder + registeredNpcChoiceReminder + choiceLengthReminder + buildAddressAbbreviationSection() + regenerationFeedbackSection + buildStructuredActionStorySection(structuredPlan, save, activeCsa) + playerAttemptSection;
+  const systemPrompt = coreRules + playerGate + modeSection + rulebookSection + openingScenarioSection + appUsageSection + eligibleNpcRosterSection + buildCsaRuntimeSection() + buildGeneralActionJudgmentSection() + buildCsaDeactivationNarrativeRule() + currentSceneSection + hospitalLocationMemorySection + npcProfileSection + relationshipMemorySection + explicitMentionSection + csaSection + mindEffectBoundarySection + physicalSceneStateSection + narrativeLengthSection + npcDialogueSection + moanVocalReactionSection + antiRepetitionSection + playerStatusPanel + contextSection + feedbackSection + continuitySection + finalFormatRules + openingFlow + playerSetupReminder + registeredNpcChoiceReminder + choiceLengthReminder + buildAddressAbbreviationSection() + regenerationFeedbackSection + buildStructuredActionStorySection(structuredPlan, save, activeCsa) + playerAttemptSection;
 
   return {
     mode,
@@ -3685,7 +3665,7 @@ function buildExtractPrompt(narrativeText, playerInput, ctx, images, turnCount, 
     hasCsaTransaction
   });
 
-  const imageCatalog = images.map(img => ({
+  const imageCatalog = images.filter(img => img?.scene_role !== 'hypnosis_onset').map(img => ({
     image_id: img.image_id ?? img.id,
     character_id: img.character_id,
     situation: img.situation,
@@ -3771,7 +3751,7 @@ npc_scene_state_patch는 최종 Story에서 등록 NPC가 실제로 옷을 입�
 [이미지 선택]
 1. is_sexual 판단: 실제 성행위/삽입/성기노출/오르가즘이 구체적이면 true. 키스/포옹/스킨십/분위기만으로는 false. 애매하면 반드시 false.
 2. image_library에서 character_id+is_sexual(또는 image_pool) 일치 항목만 후보로 본다. short_description과 tags가 있으면 situation보다 먼저 참고해 현재 장면에 가장 맞는 이미지를 고르고, 없으면 기존처럼 situation으로만 매칭한다. 후보 없으면 null.
-3. scene_role=hypnosis_onset 이미지는 실제 최면 반응·암시 성공이 발생한 장면 전용이다. scene_role=heart_eyes 이미지는 높은 호감이나 깊은 최면·순응 상태의 애정·황홀 반응 전용이다. 단순 계획이나 평범한 대화에는 고르지 마라.
+3. scene_role=hypnosis_onset 이미지는 CSA-only 버전에서 선택하지 않는다. scene_role=heart_eyes 이미지는 독립적으로 형성된 높은 호감과 명확한 애정·황홀 반응에만 사용한다. 단순 계획·상식개변 적용·평범한 대화에는 고르지 마라.
 
 [IMAGE CANDIDATE CONTRACT]
 - 아래 이미지 라이브러리는 Worker가 현재 장면과 등록 NPC 기준으로 최대 12장까지 축소한 후보 목록이다.
@@ -4819,7 +4799,7 @@ function getApplicableCsaEntries(save, activeCsa = getActiveCsaEntries(save)) {
   return activeCsa.filter(csa => isCsaApplicable(csa, world));
 }
 
-function buildCurrentHypnosisStatusSnapshot(save = {}, master = {}, activeCsa = getActiveCsaEntries(save)) {
+function buildCurrentCsaStatusSnapshot(save = {}, master = {}, activeCsa = getActiveCsaEntries(save)) {
   const capability = calculateHypnosisCapability(save, master, activeCsa);
   const applicableCsa = getApplicableCsaEntries(save, activeCsa)
     .map(item => ({ strength: item.strength || '약함', scope_label: item.scope_label || '', content: typeof item.content === 'string' ? item.content.trim() : '' }))
@@ -4827,8 +4807,8 @@ function buildCurrentHypnosisStatusSnapshot(save = {}, master = {}, activeCsa = 
   return { csaCount: activeCsa.length, csaMax: capability.csa_max_active, applicableCsa };
 }
 
-function buildCurrentHypnosisStatusPanelText(save = {}, master = {}, activeCsa = getActiveCsaEntries(save)) {
-  const snapshot = buildCurrentHypnosisStatusSnapshot(save, master, activeCsa);
+function buildCurrentCsaStatusPanelText(save = {}, master = {}, activeCsa = getActiveCsaEntries(save)) {
+  const snapshot = buildCurrentCsaStatusSnapshot(save, master, activeCsa);
   const csaLines = snapshot.applicableCsa.length
     ? snapshot.applicableCsa.map(item => `- [${item.scope_label || '현재 범위'} · ${item.strength}] ${item.content}`).join('\n')
     : '- 없음';
@@ -5244,7 +5224,7 @@ function applyGlobalHypnosisDepthRecovery(previousNpcStats, activeSuggestions, c
   return { stats, changes, changed };
 }
 
-function buildHypnosisRecoveryNarrativeRule() {
+function buildCsaDeactivationNarrativeRule() {
   return `
 
 [상식개변 효과와 기억의 분리]
@@ -5404,7 +5384,7 @@ function planFindNpcAction(previousSave, master, action, { turnCount }) {
   };
   const name = publicCharacterName(characters[characterId], characterId);
   const canonical_action = { version: 1, type: 'find_npc', base_turn_count: turnCount, character_id: characterId, target_location: targetLocation };
-  return { ok: true, canonical_action, display_input: `최면 어플의 위치 추적을 이용해 ${name}이 있는 ${locationLabel}로 찾아간다.`, summary: { total: 1 }, plan: { character_id: characterId, character_name: name, target_world_state: targetLocation, target_location_label: locationLabel } };
+  return { ok: true, canonical_action, display_input: `상식개변 어플의 위치 추적을 이용해 ${name}이 있는 ${locationLabel}로 찾아간다.`, summary: { total: 1 }, plan: { character_id: characterId, character_name: name, target_world_state: targetLocation, target_location_label: locationLabel } };
 }
 
 function planAppTransaction(previousSave, master, action, { turnNumber }) {
@@ -5532,12 +5512,8 @@ function planAppTransaction(previousSave, master, action, { turnNumber }) {
   const summary = summarizeAppOperations(canonicalOperations);
   const canonical_action = { version: 1, type: 'app_transaction', base_turn_count: action.base_turn_count, operations: canonicalOperations };
   const labels = [];
-  if (summary.suggestion_activate + summary.suggestion_update + summary.suggestion_deactivate) labels.push(`개인 암시 ${summary.suggestion_activate + summary.suggestion_update + summary.suggestion_deactivate}건`);
   if (summary.csa_activate + summary.csa_update + summary.csa_deactivate) labels.push(`상식개변 ${summary.csa_activate + summary.csa_update + summary.csa_deactivate}건`);
-  const suggestionTargets = canonicalOperations
-    .filter(operation => operation.domain === 'suggestion')
-    .map(operation => ({ client_id: operation.client_id, character_id: operation.character_id, character_name: publicCharacterName(characters[operation.character_id], operation.character_id) }));
-  return { ok: true, canonical_action, display_input: `최면 어플에서 ${labels.join('과 ')}의 변경사항을 적용한다.`, summary, plan: { active_suggestions: suggestions, csa_active: csa, operations: canonicalOperations, suggestion_activations: suggestionActivations, suggestion_targets: suggestionTargets, counts: summary } };
+  return { ok: true, canonical_action, display_input: `상식개변 어플에서 ${labels.join('과 ')}의 변경사항을 적용한다.`, summary, plan: { csa_active: csa, operations: canonicalOperations, counts: summary } };
 }
 
 function planStructuredAction(previousSave, master, rawAction, context = {}) {
@@ -5546,7 +5522,7 @@ function planStructuredAction(previousSave, master, rawAction, context = {}) {
   if (action.type === 'app_transaction' && action.operations.some(operation => operation.domain !== 'csa')) {
     return { ok: false, status: 422, error_code: 'CSA_ONLY_MODE', issues: [appIssue(action, 'CSA_ONLY_MODE', '이 버전은 상식개변 작업만 지원합니다.')] };
   }
-  if (action.base_turn_count !== context.turnCount) return { ok: false, status: 409, error_code: 'APP_STALE_STATE', issues: [appIssue(action, 'APP_STALE_STATE', '최면 어플을 연 뒤 게임 상태가 변경되었습니다.')] };
+  if (action.base_turn_count !== context.turnCount) return { ok: false, status: 409, error_code: 'APP_STALE_STATE', issues: [appIssue(action, 'APP_STALE_STATE', '상식개변 어플을 연 뒤 게임 상태가 변경되었습니다.')] };
   if (action.type === 'find_npc') return planFindNpcAction(previousSave, master, action, context);
   return planAppTransaction(previousSave, master, action, context);
 }
@@ -5593,7 +5569,7 @@ function applySuggestionResolutionsToPlan(previousSave, master, structuredPlan, 
 function buildStructuredActionError(result, currentTurn = null) {
   const stale = result?.error_code === 'APP_STALE_STATE';
   return {
-    error: stale ? '최면 어플을 연 뒤 게임 상태가 변경되었습니다.' : '최면 어플의 변경사항을 적용하지 못했습니다.',
+    error: stale ? '상식개변 어플을 연 뒤 게임 상태가 변경되었습니다.' : '최면 어플의 변경사항을 적용하지 못했습니다.',
     error_code: stale ? 'APP_STALE_STATE' : 'APP_ACTION_INVALID',
     current_turn_count: stale && Number.isInteger(currentTurn) ? currentTurn : undefined,
     issues: Array.isArray(result?.issues) ? result.issues : []

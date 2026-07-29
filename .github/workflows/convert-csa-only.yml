@@ -7,6 +7,7 @@ on:
     paths:
       - .github/workflows/convert-csa-only.yml
       - .github/scripts/convert_csa_only.py
+      - .github/scripts/csa_only_trigger.txt
   pull_request:
     branches:
       - feature/csa-only
@@ -43,6 +44,7 @@ jobs:
       - name: Remove one-shot files
         run: |
           rm -f .github/scripts/convert_csa_only.py
+          rm -f .github/scripts/csa_only_trigger.txt
           rm -f .github/workflows/convert-csa-only.yml
 
       - name: Commit converted branch

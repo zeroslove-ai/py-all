@@ -1149,7 +1149,7 @@ function buildPlayerInfoPayload(master = {}, save = {}) {
     style: value('style'), personality: value('personality'), speech_style: value('speech_style'), background: value('background'),
     starting_location: value('starting_location'), current_location: world.location_label || save?.player_location || null,
     time_label: world.time_label || null, position_label: scene.position_label || null,
-    level: progress.current_level, exp: progress.current_exp, next_level_exp: progress.next_level_exp,
+    level: progress.current_level, exp: progress.exp, next_level_exp: progress.next_level_exp,
     active_csa_count: progress.csa_active_count, max_active_csa: progress.csa_max_active,
     setup_source: setup.source || null
   };
@@ -4959,7 +4959,7 @@ function buildCurrentCsaStatusSnapshot(save = {}, master = {}, activeCsa = getAc
   const applicableCsa = getApplicableCsaEntries(save, activeCsa)
     .map(item => ({ strength: item.strength || '약함', scope_label: item.scope_label || '', content: typeof item.content === 'string' ? item.content.trim() : '' }))
     .filter(item => item.content);
-  return { level: capability.current_level, exp: capability.current_exp, next: capability.next_level_exp, csaCount: activeCsa.length, csaMax: capability.csa_max_active, applicableCsa };
+  return { level: capability.current_level, exp: capability.exp, next: capability.next_level_exp, csaCount: activeCsa.length, csaMax: capability.csa_max_active, applicableCsa };
 }
 
 function buildCurrentCsaStatusPanelText(save = {}, master = {}, activeCsa = getActiveCsaEntries(save)) {

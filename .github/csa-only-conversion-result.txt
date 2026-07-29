@@ -1,23 +1,16 @@
-convert_status=1
-worker_check=99
-sidebar_check=99
-app_check=99
-diff_check=99
+convert_status=0
+worker_check=1
+sidebar_check=0
+app_check=0
+diff_check=0
 
 --- log ---
-Traceback (most recent call last):
-  File "/home/runner/work/py-all/py-all/.github/scripts/convert_csa_only.py", line 298, in <module>
-    worker = sub_once(
-             ^^^^^^^^^
-  File "/home/runner/work/py-all/py-all/.github/scripts/convert_csa_only.py", line 15, in sub_once
-    updated, count = re.subn(pattern, replacement, text, count=1, flags=flags)
-                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-  File "/opt/hostedtoolcache/Python/3.12.13/x64/lib/python3.12/re/__init__.py", line 197, in subn
-    return _compile(pattern, flags).subn(repl, string, count)
-           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-  File "/opt/hostedtoolcache/Python/3.12.13/x64/lib/python3.12/re/__init__.py", line 334, in _compile_template
-    return _sre.template(pattern, _parser.parse_template(repl, pattern))
-                                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-  File "/opt/hostedtoolcache/Python/3.12.13/x64/lib/python3.12/re/_parser.py", line 1075, in parse_template
-    raise s.error('bad escape %s' % this, len(this)) from None
-re.error: bad escape \s at position 152 (line 4, column 23)
+CSA-only conversion applied.
+/home/runner/work/py-all/py-all/worker/game-proxy-v2.js:541
+    if (requiredRank > availableRank) return [{ client_id:candidate.client_id, domain:candidate.domain, operation:candidate.operation, code:'CONTENT_STRENGTH_LOCKED', message:`이 내용은 ${APP_STRENGTH_LABEL[result.required_strength]} 단계가 필요하지만 현재 사용 가능한 단계는 ${APP_STRENGTH_LABEL[availableStrength]}입니다.`, selected_strength:candidate.selected_strength, required_strength:result.required_strength, available_strength:availableStrength, suggested_strength:null, reason:result.reason }];
+                                                                                                                                                                                ^
+
+SyntaxError: Unexpected identifier '이'
+    at checkSyntax (node:internal/main/check_syntax:74:5)
+
+Node.js v22.23.1

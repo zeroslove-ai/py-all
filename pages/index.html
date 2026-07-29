@@ -188,8 +188,8 @@
     .character-info-compact { display: grid; gap: 6px; line-height: 1.45; }
     .character-affiliation { color: var(--text-primary); font-weight: 700; }
     .relationship-inline {
-      display: block;
-      white-space: nowrap;
+      display: grid;
+      gap: 8px;
       font-size: 0.85rem;
       color: var(--text-primary);
       background: var(--bg-tertiary);
@@ -197,6 +197,11 @@
       border-radius: var(--radius);
     }
     .relationship-inline strong { color: var(--accent); font-weight: 800; }
+    .relationship-summary,
+    .relationship-details { display: grid; gap: 6px; }
+    .relationship-details summary { cursor: pointer; }
+    .relationship-row { display: flex; flex-wrap: wrap; gap: 4px 10px; line-height: 1.5; }
+    .relationship-item { white-space: nowrap; }
     .stat-value.signal-green { color: #4ade80; }
     .stat-value.signal-yellow { color: #facc15; }
     .stat-value.signal-red { color: #fb7185; }

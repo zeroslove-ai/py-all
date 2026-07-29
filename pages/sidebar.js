@@ -56,17 +56,58 @@ const sidebar = {
     document.getElementById('npc-relationship-title').textContent = `${character.name || characterId} 관계 기록`;
     const relationshipRoot = document.getElementById('npc-relationship');
     relationshipRoot.replaceChildren();
-    relationshipRoot.append('✨ NPC 오르가즘 ', this.emphasis(`${npcOrgasmCount}회`), ' · 💦 플레이어 사정 ', this.emphasis(`${playerEjaculationCount}회`));
-    const experience = document.createElement('div');
-    experience.textContent = `질 ${number('vaginal_sex_count')} · 항문 ${number('anal_sex_count')} · 구강 ${number('oral_sex_count')}`;
-    relationshipRoot.appendChild(experience);
+    const summaryRoot = document.createElement('div');
+    summaryRoot.className = 'relationship-summary';
+    const createItem = (label, value) => {
+      const item = document.createElement('span');
+      item.className = 'relationship-item';
+      item.append(`${label} `);
+      item.append(value > 0 ? this.emphasis(String(value)) : document.createTextNode(String(value)));
+      return item;
+    };
+    const createTextItem = (label, value) => {
+      const item = document.createElement('span');
+      item.className = 'relationship-item';
+      item.textContent = `${label} ${value}`;
+      return item;
+    };
+    const createRow = (...items) => {
+      const row = document.createElement('div');
+      row.className = 'relationship-row';
+      row.append(...items);
+      return row;
+    };
+    summaryRoot.append(
+      createRow(createItem('✨ 절정', npcOrgasmCount), createItem('💦 사정', playerEjaculationCount)),
+      createRow(
+        createItem('🌸 질', number('vaginal_sex_count')),
+        createItem('🍑 애널', number('anal_sex_count')),
+        createItem('👄 구강', number('oral_sex_count'))
+      )
+    );
+    relationshipRoot.appendChild(summaryRoot);
     const details = document.createElement('details');
+    details.className = 'relationship-details';
     const summary = document.createElement('summary'); summary.textContent = '상세 기록'; details.appendChild(summary);
-    const detail = document.createElement('div');
-    const vaginal = Number.isInteger(history.first_vaginal_turn) ? `완료 · ${history.first_vaginal_turn}턴` : '미완료';
-    const anal = Number.isInteger(history.first_anal_turn) ? `완료 · ${history.first_anal_turn}턴` : '미완료';
-    detail.textContent = `질 개통: ${vaginal}\n항문 개통: ${anal}\n질내 ${number('vaginal_ejaculation_count')} · 항문내 ${number('anal_ejaculation_count')} · 입안 ${number('oral_ejaculation_count')} · 얼굴 ${number('facial_ejaculation_count')} · 몸 ${number('body_ejaculation_count')} · 위치 미확정 ${number('unspecified_ejaculation_count')}`;
-    details.appendChild(detail); relationshipRoot.appendChild(details);
+    const vaginal = Number.isInteger(history.first_vaginal_turn) ? `${history.first_vaginal_turn}턴` : '미완';
+    const anal = Number.isInteger(history.first_anal_turn) ? `${history.first_anal_turn}턴` : '미완';
+    details.append(
+      createRow(createTextItem('🌸 질 개통', vaginal)),
+      createRow(createTextItem('🍑 애널 개통', anal)),
+      createRow(
+        createItem('💦 질내', number('vaginal_ejaculation_count')),
+        createItem('🍑 애널내', number('anal_ejaculation_count'))
+      ),
+      createRow(
+        createItem('👄 입안', number('oral_ejaculation_count')),
+        createItem('😳 얼굴', number('facial_ejaculation_count'))
+      ),
+      createRow(
+        createItem('🫧 몸', number('body_ejaculation_count')),
+        createItem('❔ 미정', number('unspecified_ejaculation_count'))
+      )
+    );
+    relationshipRoot.appendChild(details);
     this.renderStats(context?.save?.npc_stats?.[characterId] || {}, characterId, context?.save?.npc_stat_changes?.[characterId]);
   },
 

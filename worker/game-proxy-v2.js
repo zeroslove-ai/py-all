@@ -3728,7 +3728,7 @@ npc_stat_changes에는 호감도와 상식수용도만 반환한다. 호감도�
 
 [CURRENT NPC RELATIONSHIP RECORD]
 sexual_events에는 현재 장면의 등록 NPC에게 실제로 완료된 사건만 넣는다. 시도·직전·실패·가짜·상상·회상·다른 NPC 사건은 넣지 않는다. 누적 수치와 npc_relationship_state는 반환하지 않는다.
-relationship_memory_patch는 최종 Story에서 실제로 완료된 중요한 관계 사건이 있을 때만 현재 메인 NPC에 대해 {text, permanent} 형태로 최대 2개 반환한다. permanent:true는 첫 키스·첫 질/구강/항문 삽입·첫 질내 사정 또는 임신 가능 사건, 결혼·이혼·임신·출산·가족관계 변화, 중대한 배신·용서·고백·약속처럼 관계를 영구적으로 바꾼 완료 사건에만 쓴다. 애매하면 false다. 플레이어 입력만의 결과 선언, 실패·추측·감정 과장, 매 턴 반복되는 일반 사실은 넣지 않는다. 정신 효과 중 실제 완료된 객관적 사건은 저장할 수 있지만, 효과 수행만으로 NPC의 진심·영구 취향·일반 복종·완전한 동의가 되었다는 해석은 저장하지 않는다.
+relationship_memory_patch는 최종 Story에서 실제로 완료된 중요한 관계 사건이 있을 때만 현재 메인 NPC에 대해 {character_id, text, permanent} 형태로 최대 2개 반환한다. character_id는 현재 메인 NPC ID를 정확히 쓴다. permanent:true는 첫 키스·첫 질/구강/항문 삽입·첫 질내 사정 또는 임신 가능 사건, 결혼·이혼·임신·출산·가족관계 변화, 중대한 배신·용서·고백·약속처럼 관계를 영구적으로 바꾼 완료 사건에만 쓴다. 애매하면 false다. 플레이어 입력만의 결과 선언, 실패·추측·감정 과장, 매 턴 반복되는 일반 사실은 넣지 않는다. 정신 효과 중 실제 완료된 객관적 사건은 저장할 수 있지만, 효과 수행만으로 NPC의 진심·영구 취향·일반 복종·완전한 동의가 되었다는 해석은 저장하지 않는다.
 
 [NPC PHYSICAL SCENE STATE PATCH]
 npc_scene_state_patch는 최종 Story에서 등록 NPC가 실제로 옷을 입거나 벗고, 열고 잠그고, 올리거나 내리고, 갈아입거나 자세를 바꾼 완료 사건만 반영한다. 플레이어 입력만의 선언, 실패·시도·계획, 상식개변의 생성·해제만으로는 반환하지 않는다. 기존 상태를 유지할 키는 생략하고, 등록 NPC·허용 enum만 사용한다.
@@ -3789,7 +3789,7 @@ ${JSON.stringify(imageCatalog)}
   "csa_omission": ["조건을 충족했는데도 실행되지 않은 강제 상식개변에 대한 짧은 설명. 누락이 없으면 []"],
   "csa_experienced_ids": ["이번 장면에서 현재 NPC가 실제로 경험한 활성 CSA의 내부 ID만. 없으면 []"],
   "sexual_events": [{"character_id": "현재 등장한 등록 NPC ID", "type": "vaginal_penetration|anal_penetration|oral_sex|npc_orgasm|player_orgasm|vaginal_ejaculation|anal_ejaculation|oral_ejaculation|facial_ejaculation|body_ejaculation|unspecified_ejaculation", "completed": true, "evidence": "이번 최종 Story에서 실제 완료된 짧은 근거"}],
-  "relationship_memory_patch": [{"text": "최종 Story에서 실제 완료된 중요한 관계 사건의 짧은 사실", "permanent": false}],
+  "relationship_memory_patch": [{"character_id": "현재 메인 NPC ID", "text": "최종 Story에서 실제 완료된 중요한 관계 사건의 짧은 사실", "permanent": false}],
   "npc_scene_state_patch": {"heroine1": {"clothing": {"uniform_top": "worn|removed|open|unknown", "uniform_bottom": "worn|removed|open|unknown", "underwear_top": "worn|removed|unknown", "underwear_bottom": "worn|removed|unknown"}, "posture": "standing|sitting|kneeling|lying|unknown", "current_action": "실제 현재 행동, 없으면 생략"}},
   "player_scene_state_patch": {"posture": "standing|sitting|kneeling|lying_supine|lying_prone|side_lying|straddling|bent_forward|leaning|walking|crouching|carrying|unknown", "position_label": "최종 Story에서 실제 완료된 플레이어의 현재 자세/방향, 없으면 생략"},
   "turn_summary": "이번 턴에서 변한 핵심 사실 1~3문장",
@@ -4176,20 +4176,38 @@ function buildSavePatch(extract, enginePatch = {}, summaryPlan = null, previousS
     };
     patch.npc_emotion = { [characterId]: normalizedEmotion };
     if (!degraded && (extract.sexual_events?.length || extract.relationship_memory_patch?.length)) {
-      const previousRelationship = previousSave?.npc_relationship_state?.[characterId] || {};
+      const previousRelationship = isPlainObject(previousSave?.npc_relationship_state?.[characterId])
+        ? previousSave.npc_relationship_state[characterId]
+        : {};
+      const npcSwitchTurn = previousSave?.last_character_id !== characterId;
       const sexual = applySexualEvents(previousRelationship, extract.sexual_events, turnNumber, {
         playerInput,
         narrativeText,
         characterId,
-        npcsPresent: Array.isArray(extract.npcs_present) ? extract.npcs_present : []
+        npcsPresent: Array.isArray(extract.npcs_present) ? extract.npcs_present : [],
+        characters: master?.characters || {},
+        npcSwitchTurn
       });
+      const relationshipMemoryPatch = filterCurrentRelationshipMemoryPatch(extract.relationship_memory_patch, {
+        characterId,
+        characters: master?.characters || {},
+        narrativeText,
+        turnNumber,
+        hasCurrentSexualEvent: sexual.accepted > 0,
+        npcSwitchTurn
+      });
+      const hasExistingRelationship = Object.keys(previousRelationship).length > 0;
+      if (!hasExistingRelationship && sexual.accepted === 0 && relationshipMemoryPatch.length === 0) {
+        // A new NPC cannot inherit a flat or inferred relationship record from another NPC.
+      } else {
       const merged = normalizeRelationshipState(previousRelationship, {
         player_ejaculation_count: sexual.history.player_ejaculation_count,
         npc_orgasm_count: sexual.history.npc_orgasm_count
-      }, turnNumber, extract.relationship_memory_patch, sexual.accepted > 0);
+      }, turnNumber, relationshipMemoryPatch, sexual.accepted > 0);
       merged.sexual_history = sexual.history;
       merged.sexual_events = sexual.sexual_events;
       patch.npc_relationship_state = { [characterId]: merged };
+      }
     }
 
     if (firstEncounterStats) {
@@ -4417,7 +4435,7 @@ function normalizeExtract(extract) {
     : [];
   normalized.npc_relationship_state = normalizeRelationshipExtract(normalized.npc_relationship_state);
   normalized.sexual_events = normalizeSexualEvents(normalized.sexual_events);
-  normalized.relationship_memory_patch = normalizeRelationshipMemoryItems(normalized.relationship_memory_patch, { limit: 2 });
+  normalized.relationship_memory_patch = normalizeRelationshipMemoryPatchExtract(normalized.relationship_memory_patch);
   normalized.npc_scene_state_patch = normalizeNpcSceneStatePatch(normalized.npc_scene_state_patch);
   normalized.player_scene_state_patch = normalizePlayerSceneStatePatch(normalized.player_scene_state_patch);
   if (!isPlainObject(normalized.first_encounter_stats)) normalized.first_encounter_stats = null;
@@ -4588,6 +4606,25 @@ function normalizeSexualEvents(value) {
     }));
 }
 
+function normalizeRelationshipMemoryPatchExtract(value) {
+  if (!Array.isArray(value)) return [];
+  const result = [];
+  for (const item of value.slice(0, 2)) {
+    if (typeof item === 'string') {
+      const text = item.trim().replace(/\s+/g, ' ').slice(0, 100);
+      if (text) result.push(text);
+      continue;
+    }
+    if (!isPlainObject(item) || typeof item.text !== 'string') continue;
+    const text = item.text.trim().replace(/\s+/g, ' ').slice(0, 100);
+    if (!text) continue;
+    const normalized = { text, permanent: item.permanent === true };
+    if (typeof item.character_id === 'string' && item.character_id.trim()) normalized.character_id = item.character_id.trim();
+    result.push(normalized);
+  }
+  return result;
+}
+
 function explicitPlayerEjaculationType(playerInput = '') {
   const input = typeof playerInput === 'string' ? playerInput.replace(/\s+/g, ' ') : '';
   if (!/(사정한다|사정할게|사정해|싼다|쌀게|싸버린다|안에\s*싼다|질내\s*사정|입안에\s*사정|얼굴에\s*싼다|몸\s*위에\s*사정|항문\s*안에\s*사정)/.test(input)) return null;
@@ -4616,17 +4653,96 @@ function emptySexualHistory(previous = {}) {
   };
 }
 
-function applySexualEvents(previous = {}, events = [], turnNumber = 0, { playerInput = '', narrativeText = '', characterId = '', npcsPresent = [] } = {}) {
+function relationshipRecordReject(eventName, turnNumber, characterId, eventCharacterId, reason) {
+  console.warn(JSON.stringify({
+    event: eventName,
+    turn: turnNumber,
+    current_character_id: characterId || null,
+    event_character_id: eventCharacterId || null,
+    reason
+  }));
+}
+
+function sexualEventCompletionPattern(type = '') {
+  if (type === 'vaginal_penetration') return /질\s*(?:삽입|안(?:으로|에))/;
+  if (type === 'anal_penetration') return /(?:항문|애널)\s*(?:삽입|안(?:으로|에))/;
+  if (type === 'oral_sex') return /(?:구강|입안|입술).*(?:성교|자극|받았|했다)|(?:구강|입안)\s*(?:성교|자극)/;
+  if (type === 'npc_orgasm' || type === 'player_orgasm') return /(?:절정|오르가즘).*(?:했다|했으며|하고|한|에\s*이르)/;
+  if (type.endsWith('_ejaculation')) return /(?:사정(?:했다|했으며|하고|한|을)|쌌(?:다|으며|고|다는)|정액)/;
+  return false;
+}
+
+function storyConfirmsCurrentSexualEvent(narrativeText = '', characterName = '', eventType = '') {
+  if (!characterName) return false;
+  const completion = sexualEventCompletionPattern(eventType);
+  if (!completion) return false;
+  return extractNarrativeActionSection(narrativeText)
+    .split(/(?<=[.!?。！？])\s+|\n{2,}/)
+    .some(sentence => sentence.includes(characterName)
+      && !/(?:과거|이전|직전|회상|기억|떠올)/.test(sentence)
+      && completion.test(sentence));
+}
+
+function isGenericSexualRelationshipMemory(text = '') {
+  return /플레이어와 친밀한 성적 경험을 가진 적이 있다|플레이어와의 성행위 중 절정한 경험이 있다|플레이어의 사정을 경험했다/.test(text);
+}
+
+function filterCurrentRelationshipMemoryPatch(items = [], {
+  characterId = '', characters = {}, narrativeText = '', turnNumber = 0, hasCurrentSexualEvent = false, npcSwitchTurn = false
+} = {}) {
+  const currentCharacter = isPlainObject(characters?.[characterId]) ? characters[characterId] : null;
+  const currentName = currentCharacter?.name || currentCharacter?.['이름'] || '';
+  const currentNarrative = extractNarrativeActionSection(narrativeText);
+  const registeredNames = Object.entries(isPlainObject(characters) ? characters : {})
+    .map(([id, character]) => ({ id, name: character?.name || character?.['이름'] }))
+    .filter(item => typeof item.name === 'string' && item.name.trim());
+  const accepted = [];
+  for (const item of Array.isArray(items) ? items : []) {
+    const isLegacyString = typeof item === 'string';
+    const text = isLegacyString ? item : item?.text;
+    const eventCharacterId = !isLegacyString && typeof item?.character_id === 'string' ? item.character_id : null;
+    let reason = '';
+    if (typeof text !== 'string' || !text.trim()) reason = 'relationship memory text missing';
+    else if (!currentCharacter) reason = 'relationship memory current character is not registered';
+    else if (!isLegacyString && eventCharacterId !== characterId) reason = eventCharacterId ? 'relationship memory character mismatch' : 'relationship memory character missing';
+    else if (isLegacyString && (!currentName || !currentNarrative.includes(currentName))) reason = 'legacy relationship memory lacks current story character';
+    else if (npcSwitchTurn && (!currentName || !currentNarrative.includes(currentName))) reason = 'npc switch relationship memory lacks current story character';
+    else if (registeredNames.some(itemName => itemName.id !== characterId && text.includes(itemName.name))) reason = 'relationship memory mentions a different registered npc';
+    else if (isGenericSexualRelationshipMemory(text) && !hasCurrentSexualEvent) reason = 'generic sexual memory without current sexual event';
+    if (reason) {
+      relationshipRecordReject('relationship_memory_rejected', turnNumber, characterId, eventCharacterId, reason);
+      continue;
+    }
+    accepted.push(item);
+  }
+  return accepted;
+}
+
+function applySexualEvents(previous = {}, events = [], turnNumber = 0, {
+  playerInput = '', narrativeText = '', characterId = '', npcsPresent = [], characters = {}, npcSwitchTurn = false
+} = {}) {
   const history = emptySexualHistory(previous);
   const seen = new Set((Array.isArray(previous?.sexual_events) ? previous.sexual_events : []).map(item => item?.id).filter(Boolean));
   const stored = Array.isArray(previous?.sexual_events) ? previous.sexual_events.filter(isPlainObject).slice(-50) : [];
   const explicitEjaculation = explicitPlayerEjaculationType(playerInput);
+  const currentCharacter = isPlainObject(characters?.[characterId]) ? characters[characterId] : null;
+  const currentName = currentCharacter?.name || currentCharacter?.['이름'] || '';
   let accepted = 0;
   for (const event of events) {
-    if (event.character_id !== characterId || !npcsPresent.includes(characterId)) continue;
-    const storyConfirmsEjaculation = /(사정(?:했다|했으며|하고|한|을)|쌌(?:다|으며|고|다는)|정액)/.test(narrativeText);
+    let reason = '';
+    if (!isPlainObject(event) || !isPlainObject(characters?.[event.character_id])) reason = 'sexual event character is not registered';
+    else if (event.character_id !== characterId) reason = 'sexual event character mismatch';
+    else if (!npcsPresent.includes(event.character_id)) reason = 'sexual event character is not present';
+    else if (!storyConfirmsCurrentSexualEvent(narrativeText, currentName, event.type)) reason = npcSwitchTurn
+      ? 'npc switch sexual event lacks current story completion evidence'
+      : 'sexual event lacks current story completion evidence';
+    if (reason) {
+      relationshipRecordReject('sexual_event_rejected', turnNumber, characterId, event?.character_id, reason);
+      continue;
+    }
+    const storyConfirmsEjaculation = /(사정(?:했다|했으며|하고|한|을)|쌌(?:다|으며|고|다는)|정액)/.test(extractNarrativeActionSection(narrativeText));
     if (event.type.endsWith('_ejaculation') && (event.type !== explicitEjaculation || !storyConfirmsEjaculation)) {
-      console.warn(JSON.stringify({ event: 'player_ejaculation_contract_rejected', turn: turnNumber, type: event.type }));
+      relationshipRecordReject('sexual_event_rejected', turnNumber, characterId, event.character_id, 'player ejaculation contract rejected');
       continue;
     }
     const index = stored.filter(item => item.turn === turnNumber && item.type === event.type).length + 1;
@@ -4702,13 +4818,12 @@ function sanitizeLegacyMentalEffectHistory(extract = {}) {
     sanitized.turn_summary,
     '이전 기록의 시스템 메타 표현을 제거했다.'
   ).slice(0, 200);
-  sanitized.relationship_memory_patch = normalizeRelationshipMemoryItems(
+  sanitized.relationship_memory_patch = normalizeRelationshipMemoryPatchExtract(
     (Array.isArray(sanitized.relationship_memory_patch) ? sanitized.relationship_memory_patch : []).filter(item => {
       const text = typeof item === 'string' ? item : item?.text;
       return !hasPersonalSuggestionMetaKnowledge(text)
         && !hasMindEffectCausalOverreach(text);
-    }),
-    { limit: 2 }
+    })
   );
   return sanitized;
 }

@@ -6,11 +6,11 @@ diff_check=0
 
 --- log ---
 CSA-only conversion applied.
-/home/runner/work/py-all/py-all/worker/game-proxy-v2.js:541
-    if (requiredRank > availableRank) return [{ client_id:candidate.client_id, domain:candidate.domain, operation:candidate.operation, code:'CONTENT_STRENGTH_LOCKED', message:`이 내용은 ${APP_STRENGTH_LABEL[result.required_strength]} 단계가 필요하지만 현재 사용 가능한 단계는 ${APP_STRENGTH_LABEL[availableStrength]}입니다.`, selected_strength:candidate.selected_strength, required_strength:result.required_strength, available_strength:availableStrength, suggested_strength:null, reason:result.reason }];
-                                                                                                                                                                                ^
+/home/runner/work/py-all/py-all/worker/game-proxy-v2.js:3673
+} = {}) {
+  ^
 
-SyntaxError: Unexpected identifier '이'
+SyntaxError: Unexpected token '='
     at checkSyntax (node:internal/main/check_syntax:74:5)
 
 Node.js v22.23.1

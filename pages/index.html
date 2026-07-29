@@ -223,6 +223,7 @@
     .side-action-row { display: flex; gap: 8px; }
     .side-action-btn {
       width: calc(50% - 4px);
+      white-space: nowrap;
       padding: 12px 16px;
       border: 1px solid var(--accent);
       border-radius: var(--radius);
@@ -899,9 +900,9 @@
       await pending.renderDone;
       pending.narrativeElement = ui.finalizeNarrative();
       if (pending.narrativeElement && pending.narrativeReplacement) {
-        pending.narrativeElement.textContent = ui.stripBoldMarkers(pending.narrativeReplacement);
+        pending.narrativeElement.textContent = ui.formatNarrativeForDisplay(pending.narrativeReplacement);
       } else if (pending.narrativeElement && pending.contentAddition) {
-        pending.narrativeElement.textContent += `\n\n${ui.stripBoldMarkers(pending.contentAddition)}`;
+        pending.narrativeElement.textContent = ui.formatNarrativeForDisplay(pending.narrative);
       }
       return pending.narrativeElement;
     }
@@ -941,9 +942,9 @@
           ui.failCurrentNarrative();
           const code = error.details?.error_code || error.status || 'UNKNOWN';
           ui.showPendingTurnActions(
-            `상식개변 어플 변경사항을 적용하지 못했습니다. 변경사항은 저장되지 않았습니다. [${code}]`,
+            `상식개변 앱 변경사항을 적용하지 못했습니다. 변경사항은 저장되지 않았습니다. [${code}]`,
             [
-              { label: '상식개변 어플 다시 열기', onClick: () => window.csaApp?.open('csa') },
+              { label: '상식개변 앱 다시 열기', onClick: () => window.csaApp?.open('csa') },
               { label: '이번 시도 버리기', onClick: () => discardFailedTurn() }
             ]
           );
@@ -1007,9 +1008,9 @@
           await finalizeRenderedNarrative(pending);
           ui.markLastNarrativeUncommitted();
           ui.showPendingTurnActions(
-            `상식개변 어플 변경사항을 적용하지 못했습니다. 변경사항은 저장되지 않았습니다. [${code}]`,
+            `상식개변 앱 변경사항을 적용하지 못했습니다. 변경사항은 저장되지 않았습니다. [${code}]`,
             [
-              { label: '상식개변 어플 다시 열기', onClick: () => window.csaApp?.open('csa') },
+              { label: '상식개변 앱 다시 열기', onClick: () => window.csaApp?.open('csa') },
               { label: '이번 시도 버리기', onClick: () => discardFailedTurn() }
             ]
           );
@@ -1118,9 +1119,9 @@
           await finalizeRenderedNarrative(pending);
           ui.markLastNarrativeUncommitted();
           ui.showPendingTurnActions(
-            `상식개변 어플 변경사항을 적용하지 못했습니다. 변경사항은 저장되지 않았습니다. [${code}]`,
+            `상식개변 앱 변경사항을 적용하지 못했습니다. 변경사항은 저장되지 않았습니다. [${code}]`,
             [
-              { label: '상식개변 어플 다시 열기', onClick: () => window.csaApp?.open('csa') },
+              { label: '상식개변 앱 다시 열기', onClick: () => window.csaApp?.open('csa') },
               { label: '이번 시도 버리기', onClick: () => discardFailedTurn() }
             ]
           );
@@ -1202,9 +1203,9 @@
     function renderAppManualModal(manual, opener) {
       const overlay = createManualElement('div', 'app-manual-overlay');
       const modal = createManualElement('div', 'app-manual-modal'); modal.setAttribute('role', 'dialog'); modal.setAttribute('aria-modal', 'true'); modal.setAttribute('aria-labelledby', 'app-manual-title');
-      const header = createManualElement('header', 'app-manual-header'); const heading = document.createElement('div'); const title = createManualElement('h2', '', manual.title || '상식개변 어플 사용자 매뉴얼'); title.id = 'app-manual-title'; heading.append(title, createManualElement('p', '', manual.subtitle || '')); const close = createManualElement('button', 'app-manual-close', '닫기'); close.type = 'button'; close.setAttribute('aria-label', '매뉴얼 닫기'); header.append(heading, close);
+      const header = createManualElement('header', 'app-manual-header'); const heading = document.createElement('div'); const title = createManualElement('h2', '', manual.title || '상식개변 앱 사용자 매뉴얼'); title.id = 'app-manual-title'; heading.append(title, createManualElement('p', '', manual.subtitle || '')); const close = createManualElement('button', 'app-manual-close', '닫기'); close.type = 'button'; close.setAttribute('aria-label', '매뉴얼 닫기'); header.append(heading, close);
       const body = createManualElement('div', 'app-manual-body');
-      body.appendChild(manualSection('현재 어플 상태', true, section => section.appendChild(renderManualStatus(manual))));
+      body.appendChild(manualSection('현재 앱 상태', true, section => section.appendChild(renderManualStatus(manual))));
       body.appendChild(manualSection('현재 상태 진단', true, section => (manual.diagnostics || []).forEach(item => section.appendChild(createManualElement('div', `app-manual-diagnostic ${item.type || 'info'}`, item.text)))));
       body.appendChild(manualSection('빠른 사용법', true, section => appendManualList(section, manual.quick_start, true)));
       body.appendChild(manualSection('상식개변 규칙', false, section => { section.appendChild(createManualElement('p', '', manual.common_sense?.description || '')); appendManualList(section, manual.common_sense?.rules); section.appendChild(createManualElement('p', '', `현재 범위: ${manual.common_sense?.current_scope?.label || '-'}`)); appendManualList(section, (manual.common_sense?.scope_unlocks || []).map(item => `${item.level_range} · ${item.scope_label} · 활성 ${item.max_active}개${item.available ? ' · 사용 가능' : ''}`)); renderManualTiers(section, manual.common_sense?.tiers, true); }));

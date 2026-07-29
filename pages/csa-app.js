@@ -121,8 +121,8 @@ window.csaApp = (() => {
   function section(body, title, draw, open = false) { const details = el('details', 'app-manual-section'); details.open = open; details.appendChild(el('summary', '', title)); const inner = el('div', 'app-manual-section-body'); draw(inner); details.appendChild(inner); body.appendChild(details); }
   function list(root, items, ordered = false) { const node = el(ordered ? 'ol' : 'ul', 'app-manual-list'); (items || []).forEach(item => node.appendChild(el('li', '', typeof item === 'string' ? item : item?.text || ''))); root.appendChild(node); }
   function renderManual(body) {
-    const manual = appState.manual || {}; body.append(el('h3', '', manual.title || '상식개변 어플 매뉴얼')); if (manual.subtitle) body.append(el('p', '', manual.subtitle));
-    section(body, '현재 어플 상태', root => { const status = manual.status || {}; root.append(el('p', '', `Lv.${status.level || 1} · 경험치 ${status.exp || 0}/${status.next_level_exp || 0} · 활성 ${status.csa_active || 0}/${status.csa_max || 0} · 범위 ${status.csa_scope_label || '-'}`)); }, true);
+    const manual = appState.manual || {}; body.append(el('h3', '', manual.title || '상식개변 앱 매뉴얼')); if (manual.subtitle) body.append(el('p', '', manual.subtitle));
+    section(body, '현재 앱 상태', root => { const status = manual.status || {}; root.append(el('p', '', `Lv.${status.level || 1} · 경험치 ${status.exp || 0}/${status.next_level_exp || 0} · 활성 ${status.csa_active || 0}/${status.csa_max || 0} · 범위 ${status.csa_scope_label || '-'}`)); }, true);
     section(body, '현재 상태 진단', root => (manual.diagnostics || []).forEach(item => root.append(el('p', `csa-app-diagnostic ${item.type || ''}`, item.text))), true);
     section(body, '빠른 사용법', root => list(root, manual.quick_start, true), true);
     section(body, '상식개변 규칙', root => { if (manual.common_sense?.description) root.append(el('p', '', manual.common_sense.description)); list(root, manual.common_sense?.rules); root.append(el('p', '', `현재 범위: ${manual.common_sense?.current_scope?.label || '-'}`)); });
@@ -152,20 +152,20 @@ window.csaApp = (() => {
     const text = String(input || '').trim(); if (!text) return null;
     if (/개인\s*암시|최면/.test(text)) return { tab: 'csa', character_id: null, notice: '이 버전에서는 상식개변만 관리할 수 있습니다.' };
     if (/상식\s*개변|상식\s*변경/.test(text) && /추가|등록|생성|수정|변경|삭제|해제|목록|확인|관리|편집/.test(text)) return { tab: 'csa', character_id: null, notice: '상식개변 관리 화면을 열었습니다.' };
-    if (/어플|앱/.test(text) && /사용법|매뉴얼|설명|정보/.test(text)) return { tab: 'manual', character_id: null, notice: '상식개변 어플 매뉴얼을 열었습니다.' };
-    if (/어플|앱/.test(text)) return { tab: 'home', character_id: null, notice: '상식개변 어플을 열었습니다.' };
+    if (/어플|앱/.test(text) && /사용법|매뉴얼|설명|정보/.test(text)) return { tab: 'manual', character_id: null, notice: '상식개변 앱 매뉴얼을 열었습니다.' };
+    if (/어플|앱/.test(text)) return { tab: 'home', character_id: null, notice: '상식개변 앱을 열었습니다.' };
     return null;
   }
   async function open(initialTab = 'home', options = {}) {
     if (overlay) { draft.notice = options.notice || ''; renderTab(initialTab); return; }
     opener = document.activeElement; overlay = el('div', 'csa-app-overlay'); const modal = el('div', 'csa-app-modal'); modal.setAttribute('role', 'dialog'); modal.setAttribute('aria-modal', 'true');
-    const header = el('header', 'csa-app-header'), close = el('button', 'app-manual-close', '닫기'); close.setAttribute('aria-label', '상식개변 어플 닫기'); close.onclick = () => requestClose(); header.append(el('h2', '', '📱 상식개변 어플'), close);
+    const header = el('header', 'csa-app-header'), close = el('button', 'app-manual-close', '닫기'); close.setAttribute('aria-label', '상식개변 앱 닫기'); close.onclick = () => requestClose(); header.append(el('h2', '', '📱 상식개변 앱'), close);
     const tabs = el('div', 'csa-app-tabs'); tabs.setAttribute('role', 'tablist'); [['home', '홈'], ['npc', 'NPC'], ['csa', '상식개변'], ['manual', '매뉴얼']].forEach(([id, label]) => { const button = el('button', 'csa-app-tab', label); button.dataset.tab = id; button.setAttribute('role', 'tab'); button.onclick = () => renderTab(id); tabs.appendChild(button); });
     modal.append(header, tabs, el('div', 'csa-app-body'), el('div', 'csa-app-draft-bar')); overlay.appendChild(modal); overlay.onclick = event => { if (event.target === overlay) requestClose(); };
     keydownHandler = event => { if (event.key === 'Escape') requestClose(); }; document.addEventListener('keydown', keydownHandler);
     historyToken = crypto.randomUUID(); history.pushState({ ...(history.state || {}), csaApp: historyToken }, '', location.href); historyPushed = true; popstateHandler = () => { historyPushed = false; requestClose('popstate'); }; window.addEventListener('popstate', popstateHandler);
     bodyOverflow = document.body.style.overflow; document.body.style.overflow = 'hidden'; document.body.appendChild(overlay);
-    try { appState = (await api.appState(state.gameId)).app; draft = { tab: initialTab, notice: options.notice || '', original: clone(appState.common_sense), csa: clone(appState.common_sense), issues: [] }; renderTab(initialTab); } catch (error) { overlay.querySelector('.csa-app-body').append(el('p', 'csa-app-error', '상식개변 어플 정보를 불러오지 못했습니다.')); }
+    try { appState = (await api.appState(state.gameId)).app; draft = { tab: initialTab, notice: options.notice || '', original: clone(appState.common_sense), csa: clone(appState.common_sense), issues: [] }; renderTab(initialTab); } catch (error) { overlay.querySelector('.csa-app-body').append(el('p', 'csa-app-error', '상식개변 앱 정보를 불러오지 못했습니다.')); }
   }
   return { init() {}, open, close: requestClose, isOpen: () => Boolean(overlay), onGameReset: destroy, resolveInputRoute };
 })();

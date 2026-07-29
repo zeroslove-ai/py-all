@@ -145,7 +145,7 @@ const ui = {
       current.removeAttribute('id');
       // Display-time-only cleanup of any stray ** from a cached/legacy Story
       // response — names/dialogue/newlines are untouched.
-      current.textContent = this.stripBoldMarkers(current.textContent);
+      current.textContent = this.formatNarrativeForDisplay(current.textContent);
     }
 
     // 구분선 추가
@@ -176,7 +176,7 @@ const ui = {
     if (!text) return;
     const div = document.createElement('div');
     div.className = 'narrative';
-    div.textContent = this.stripBoldMarkers(text);
+    div.textContent = this.formatNarrativeForDisplay(text);
     this.els.storyStream.appendChild(div);
     const hr = document.createElement('hr'); hr.className = 'divider';
     this.els.storyStream.appendChild(hr);
@@ -198,6 +198,59 @@ const ui = {
   // so this is a defensive display-time cleanup, not a markdown renderer.
   stripBoldMarkers(text) {
     return typeof text === 'string' ? text.replace(/\*\*/g, '') : text;
+  },
+
+  // Display-only fallback: Story/Extract/Commit keep the original text.
+  // Only the rendered [1] section gains defensive paragraph breaks.
+  formatNarrativeForDisplay(text) {
+    const source = this.stripBoldMarkers(text);
+    if (typeof source !== 'string') return source;
+    const statusMatch = /^\s*\[2\. 플레이어 상황판\]\s*$/m.exec(source);
+    if (!statusMatch) return source;
+    return this.formatNarrativeSectionForDisplay(source.slice(0, statusMatch.index))
+      + source.slice(statusMatch.index);
+  },
+
+  formatNarrativeSectionForDisplay(text) {
+    const dialogueLine = /^\s*[^\n]{1,60}\s+\([^\n)]{1,100}\):\s*“[^\n”]*”\s*$/;
+    const addDialogueBreaks = paragraph => {
+      const lines = paragraph.split('\n');
+      const result = [];
+      lines.forEach((line, index) => {
+        const isDialogue = dialogueLine.test(line);
+        if (isDialogue && result.length && result[result.length - 1] !== '') result.push('');
+        result.push(line);
+        if (isDialogue && index < lines.length - 1 && lines[index + 1].trim()) result.push('');
+      });
+      return result.join('\n');
+    };
+    const splitLongLine = line => {
+      if (line.length <= 300 || dialogueLine.test(line)) return line;
+      const sentences = [];
+      let cursor = 0;
+      const ending = /[.!?…。！？]+(?:[”’"')\]]+)?/g;
+      let match;
+      while ((match = ending.exec(line))) {
+        sentences.push(line.slice(cursor, ending.lastIndex));
+        cursor = ending.lastIndex;
+      }
+      if (cursor < line.length) sentences.push(line.slice(cursor));
+      if (sentences.length < 2) return line;
+      const groups = [];
+      for (let index = 0; index < sentences.length;) {
+        const remaining = sentences.length - index;
+        const size = remaining <= 4 ? remaining : 3;
+        groups.push(sentences.slice(index, index + size).join(''));
+        index += size;
+      }
+      return groups.join('\n\n');
+    };
+
+    // Existing blank-line runs are preserved. The formatter only adds breaks.
+    return text.split(/(\n{2,})/).map(part => {
+      if (/^\n+$/.test(part)) return part;
+      return addDialogueBreaks(part).split('\n').map(splitLongLine).join('\n');
+    }).join('');
   },
 
   normalizeChoice(value) {

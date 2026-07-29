@@ -484,7 +484,7 @@ function buildAppStrengthExampleSection(system) {
 function buildAppStrengthValidationPrompt(candidates, master) {
   const system = isPlainObject(master?.rulebook_game_system) ? master.rulebook_game_system : {};
   const exampleSection = buildAppStrengthExampleSection(system);
-  return `너는 상식개변 어플에 입력된 사회 규범의 최소 필요 강도를 판정한다.
+  return `너는 상식개변 앱에 입력된 사회 규범의 최소 필요 강도를 판정한다.
 
 각 입력마다 weak, medium, strong, unsupported 중 하나를 반환한다.
 - weak: 분위기·대화·가벼운 접촉·부끄러움 완화 수준
@@ -573,7 +573,7 @@ async function handleAppValidate(req, env) {
     console.warn(JSON.stringify({ event: 'app_action_rejected', type: structured_action.type || null, game_id, error_code: result.error_code, issue_codes: result.issues.map(issue => issue.code) }));
     const stale = result.error_code === 'APP_STALE_STATE';
     return jsonResponse({
-      error: stale ? '상식개변 어플을 연 뒤 게임 상태가 변경되었습니다.' : '변경사항을 적용할 수 없습니다.',
+      error: stale ? '상식개변 앱을 연 뒤 게임 상태가 변경되었습니다.' : '변경사항을 적용할 수 없습니다.',
       error_code: stale ? 'APP_STALE_STATE' : 'APP_ACTION_INVALID',
       current_turn_count: stale ? ctx.turn_count : undefined,
       issues: result.issues
@@ -957,7 +957,7 @@ function buildAppManualPayload(master, save, turnCount = 0) {
   return {
     version: 2,
     mode: GAMEPLAY_MODE,
-    title: '상식개변 어플 사용자 매뉴얼',
+    title: '상식개변 앱 사용자 매뉴얼',
     subtitle: '이 버전은 개인 암시와 최면 기능 없이 공간의 사회적 상식만 변경합니다.',
     status: {
       level,
@@ -973,7 +973,7 @@ function buildAppManualPayload(master, save, turnCount = 0) {
     diagnostics,
     quick_start: [
       '모든 상식개변은 서울중앙병원 전체의 공동 사회 규범으로 적용됩니다.',
-      '변경은 반드시 상식개변 어플 UI에서 생성·수정·해제합니다.',
+      '변경은 반드시 상식개변 앱 UI에서 생성·수정·해제합니다.',
       '강도는 직접 의미 범위 안의 확신과 사회적 압력만 바꾸며 의미 범위를 넓히지 않습니다.',
       '해제하면 현재 규범 적용만 멈추고 이미 벌어진 사건의 기억과 물리 상태는 유지됩니다.',
       '매뉴얼 열람과 탭 이동은 턴을 소비하지 않습니다.'
@@ -1007,7 +1007,7 @@ function buildAppManualPayload(master, save, turnCount = 0) {
     ],
     active_effects: { common_sense: activeCommonSense },
     common_failures: [
-      { title: '새 상식개변을 만들 수 없음', reasons: ['활성 슬롯이 가득 찼습니다.', '요청 범위나 강도가 현재 레벨 한도를 넘었습니다.', '내용이 어플 지원 범위를 벗어났습니다.'] },
+      { title: '새 상식개변을 만들 수 없음', reasons: ['활성 슬롯이 가득 찼습니다.', '요청 범위나 강도가 현재 레벨 한도를 넘었습니다.', '내용이 앱 지원 범위를 벗어났습니다.'] },
       { title: '수정·해제가 적용되지 않음', reasons: ['대상 항목을 찾지 못했습니다.', '실제로 변경되는 값이 없습니다.', '이미 비활성 상태입니다.'] }
     ]
   };
@@ -1166,7 +1166,7 @@ function buildAppStatePayload(master, save, turnCount = 0) {
   return {
     version: 2,
     mode: GAMEPLAY_MODE,
-    title: '상식개변 어플',
+    title: '상식개변 앱',
     turn_count: Number.isInteger(turnCount) ? turnCount : 0,
     home: { status: manual.status, diagnostics: manual.diagnostics, current_location: currentWorld.location_label || save?.player_location || '', current_npc_ids: currentIds },
     strength_options,
@@ -1190,16 +1190,16 @@ function resolveCsaAppUiRoute(input, characters = {}) {
     && !/수정|변경|바꿔|교체|강화|약화/.test(text);
   const management = /추가|등록|생성|새로|적용|수정|변경|바꿔|교체|강화|약화|삭제|제거|해제|취소|끄기|켜기|활성화|비활성화|목록|확인|관리|편집/;
   if (!excluded && /상식\s*개변|상식개변|상식\s*변경|개변된\s*상식/.test(text) && management.test(text)) {
-    return { tab: 'csa', character_id: null, notice: '상식개변 어플을 엽니다.' };
+    return { tab: 'csa', character_id: null, notice: '상식개변 앱을 엽니다.' };
   }
   if (!excluded && /개인\s*암시|활성\s*암시|최면/.test(text) && management.test(text)) {
     return { tab: 'csa', character_id: null, notice: 'CSA-only 버전에서는 개인 암시와 최면을 지원하지 않습니다. 상식개변만 사용할 수 있습니다.' };
   }
   if (/(?:상식개변|어플|앱).*(?:사용법|매뉴얼|설명|정보)|(?:사용법|매뉴얼|설명|정보).*(?:상식개변|어플|앱)/.test(text)) {
-    return { tab: 'manual', character_id: null, notice: '상식개변 어플 매뉴얼을 엽니다.' };
+    return { tab: 'manual', character_id: null, notice: '상식개변 앱 매뉴얼을 엽니다.' };
   }
   if (/(?:상식개변\s*)?(?:어플|앱)\s*열어|앱\s*상태\s*보여/.test(text)) {
-    return { tab: 'home', character_id: null, notice: '상식개변 어플을 엽니다.' };
+    return { tab: 'home', character_id: null, notice: '상식개변 앱을 엽니다.' };
   }
   return null;
 }
@@ -1249,14 +1249,14 @@ async function handleStory(req, env) {
   const currentTurn = ctx?.turn_count ?? 0;
   if (structured_action === null) {
     const appRoute = resolveCsaAppUiRoute(player_input, ctx?.master?.characters || {});
-    if (appRoute) return jsonResponse({ error: '상식개변은 상식개변 어플에서 관리합니다.', error_code: 'APP_UI_REQUIRED', app_route: appRoute, request_id: requestId }, 409);
+    if (appRoute) return jsonResponse({ error: '상식개변은 상식개변 앱에서 관리합니다.', error_code: 'APP_UI_REQUIRED', app_route: appRoute, request_id: requestId }, 409);
   }
   let structuredPlan = null;
   if (structured_action !== null) {
     const proof = await verifyStructuredActionValidation(env, game_id, structured_action);
     if (!proof.ok) {
       console.warn(JSON.stringify({ event: 'app_validation_proof_rejected', endpoint: '/api/story', game_id, reason: proof.reason }));
-      return jsonResponse({ error: '상식개변 어플 검증 정보가 올바르지 않습니다. 어플을 다시 열어 적용해 주세요.', error_code: 'APP_VALIDATION_PROOF_INVALID', request_id: requestId }, 422);
+      return jsonResponse({ error: '상식개변 앱 검증 정보가 올바르지 않습니다. 앱을 다시 열어 적용해 주세요.', error_code: 'APP_VALIDATION_PROOF_INVALID', request_id: requestId }, 422);
     }
     structuredPlan = planStructuredAction(ctx?.save || {}, ctx?.master || {}, structured_action, { turnNumber: currentTurn + 1, turnCount: currentTurn });
     if (!structuredPlan.ok) return jsonResponse(buildStructuredActionError(structuredPlan, currentTurn), structuredPlan.status);
@@ -1728,7 +1728,7 @@ async function runExtractPipeline(env, { game_id, narrative_text, player_input, 
     const proof = await verifyStructuredActionValidation(env, game_id, structured_action);
     if (!proof.ok) {
       console.warn(JSON.stringify({ event: 'app_validation_proof_rejected', endpoint: '/api/extract', game_id, reason: proof.reason }));
-      return { body: { error: '상식개변 어플 검증 정보가 올바르지 않습니다. 어플을 다시 열어 적용해 주세요.', error_code: 'APP_VALIDATION_PROOF_INVALID', request_id: requestId }, status: 422 };
+      return { body: { error: '상식개변 앱 검증 정보가 올바르지 않습니다. 앱을 다시 열어 적용해 주세요.', error_code: 'APP_VALIDATION_PROOF_INVALID', request_id: requestId }, status: 422 };
     }
     structuredPlan = planStructuredAction(compatCtx.save || {}, compatCtx.master || {}, structured_action, { turnNumber: nextTurn, turnCount: ctx?.turn_count ?? 0 });
     if (!structuredPlan.ok) return { body: buildStructuredActionError(structuredPlan, ctx?.turn_count ?? 0), status: structuredPlan.status };
@@ -2321,7 +2321,7 @@ async function runCommitPipeline(env, { game_id, turn_number, content: rawConten
     const proof = await verifyStructuredActionValidation(env, game_id, structured_action);
     if (!proof.ok) {
       console.warn(JSON.stringify({ event: 'app_validation_proof_rejected', endpoint: '/api/commit-turn', game_id, reason: proof.reason }));
-      return { body: { error: '상식개변 어플 검증 정보가 올바르지 않습니다. 어플을 다시 열어 적용해 주세요.', error_code: 'APP_VALIDATION_PROOF_INVALID', request_id: requestId }, status: 422 };
+      return { body: { error: '상식개변 앱 검증 정보가 올바르지 않습니다. 앱을 다시 열어 적용해 주세요.', error_code: 'APP_VALIDATION_PROOF_INVALID', request_id: requestId }, status: 422 };
     }
     structuredPlan = planStructuredAction(ctx?.save || {}, ctx?.master || {}, structured_action, { turnNumber: turn_number, turnCount: ctx?.turn_count ?? 0 });
     if (!structuredPlan.ok) return { body: buildStructuredActionError(structuredPlan, ctx?.turn_count ?? 0), status: structuredPlan.status };
@@ -3020,7 +3020,7 @@ function buildCsaRuntimeSection() {
 - 저장된 상식개변의 생성·수정·해제는 Worker가 검증한 structured_action만 처리한다.
 - 일반 대화·설득·반복 발언으로 상식개변을 만들거나 바꾸지 않는다.
 - 활성 상식개변은 현재 적용 범위 안에서 원래부터 존재한 사회적 상식으로 취급한다.
-- [3. 선택지]에는 상식개변 관리 조작을 제안하지 않는다. 해당 기능은 상식개변 어플 UI에서만 수행한다.
+- [3. 선택지]에는 상식개변 관리 조작을 제안하지 않는다. 해당 기능은 상식개변 앱 UI에서만 수행한다.
 `;
 }
 
@@ -3317,12 +3317,12 @@ function isAppUsageInfoRequest(playerInput) {
 function buildCsaOnlyAppUsageStorySection() {
   return `
 
-[상식개변 어플 안내]
-- 이 어플은 특정 개인에게 암시나 최면을 거는 기능 없이, 지정 공간의 사회적 상식만 생성·수정·해제한다.
+[상식개변 앱 안내]
+- 이 앱은 특정 개인에게 암시나 최면을 거는 기능 없이, 지정 공간의 사회적 상식만 생성·수정·해제한다.
 - 현재 레벨이 허용하는 강도·공간 범위·활성 슬롯 안에서만 작동한다.
 - 강도는 직접 의미 범위 안의 확신과 사회적 압력만 바꾸며 의미 범위를 넓히지 않는다.
 - 범위를 벗어나면 현재 적용은 멈추지만 이미 벌어진 사건의 기억과 물리 상태는 유지된다.
-- 모든 관리는 상식개변 어플 UI에서만 한다.`;
+- 모든 관리는 상식개변 앱 UI에서만 한다.`;
 }
 
 function buildStoryMasterSnapshot(master = {}, { includeAppUsage = false, includeOpeningScenario = false } = {}) {
@@ -3341,6 +3341,10 @@ function shouldDeduplicateStorySummaries(save = {}, currentTurn = 0) {
 
 function buildNarrativeLengthSection() {
   return `\n\n[NARRATIVE LENGTH AND PACING CONTRACT — HIGH PRIORITY]\n\n- 먼저 이번 턴을 A/B/C 중 하나로 내부 판단하되 분류명을 출력하지 않는다.\n  A: 확인, 짧은 질문, 가벼운 반응처럼 위치·관계·상태 전환이 거의 없는 턴\n  B: 의미 있는 부탁, 대화, 신뢰 형성, 갈등 조정, 조사, 신체 행동이 진행되는 일반 턴\n  C: 이동, 새 NPC 합류, 상식개변, 관계의 결정적 변화, 중요한 성공·실패·폭로가 있는 턴\n- [1. 서사 및 행동]만 다음 목표 길이로 작성한다. [1] 헤더, [2. 플레이어 상황판], [3. 선택지]는 이 글자 수에 포함하지 않는다.\n  A: 800~1,000자\n  B: 1,000~1,500자\n  C: 1,200~2,000자\n- [1]이 목표 하한을 채우기 전에는 [2. 플레이어 상황판]을 시작하지 않는다. 출력하기 전에 내부적으로 [1]이 목표 하한을 충족했는지 스스로 확인한다.\n- 분량이 부족하면 반복 묘사가 아니라 새 행동, 질문, 답변, 정보, 결정, 공간 변화 또는 갈등을 추가해서 채운다. 같은 의미의 문장을 늘이거나 장황한 요약, 과거 회상 재복사로 채우지 않는다.\n- 서사는 다음 진행 단위를 확실히 포함한다:\n  1. 입력에 대한 즉각적인 반응\n  2. 첫 번째 대화·행동 전개\n  3. 추가 질문·정보·행동 전개\n  4. 장면의 구체적인 결과\n  5. 다음 턴으로 이어지는 결정·갈등 또는 새 목표\n- 매 턴 최소 하나의 구체적인 변화가 있어야 한다. 이는 위치, 행동 완료, 새 정보, 결정, 관계의 분위기, 새 장애물 중 하나일 수 있다.\n- 구체적인 변화가 반드시 NPC 수치 delta를 의미하지는 않는다. 수치를 억지로 올리거나 내리지 않는다.\n- 플레이어의 행동을 무효화한 채 이전 상태로 되돌아가거나, 같은 거절과 망설임만 반복해서 제자리걸음하지 않는다.`;
+}
+
+function buildNarrativeParagraphSection() {
+  return `\n\n[NARRATIVE PARAGRAPH FORMAT]\n- [1. 서사 및 행동]의 한 문단은 2~4문장을 기본 단위로 쓴다.\n- 화자나 행동 주체가 바뀌거나 대사와 서술이 전환되면 빈 줄 하나로 문단을 나눈다.\n- 한 문단이 300자를 넘는 긴 줄글이 되지 않게 한다.\n- [2. 플레이어 상황판]과 [3. 선택지]의 기존 줄바꿈 구조는 유지한다.`;
 }
 
 function buildNpcDialogueMinimumSection() {
@@ -3493,6 +3497,7 @@ ${recentMemorySlice.map((m, index) => clipHeadTail(sanitizeRecentNarrativeForPro
     hasApplicableCsa: Boolean(csaSection)
   });
   const narrativeLengthSection = buildNarrativeLengthSection();
+  const narrativeParagraphSection = buildNarrativeParagraphSection();
   const npcDialogueSection = buildNpcDialogueMinimumSection();
   const moanVocalReactionSection = buildMoanVocalReactionSection();
   const antiRepetitionSection = buildAntiRepetitionSection();
@@ -3503,7 +3508,7 @@ ${recentMemorySlice.map((m, index) => clipHeadTail(sanitizeRecentNarrativeForPro
     ? `\n\n[USER FEEDBACK — APPLY TO THIS NEXT RESPONSE ONLY]\n${feedback.map(item => `- ${typeof item === 'string' ? item : item?.text || ''}`).filter(Boolean).join('\n')}\nThis is not an in-world action. Never narrate it as dialogue or an event; use it only to improve output quality.`
     : '';
   const continuitySection = `\n\n[TURN CONTINUITY CONTRACT]\n- 직전 턴에서 완료된 행동을 다시 실행하지 않는다.\n- 현재 장소의 활성 상식개변을 직접 의미 범위 안에서 일관되게 적용한다.\n- 현재 장면을 한 단계 앞으로 진행한다.\n- 저장된 확정 사실과 충돌하는 쪽지, 과거 사건, 시간, 인물 관계를 새로 만들지 않는다.\n- 직전 장면에서 벗거나 변경한 복장은 명시적으로 다시 입는 행동이 나오기 전까지 그대로 유지한다. 이미 벗은 옷을 다시 벗거나 현재 입지 않은 옷을 걷어 올리거나 조작하지 않는다.\n- 복장은 캐릭터 기본 외형·복장 프로필보다 최근 장면에서 확정된 상태를 우선하고, [최근 기억]끼리 복장이 충돌하면 가장 최근에 명시된 상태를 따른다. 플레이어와 NPC의 복장은 각각 구분해서 판단한다. [3. 선택지]도 이 복장 상태와 충돌하지 않아야 한다.`;
-  const finalFormatRules = `\n\n[FINAL OUTPUT CONTRACT — HIGHEST PRIORITY]\nThe response body contains exactly three sections: [1. 서사 및 행동], [2. 플레이어 상황판], [3. 선택지]. Never include a mind monitor, NPC stat table, character body information, or turn number in the body. Mind monitor belongs only to npc_emotion extraction and the sidebar UI. The Player Status Panel Contract overrides any legacy display-format text, including whatever [2] format appears inside [최근 기억] from earlier turns — past turns may still show 🎯 접근 대상 or 📌 현재 목표 from an older contract; never copy that old layout, only follow the current Player Status Panel Contract's fields. In normal play, [3] contains exactly four in-world action choices; never include an app-information choice or 상식개변의 생성·수정·삭제·강화·해제 같은 관리 조작. 해당 관리는 상식개변 어플 UI에서만 한다.\nDo not use formulaic first-impression calculations.\n출력 직전 최소 확인: [1]은 현재 장면을 실제로 진행하고 모든 직접 대사는 [대사 — AUTHORITATIVE DIALOGUE CONTRACT]을 지킨다. [2]는 Player Status Panel Contract만 따른다. [3]은 일반 플레이에서 정확히 4개의 서로 다른 실제 행동이다. 사용자가 요청하지 않은 상식개변은 새로 만들지 않는다.\n지침이 서로 충돌하면 다음 우선순위를 따른다: 1) 사용자의 최신 입력과 정정 2) 직전 장면의 연속성 3) 등록 캐릭터 설정과 현재 관계 상태 4) 자연스러운 반응과 플레이어 유도 5) 모든 직접 대사의 화자명·연기지시 형식 6) [1] 서사 / [2] 상황판 / [3] 선택지 출력. 길이를 채우기 위해 확정 사실을 깨거나 플레이어 행동을 임의로 추가하지 않는다.\n`;
+  const finalFormatRules = `\n\n[FINAL OUTPUT CONTRACT — HIGHEST PRIORITY]\nThe response body contains exactly three sections: [1. 서사 및 행동], [2. 플레이어 상황판], [3. 선택지]. Never include a mind monitor, NPC stat table, character body information, or turn number in the body. Mind monitor belongs only to npc_emotion extraction and the sidebar UI. The Player Status Panel Contract overrides any legacy display-format text, including whatever [2] format appears inside [최근 기억] from earlier turns — past turns may still show 🎯 접근 대상 or 📌 현재 목표 from an older contract; never copy that old layout, only follow the current Player Status Panel Contract's fields. In normal play, [3] contains exactly four in-world action choices; never include an app-information choice or 상식개변의 생성·수정·삭제·강화·해제 같은 관리 조작. 해당 관리는 상식개변 앱 UI에서만 한다.\nDo not use formulaic first-impression calculations.\n출력 직전 최소 확인: [1]은 현재 장면을 실제로 진행하고 모든 직접 대사는 [대사 — AUTHORITATIVE DIALOGUE CONTRACT]을 지킨다. [2]는 Player Status Panel Contract만 따른다. [3]은 일반 플레이에서 정확히 4개의 서로 다른 실제 행동이다. 사용자가 요청하지 않은 상식개변은 새로 만들지 않는다.\n지침이 서로 충돌하면 다음 우선순위를 따른다: 1) 사용자의 최신 입력과 정정 2) 직전 장면의 연속성 3) 등록 캐릭터 설정과 현재 관계 상태 4) 자연스러운 반응과 플레이어 유도 5) 모든 직접 대사의 화자명·연기지시 형식 6) [1] 서사 / [2] 상황판 / [3] 선택지 출력. 길이를 채우기 위해 확정 사실을 깨거나 플레이어 행동을 임의로 추가하지 않는다.\n`;
   const openingFlow = mode === 'opening'
     ? `\n\n[OPENING PHASE — AFTER PLAYER SETUP]\nThe player setup is confirmed. Generate only the first hospital scene and first NPC encounter now. Do not repeat the app discovery, app feature explanation, player questions, or character recommendation. Never claim that the player has already used the app to change the hospital in the past.\n`
     : '';
@@ -3541,7 +3546,8 @@ ${recentMemorySlice.map((m, index) => clipHeadTail(sanitizeRecentNarrativeForPro
   // everything above it, including [최근 기억]'s now-stale account of the
   // turn that was just rolled back.
   const regenerationFeedbackSection = buildRegenerationFeedbackSection(regenerationFeedback);
-  const systemPrompt = coreRules + playerGate + modeSection + rulebookSection + openingScenarioSection + appUsageSection + eligibleNpcRosterSection + buildCsaRuntimeSection() + buildGeneralActionJudgmentSection() + buildCsaDeactivationNarrativeRule() + currentSceneSection + hospitalLocationMemorySection + npcProfileSection + relationshipMemorySection + explicitMentionSection + csaSection + mindEffectBoundarySection + physicalSceneStateSection + narrativeLengthSection + npcDialogueSection + moanVocalReactionSection + antiRepetitionSection + playerStatusPanel + contextSection + feedbackSection + continuitySection + finalFormatRules + openingFlow + playerSetupReminder + registeredNpcChoiceReminder + choiceLengthReminder + buildAddressAbbreviationSection() + regenerationFeedbackSection + buildStructuredActionStorySection(structuredPlan, save, activeCsa) + playerAttemptSection;
+  const systemPrompt = (coreRules + playerGate + modeSection + rulebookSection + openingScenarioSection + appUsageSection + eligibleNpcRosterSection + buildCsaRuntimeSection() + buildGeneralActionJudgmentSection() + buildCsaDeactivationNarrativeRule() + currentSceneSection + hospitalLocationMemorySection + npcProfileSection + relationshipMemorySection + explicitMentionSection + csaSection + mindEffectBoundarySection + physicalSceneStateSection + narrativeLengthSection + narrativeParagraphSection + npcDialogueSection + moanVocalReactionSection + antiRepetitionSection + playerStatusPanel + contextSection + feedbackSection + continuitySection + finalFormatRules + openingFlow + playerSetupReminder + registeredNpcChoiceReminder + choiceLengthReminder + buildAddressAbbreviationSection() + regenerationFeedbackSection + buildStructuredActionStorySection(structuredPlan, save, activeCsa) + playerAttemptSection)
+    .replaceAll('상식개변 어플', '상식개변 앱');
 
   return {
     mode,
@@ -4724,7 +4730,7 @@ function buildCurrentCsaStatusPanelText(save = {}, master = {}, activeCsa = getA
   const csaLines = snapshot.applicableCsa.length
     ? snapshot.applicableCsa.map(item => `- [${item.scope_label || '현재 범위'} · ${item.strength}] ${item.content}`).join('\n')
     : '- 없음';
-  return `📱 상식개변 어플: 활성 ${snapshot.csaCount}/${snapshot.csaMax}\n\n🌐 현재 위치 적용 상식\n${csaLines}`;
+  return `📱 상식개변 앱: 활성 ${snapshot.csaCount}/${snapshot.csaMax}\n\n🌐 현재 위치 적용 상식\n${csaLines}`;
 }
 
 const MIND_EFFECT_BOUNDARY_BASE = `
@@ -5271,7 +5277,7 @@ function planFindNpcAction(previousSave, master, action, { turnCount }) {
   };
   const name = publicCharacterName(characters[characterId], characterId);
   const canonical_action = { version: 1, type: 'find_npc', base_turn_count: turnCount, character_id: characterId, target_location: targetLocation };
-  return { ok: true, canonical_action, display_input: `상식개변 어플의 위치 추적을 이용해 ${name}이 있는 ${locationLabel}로 찾아간다.`, summary: { total: 1 }, plan: { character_id: characterId, character_name: name, target_world_state: targetLocation, target_location_label: locationLabel } };
+  return { ok: true, canonical_action, display_input: `상식개변 앱의 위치 추적을 이용해 ${name}이 있는 ${locationLabel}로 찾아간다.`, summary: { total: 1 }, plan: { character_id: characterId, character_name: name, target_world_state: targetLocation, target_location_label: locationLabel } };
 }
 
 function planAppTransaction(previousSave, master, action, { turnNumber }) {
@@ -5383,7 +5389,7 @@ function planAppTransaction(previousSave, master, action, { turnNumber }) {
   return {
     ok: true,
     canonical_action,
-    display_input: `상식개변 어플에서 상식개변 ${canonicalOperations.length}건의 변경사항을 적용한다.`,
+    display_input: `상식개변 앱에서 상식개변 ${canonicalOperations.length}건의 변경사항을 적용한다.`,
     summary,
     plan: { csa_active: csa, operations: canonicalOperations, counts: summary }
   };
@@ -5391,11 +5397,11 @@ function planAppTransaction(previousSave, master, action, { turnNumber }) {
 
 function planStructuredAction(previousSave, master, rawAction, context = {}) {
   const action = normalizeStructuredAction(rawAction);
-  if (!action) return { ok: false, status: 422, error_code: 'INVALID_ACTION', issues: [appIssue(rawAction, 'INVALID_ACTION', '잘못된 상식개변 어플 작업입니다.')] };
+  if (!action) return { ok: false, status: 422, error_code: 'INVALID_ACTION', issues: [appIssue(rawAction, 'INVALID_ACTION', '잘못된 상식개변 앱 작업입니다.')] };
   if (action.type === 'app_transaction' && action.operations.some(operation => operation.domain !== 'csa')) {
     return { ok: false, status: 422, error_code: 'CSA_ONLY_MODE', issues: [appIssue(action, 'CSA_ONLY_MODE', '이 버전은 상식개변 작업만 지원합니다.')] };
   }
-  if (action.base_turn_count !== context.turnCount) return { ok: false, status: 409, error_code: 'APP_STALE_STATE', issues: [appIssue(action, 'APP_STALE_STATE', '상식개변 어플을 연 뒤 게임 상태가 변경되었습니다.')] };
+  if (action.base_turn_count !== context.turnCount) return { ok: false, status: 409, error_code: 'APP_STALE_STATE', issues: [appIssue(action, 'APP_STALE_STATE', '상식개변 앱을 연 뒤 게임 상태가 변경되었습니다.')] };
   if (action.type === 'find_npc') return planFindNpcAction(previousSave, master, action, context);
   return planAppTransaction(previousSave, master, action, context);
 }
@@ -5442,7 +5448,7 @@ function applySuggestionResolutionsToPlan(previousSave, master, structuredPlan, 
 function buildStructuredActionError(result, currentTurn = null) {
   const stale = result?.error_code === 'APP_STALE_STATE';
   return {
-    error: stale ? '상식개변 어플을 연 뒤 게임 상태가 변경되었습니다.' : '상식개변 어플의 변경사항을 적용하지 못했습니다.',
+    error: stale ? '상식개변 앱을 연 뒤 게임 상태가 변경되었습니다.' : '상식개변 앱의 변경사항을 적용하지 못했습니다.',
     error_code: stale ? 'APP_STALE_STATE' : 'APP_ACTION_INVALID',
     current_turn_count: stale && Number.isInteger(currentTurn) ? currentTurn : undefined,
     issues: Array.isArray(result?.issues) ? result.issues : []
@@ -5454,7 +5460,7 @@ function buildStructuredActionStorySection(structuredPlan, effectiveSave = {}, a
   const action = structuredPlan.canonical_action;
   if (action.type === 'find_npc') {
     const target = structuredPlan.plan;
-    return `\n\n[CONFIRMED NPC FIND ACTION — HARD CONSTRAINT]\n상식개변 어플의 위치 확인 결과 대상은 ${target.character_name}, 위치는 ${target.target_location_label}이다. 플레이어가 이번 턴 안에 그 장소로 이동해 대상과 마주친다. 대상·목적지를 바꾸거나 찾지 못했다고 처리하지 마라.`;
+    return `\n\n[CONFIRMED NPC FIND ACTION — HARD CONSTRAINT]\n상식개변 앱의 위치 확인 결과 대상은 ${target.character_name}, 위치는 ${target.target_location_label}이다. 플레이어가 이번 턴 안에 그 장소로 이동해 대상과 마주친다. 대상·목적지를 바꾸거나 찾지 못했다고 처리하지 마라.`;
   }
   const lines = action.operations
     .filter(operation => operation.domain === 'csa')

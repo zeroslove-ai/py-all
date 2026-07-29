@@ -125,6 +125,74 @@ create table game_save (
 
 `turn_count`는 JSONB 안에 중복 저장하지 않는다.
 
+### `csa_active` 프리셋 필드 (2026-07 추가, 마이그레이션 없음)
+
+`csa_active`의 각 항목은 기존 필드(`id`, `active`, `content`, `strength`,
+`scope_type`, `scope_id`, `scope_label`, `created_turn`)에 선택 필드 두 개를
+추가로 가질 수 있다. 두 필드가 없는 기존 항목은 `source_type: 'custom'`으로
+취급되어 그대로 동작한다.
+
+```json
+{
+  "id": "csa_74",
+  "active": true,
+  "strength": "약함",
+  "scope_type": "world", "scope_id": "world", "scope_label": "병원 전체",
+  "content": "간호사는 환자와 대화를 시작하면 환자의 무릎 위에 앉아야 하며, 대화가 끝날 때까지 그 자세를 유지해야 한다.",
+  "source_type": "preset",
+  "preset": {
+    "version": 1,
+    "template_id": "sit_on_target_lap_while_talking",
+    "actor_group": "nurse",
+    "target_group": "patient",
+    "trigger": "conversation_start",
+    "duration": "until_conversation_ends",
+    "modifier": "",
+    "required_action": "sit_on_target_lap",
+    "public_normalization": true,
+    "persistent": true,
+    "direct_meaning_tags": ["무릎", "앉", "밀착", "자세"]
+  },
+  "created_turn": 74
+}
+```
+
+`content`는 항상 Worker가 `preset.template_id` + 선택값으로 다시 생성한
+canonical 값이다 — 클라이언트가 보낸 문자열은 신뢰하지 않는다
+(`validateCsaPresetOperation`). 프리셋 카탈로그 자체(actor/target/trigger/
+duration 옵션, `content_template`, `minimum_strength`, `required_action`
+등)의 단일 소스는 `worker/game-proxy-v2.js`의 `CSA_PRESET_CATALOG`이다.
+
+### `csa_runtime_state` (2026-07 추가, 마이그레이션 없음)
+
+프리셋 규범이 "지금 이 장면에서 실제로 실행 중인가"를 추적하는 별도 필드다.
+`csa_active[].active`(규범 자체가 병원에 적용되는가)와는 다른 축이다. 현재
+구현은 규범당 단일 인스턴스(메인 NPC 중심)이며, 여러 NPC 동시 추적이
+필요해지면 `instances` 맵으로 확장할 수 있게 설계돼 있다.
+
+```json
+{
+  "csa_runtime_state": {
+    "csa_74": {
+      "status": "active",
+      "character_id": "heroine4",
+      "target_type": "player",
+      "started_turn": 75,
+      "last_confirmed_turn": 77,
+      "action_state": "sitting_on_target_lap",
+      "position_label": "배수진이 김민호의 무릎 위에 앉아 대화 중",
+      "end_reason": null
+    }
+  }
+}
+```
+
+`status`는 `inactive|active|ended`. Extract의 `csa_runtime_updates`로만
+갱신되며(현재 활성 프리셋 CSA + 현재 장면에 등장한 등록 NPC로 제한된
+검증, `buildCsaRuntimeStatePatch`), 프리셋이 비활성화·해제되거나
+`custom`으로 전환되면 Extract 입력과 무관하게 Worker가 즉시 `ended`로
+표시한다.
+
 ### `game_memories`
 
 ```sql

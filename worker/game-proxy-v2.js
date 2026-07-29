@@ -616,7 +616,8 @@ const MANUAL_TIER_META = [
   ['strong', '강함', 5, '관계 인식·핵심 금기·반복 행동·자동 반응을 지속적으로 재작성합니다.']
 ];
 
-const MANUAL_SUGGESTION_EXAMPLES = {
+// LEGACY STORAGE ONLY — retained source data is never read by CSA-only runtime.
+const LEGACY_MENTAL_EFFECT_MANUAL_DATA = {
   weak: [
     '플레이어가 가까이 오면 몸이 은근히 달아오르고 괜히 옷매무새가 신경 쓰인다.',
     '플레이어의 칭찬을 들으면 가슴이 두근거리고 그 말을 한동안 곱씹는다.',

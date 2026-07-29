@@ -1,0 +1,77 @@
+name: Finalize CSA Only Core
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - .github/workflows/finalize-csa-only-core.yml
+
+permissions:
+  contents: write
+
+jobs:
+  finalize:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: feature/csa-only
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Apply finalizer and record result
+        id: finalize
+        shell: bash
+        run: |
+          set +e
+          python .github/scripts/finalize_csa_only_core.py > /tmp/csa-finalize.log 2>&1
+          finalize_status=$?
+          if [[ $finalize_status -eq 0 ]]; then
+            node --check worker/game-proxy-v2.js >> /tmp/csa-finalize.log 2>&1
+            worker_status=$?
+            node --check pages/sidebar.js >> /tmp/csa-finalize.log 2>&1
+            sidebar_status=$?
+            node --check pages/hypnosis-app.js >> /tmp/csa-finalize.log 2>&1
+            app_status=$?
+            git diff --check >> /tmp/csa-finalize.log 2>&1
+            diff_status=$?
+          else
+            worker_status=99
+            sidebar_status=99
+            app_status=99
+            diff_status=99
+          fi
+          if [[ $finalize_status -eq 0 && $worker_status -eq 0 && $sidebar_status -eq 0 && $app_status -eq 0 && $diff_status -eq 0 ]]; then
+            rm -f .github/scripts/finalize_csa_only_core.py
+            rm -f .github/csa-only-finalize-result.txt
+            echo "success=true" >> "$GITHUB_OUTPUT"
+          else
+            git reset --hard HEAD
+            {
+              echo "finalize_status=$finalize_status"
+              echo "worker_check=$worker_status"
+              echo "sidebar_check=$sidebar_status"
+              echo "app_check=$app_status"
+              echo "diff_check=$diff_status"
+              echo
+              echo "--- log ---"
+              cat /tmp/csa-finalize.log
+            } > .github/csa-only-finalize-result.txt
+            echo "success=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Commit branch result
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          if [[ "${{ steps.finalize.outputs.success }}" == "true" ]]; then
+            git commit -m "refactor: finalize csa-only core paths"
+          else
+            git commit -m "chore: record csa-only finalization failure"
+          fi
+          git push origin HEAD:feature/csa-only

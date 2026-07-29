@@ -37,11 +37,19 @@ jobs:
               (
                   r'r"function buildAppStrengthExampleSection\(system\) \{.*?\n\}\n\nfunction buildAppStrengthValidationPrompt\(candidates, master\) \{.*?\n\}",',
                   r'r"function buildAppStrengthExampleSection\(system\) \{.*?(?=\n\nasync function classifyAppOperationStrengths)",'
+              ),
+              (
+                  r'r"const MIND_EFFECT_EXTRACT_FIREWALL = `.*?function buildMindEffectExtractFirewallSection\(\{.*?\n\}",',
+                  r'r"const MIND_EFFECT_EXTRACT_FIREWALL = `.*?(?=\n\nfunction buildExtractPrompt)",'
+              ),
+              (
+                  r'r"function applyNpcStatChanges\(previous = \{\}, proposed = \{\}\) \{.*?\n\}",',
+                  r'r"function applyNpcStatChanges\(previous = \{\}, proposed = \{\}\) \{.*?(?=\n\nfunction getCsaLimits)",'
               )
           ]
           for old, new in replacements:
               if old not in text:
-                  raise SystemExit(f'converter patch anchor not found: {old[:80]}')
+                  raise SystemExit(f'converter patch anchor not found: {old[:100]}')
               text = text.replace(old, new, 1)
           path.write_text(text, encoding='utf-8')
           PY

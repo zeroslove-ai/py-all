@@ -14,5 +14,8 @@ it is never used to validate, create, update, deactivate, or apply a CSA.
 - Level unlocks: Lv.1–2 weak/ward/2, Lv.3 medium/ward/3, Lv.4 medium/floor/3, Lv.5–6 strong/floor/4, Lv.7–9 strong/building/4, Lv.10 strong/world/5. Location scope is available from Lv.1.
 - Current location scope uses a server-derived ID from the exact world-state building, floor, ward, and location label.
 - CSA expiration or deactivation stops the current norm only; it does not rewrite memories or physical scene state.
+- NPC stats are separate: affinity is personal emotional regard for the player; CSA acceptance is only the naturalness and initiative of executing an active CSA's direct meaning; sexual sensitivity is only physical responsiveness. No stat implies either of the other two.
+- CSA acceptance never grants general obedience, romance, consent, authority, or success outside an active CSA's direct meaning.
+- A positive affinity change requires an independent relationship event in the current turn. CSA execution, bodily response, lack of immediate refusal, or sexual activity alone is not sufficient evidence.
 - Legacy mental-effect save keys are **LEGACY STORAGE ONLY — CSA-only 모드에서는 숨김·주입·표시·갱신하지 않음**.
 - No database migration is required.

@@ -1108,7 +1108,13 @@
           sidebar.updateCharacter(pending.extract.character_id); sidebar.updateMind(pending.extract.npc_emotion); sidebar.renderStats(pending.extract.npc_stats, pending.extract.character_id, pending.extract.npc_stat_changes);
           prepareMedia(pending.extract);
         }
-        ui.renderGameplayChoices(pending.extract.choices, submitChoice, { setup: pending.mode === 'player_setup', choiceMeta: state.context?.save?.last_choice_meta || [] });
+        const committedChoices = Array.isArray(state.context?.save?.last_choices) && state.context.save.last_choices.length
+          ? state.context.save.last_choices
+          : pending.extract.choices;
+        ui.renderGameplayChoices(committedChoices, submitChoice, {
+          setup: pending.mode === 'player_setup',
+          choiceMeta: state.context?.save?.last_choice_meta || []
+        });
         console.info('[turn-timing]', {
           turn: pending.nextTurn,
           story_first_content_ms: pending.timing?.story?.first_content_ms ?? null,

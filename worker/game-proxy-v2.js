@@ -1019,7 +1019,7 @@ function buildAppManualPayload(master, save, turnCount = 0) {
     hospital_map: buildHospitalMapPayload(master, save),
     stats: [
       { id: 'affinity', label: '호감도', range: '0~100', description: 'NPC가 플레이어에게 느끼는 감정적 호의입니다.', change_rule: '턴당 최대 -5~+5' },
-      { id: 'acceptance', label: '상식수용도', range: '0~100', description: '현재 적용 중인 상식개변을 자연스럽게 받아들이고 자발적·협조적으로 실행하는 정도입니다.', change_rule: '실제 적용 장면에서만 변화' },
+      { id: 'acceptance', label: '상식개변 수용도', range: '0~100', description: '활성 상식개변의 직접 의미를 얼마나 자연스럽고 적극적으로 실행하는지 나타냅니다. 플레이어에 대한 호감·복종·동의와는 별개입니다.', change_rule: '실제 직접 적용 장면에서만 변화' },
       { id: 'resistance', label: '상식저항력', range: '0~100', description: '캐릭터에 고정된 상식개변 저항력입니다.', change_rule: '고정값' }
     ],
     unlocks: [
@@ -1309,6 +1309,19 @@ async function handleStory(req, env) {
   const boldChoiceAttempt = !structuredPlan
     ? resolveBoldChoiceAttempt(ctx?.save || {}, ctx?.master || {}, resolvedPlayerInput, game_id, currentTurn + 1)
     : null;
+  if (boldChoiceAttempt) {
+    console.log(JSON.stringify({
+      event: 'bold_choice_resolved',
+      turn: currentTurn + 1,
+      choice_id: boldChoiceAttempt.choice_id,
+      success_rate: boldChoiceAttempt.success_rate,
+      roll: boldChoiceAttempt.roll,
+      success: boldChoiceAttempt.success,
+      affinity: boldChoiceAttempt.affinity,
+      csa_direct_relevance: boldChoiceAttempt.csa_direct_relevance,
+      acceptance_bonus_applied: boldChoiceAttempt.acceptance_bonus_applied
+    }));
+  }
   const promptStart = Date.now();
   const effectiveSave = buildStructuredEffectiveSave(ctx?.save, structuredPlan);
   const effectiveCtx = { ...ctx, save: effectiveSave, __structured_effective_save: true };
@@ -2538,7 +2551,7 @@ async function runCommitPipeline(env, { game_id, turn_number, content: rawConten
   // into state.context.save right after commit instead of showing stale
   // pre-commit values until the next full /api/context reload.
   const statePatch = {};
-  for (const key of ['player_progress', 'csa_active', 'world_state', 'player_location', 'npc_locations', 'npc_emotion', 'npc_stats', 'npc_stat_changes', 'last_character_id', 'last_npcs_present', 'last_choices']) {
+  for (const key of ['player_progress', 'csa_active', 'world_state', 'player_location', 'npc_locations', 'npc_emotion', 'npc_stats', 'npc_stat_changes', 'npc_relationship_state', 'last_character_id', 'last_npcs_present', 'last_choices', 'last_choice_meta']) {
     if (key in patch) statePatch[key] = patch[key];
   }
 
@@ -3102,9 +3115,30 @@ function buildGeneralActionJudgmentSection() {
 
 [일반 행동 판정]
 - 플레이어 입력은 시도이며 NPC의 반응·동의·감정·관계·과거·오르가즘·스탯을 확정하지 않는다.
-- 일상 대화·업무 행동은 특별한 방해가 없으면 자연스럽게 진행한다. 부담 있는 부탁·설득·친밀 행동은 호감도, 성격·관계·장소·직전 사건으로 성공·부분 성공·실패를 판단한다. 상식수용도는 현재 적용 중인 상식개변의 자발적·협조적 실행에만 영향을 주며 호감·동의·관계 수치를 대신하지 않는다.
+- 일상 대화·업무 행동은 특별한 방해가 없으면 자연스럽게 진행한다. 부담 있는 부탁·설득·친밀 행동은 호감도, 성격·관계·장소·직전 사건으로 성공·부분 성공·실패를 판단한다. 상식개변 수용도는 현재 적용 중인 상식개변의 자발적·협조적 실행에만 영향을 주며 호감·동의·관계 수치를 대신하지 않는다.
 - 강압적·성적·위험한 행동은 명확한 자발적 참여나 직접 관련된 현재 장소의 상식개변이 없으면 성공시키지 않는다.
 - 상식개변은 적힌 직접 범위 밖의 복종·성적 행동·관계·기억 효과로 확장하지 않는다.`;
+}
+
+function buildRelationshipInterpretationSection() {
+  return `
+
+[RELATIONSHIP INTERPRETATION — STRICT]
+- 호감도는 NPC가 플레이어 개인에게 느끼는 정서적 호의와 애정이다. 상식개변 수행, 업무적 협조, 접촉을 즉시 거부하지 않음, 홍조·신체 반응·당황·신음은 단독으로 호감·연애 감정·동의의 증거가 아니다.
+- 상식개변 수용도는 플레이어를 좋아하거나 일반 명령을 잘 따르는 정도가 아니다. 활성 상식개변의 직접 의미 안에서만 규범 수행의 자연스러움과 적극성을 조절한다.
+- 호감 0~19는 업무적 응대·경계·거리 두기만 가능하며 애교·질투·데이트 제안·선제적 애정 표현을 하지 않는다. 20~39는 가벼운 친근감만 가능하고 먼저 키스·연애 기대·독점욕을 보이지 않는다. 40~59는 장면과 성격에 맞는 가벼운 친밀 행동만 가능하다. 60~79부터 개인적 애정 표현·데이트 제안이 가능하며, 80~100만 강한 애정·적극적 연애 행동을 성격과 최근 사건에 맞게 허용한다.
+- 호감 상승은 의사 존중, 약속 이행, 위험·업무 문제 해결, 신뢰 대화, 중요한 감정·목표 이해, 상호 합의된 친밀 경험처럼 이번 턴에 확인된 독립적 관계 사건이 있어야 한다. 상식개변 수행·신체 반응·단순 접촉·거절하지 않음·성행위 자체·플레이어의 결과 선언만으로 올리지 않는다.
+- 관계 기록의 성적 경험은 현재 사랑·연애·독점욕·동의를 자동 보장하지 않는다.`;
+}
+
+function buildCsaAcceptanceScopeSection() {
+  return `
+
+[CSA ACCEPTANCE SCOPE — HIGHEST PRIORITY]
+- 상식개변 수용도는 활성 상식개변의 직접 의미에만 적용한다. 수용도가 높아도 플레이어의 일반적인 말·부탁·명령·연애 접근·성적 요구를 잘 따른다는 뜻이 아니다.
+- 활성 상식개변과 무관한 행동은 호감도, 성격, 현재 관계, 상황, 과감 선택지 판정으로 별도 결정한다. 상식개변 수행을 플레이어에 대한 복종·애정·신뢰로 묘사하지 않는다.
+- 0~19는 규범을 최소 범위로 소극적으로, 20~39는 상황이 생기면 수행하되 먼저 확대하지 않고, 40~59는 병원 관행처럼 자연스럽게, 60~79는 직접 의미 안에서 먼저 준비·협조하며, 80~100은 직접 의미 안에서 선제적으로 수행하고 주변에도 자연스럽게 적용한다.
+- 모든 구간에서 문장에 없는 권한·행동·연애·질투·불법 업무 조작을 새로 만들지 않는다.`;
 }
 
 // Only the current main NPC's core facts, injected as an established-fact
@@ -3544,6 +3578,8 @@ ${recentMemorySlice.map((m, index) => clipHeadTail(sanitizeRecentNarrativeForPro
   const physicalSceneStateSection = buildCurrentNpcPhysicalSceneStateSection(save, master.characters || {});
   const explicitMentionSection = buildExplicitNpcMentionSection(playerInput, master.characters || {});
   const csaSection = buildApplicableCsaSection(save, activeCsa);
+  const relationshipInterpretationSection = buildRelationshipInterpretationSection();
+  const csaAcceptanceScopeSection = buildCsaAcceptanceScopeSection();
   const mindEffectBoundarySection = buildMindEffectBoundarySection({
     hasApplicableCsa: Boolean(csaSection)
   });
@@ -3597,7 +3633,7 @@ ${recentMemorySlice.map((m, index) => clipHeadTail(sanitizeRecentNarrativeForPro
   // everything above it, including [최근 기억]'s now-stale account of the
   // turn that was just rolled back.
   const regenerationFeedbackSection = buildRegenerationFeedbackSection(regenerationFeedback);
-  const systemPrompt = (coreRules + playerGate + modeSection + rulebookSection + openingScenarioSection + appUsageSection + eligibleNpcRosterSection + buildCsaRuntimeSection() + buildGeneralActionJudgmentSection() + buildCsaDeactivationNarrativeRule() + currentSceneSection + hospitalLocationMemorySection + npcProfileSection + relationshipMemorySection + sexualHistorySection + explicitMentionSection + csaSection + mindEffectBoundarySection + physicalSceneStateSection + narrativeLengthSection + narrativeParagraphSection + npcDialogueSection + moanVocalReactionSection + antiRepetitionSection + playerStatusPanel + contextSection + feedbackSection + continuitySection + finalFormatRules + openingFlow + playerSetupReminder + registeredNpcChoiceReminder + choiceLengthReminder + buildAddressAbbreviationSection() + regenerationFeedbackSection + buildStructuredActionStorySection(structuredPlan, save, activeCsa) + playerAttemptSection)
+  const systemPrompt = (coreRules + playerGate + modeSection + rulebookSection + openingScenarioSection + appUsageSection + eligibleNpcRosterSection + buildCsaRuntimeSection() + buildGeneralActionJudgmentSection() + relationshipInterpretationSection + csaAcceptanceScopeSection + buildCsaDeactivationNarrativeRule() + currentSceneSection + hospitalLocationMemorySection + npcProfileSection + relationshipMemorySection + sexualHistorySection + explicitMentionSection + csaSection + mindEffectBoundarySection + physicalSceneStateSection + narrativeLengthSection + narrativeParagraphSection + npcDialogueSection + moanVocalReactionSection + antiRepetitionSection + playerStatusPanel + contextSection + feedbackSection + continuitySection + finalFormatRules + openingFlow + playerSetupReminder + registeredNpcChoiceReminder + choiceLengthReminder + buildAddressAbbreviationSection() + regenerationFeedbackSection + buildStructuredActionStorySection(structuredPlan, save, activeCsa) + playerAttemptSection)
     .replaceAll('상식개변 어플', '상식개변 앱');
 
   return {
@@ -3721,7 +3757,7 @@ character_id가 narrator가 아닌 등록 NPC이고 그 NPC가 방금 서사에 
 직전 저장된 npc_emotion 문장을 그대로 복사하거나 단어만 바꿔치기하지 마라. 이번 턴 서사에서 새로 일어난 인식·감정·신체 변화만 기록하고, 변화가 작더라도 직전 문장을 그대로 반복하지 마라. 일시적인 신체 반응이나 순간의 동요를 사랑, 영구 복종, 완전한 욕망으로 자동 확정하지 말고, 갈등·혼란·자기합리화가 남아 있다면 그대로 유지해라.
 
 [NPC STAT DELTA CONTRACT]
-npc_stat_changes에는 호감도와 상식수용도만 반환한다. 호감도는 실제 독립적 감정·관계 변화만 근거로 -5~+5 안에서 판단한다. 상식수용도는 현재 장면에 그 NPC에게 실제로 적용된 상식개변이 행동·판단에 반영된 경우에만 반환하며, 강도와 상식저항력을 고려한 범위 안에서 판단한다. 상식개변 생성·수정·해제 자체, 단순 반복, 플레이어 선언만으로는 올리지 않는다. reason은 서사 근거 한 문장이다.
+npc_stat_changes에는 호감도와 상식개변 수용도만 반환한다. 호감도는 플레이어 개인에 대한 실제 독립적 감정·관계 변화만 근거로 -5~+5 안에서 판단한다. 상식개변 수행·업무적 협조·접촉을 거부하지 않음·홍조·흥분·신음·성행위 자체·플레이어 결과 선언·높은 수용도만을 근거로 한 호감 상승은 delta 0이다. 상식개변 수용도는 현재 장면에 실제 적용된 활성 상식개변의 직접 의미가 행동·판단에 반영된 경우에만 반환하며, 일반 부탁·복종·연애·성적 요구·범위 밖 명령에는 사용하지 않는다. 상식개변 생성·수정·해제 자체, 단순 반복, 플레이어 선언만으로는 올리지 않는다. reason은 서사 근거 한 문장이다.
 
 [FIRST ENCOUNTER CONTRACT]
 저장된 npc_encounters에 현재 NPC(character_id) 기록이 없고 이번이 실제로 처음 직접 조우한 장면일 때만 first_encounter_stats에 호감도만 0~35 사이 정수로 판단해 반환한다. 단순히 배경에 등장했거나 멀리서 본 것만으로는 첫 직접 조우가 아니다 — 직접 대화, 응대, 신체 접촉처럼 명확한 상호작용이 있어야 한다. 상식수용도는 첫 조우에서 판단하거나 변경하지 않는다. 이미 조우한 NPC이거나 처음 만나는 장면이 아니면 first_encounter_stats는 반드시 null이다.
@@ -4061,12 +4097,19 @@ function clampPlayerInputEchoedStatChanges({ patch, previousSave, characterId })
     const prior = previousSave?.npc_stats?.[characterId] || {};
     const stats = { ...patch.npc_stats[characterId] };
     const changes = { ...(patch.npc_stat_changes?.[characterId] || {}) };
+    const hasIndependentAffinityEvent = reason => /(?:의사(?:를)?\s*존중|약속(?:을)?\s*지키|위험.*(?:해결|구했)|업무.*(?:해결|도움)|신뢰.*(?:대화|얻)|감정.*(?:이해|공감)|상호.*합의.*친밀)/u.test(reason);
+    const hasAffinityOnlyEvidence = reason => /(?:상식개변|상식.*수용|규범.*수행|접촉.*(?:거부하지|제지하지)|거절하지|얼굴.*(?:붉|홍조)|흥분|신음|성행위|성관계|절정|오르가즘|신체.*반응)/u.test(reason);
     for (const key of ['호감도', '상식수용도']) {
       const delta = Number(changes?.[key]?.delta);
       const reason = String(changes?.[key]?.reason || '');
       if (Number.isFinite(delta) && delta > 0 && /플레이어.*(?:선언|입력|작성)|(?:이미\s*)?(?:좋아|복종|오르가즘).*(?:입력|작성|선언)/u.test(reason)) {
         stats[key] = Number(prior?.[key]) || 0;
         changes[key] = { ...changes[key], delta: 0, reason: '플레이어 결과 선언은 저장 근거가 아님' };
+      }
+      if (key === '호감도' && Number(changes?.[key]?.delta) > 0
+        && hasAffinityOnlyEvidence(reason) && !hasIndependentAffinityEvent(reason)) {
+        stats[key] = Number(prior?.[key]) || 0;
+        changes[key] = { ...changes[key], delta: 0, reason: '상식개변 수행이나 신체 반응만으로 호감도는 상승하지 않음' };
       }
     }
     patch.npc_stats = { ...patch.npc_stats, [characterId]: stats };
@@ -4093,9 +4136,6 @@ function buildSavePatch(extract, enginePatch = {}, summaryPlan = null, previousS
       ? extract.choices.filter(choice => typeof choice === 'string' && choice.trim())
       : []
   };
-  patch.last_choice_meta = buildChoiceMeta(patch.last_choices, previousSave, master, turnNumber, {
-    allowBold: !degraded && !isStructuredAppTransaction && characterId && characterId !== 'narrator'
-  });
   if (summaryPlan) {
     patch.story_summary_recent100 = summaryPlan.recentSummary;
     patch.recent100_start_turn = summaryPlan.recentStartTurn;
@@ -4314,6 +4354,17 @@ function buildSavePatch(extract, enginePatch = {}, summaryPlan = null, previousS
     patch.last_npcs_present = [target.character_id];
     patch.npc_locations = { [target.character_id]: { ...target.target_world_state, updated_turn: turnNumber } };
   }
+  const choiceSave = {
+    ...previousSave,
+    last_character_id: patch.last_character_id,
+    csa_active: patch.csa_active ?? previousSave?.csa_active,
+    world_state: patch.world_state ?? previousSave?.world_state,
+    npc_stats: { ...(previousSave?.npc_stats || {}), ...(patch.npc_stats || {}) },
+    npc_emotion: { ...(previousSave?.npc_emotion || {}), ...(patch.npc_emotion || {}) }
+  };
+  patch.last_choice_meta = buildChoiceMeta(patch.last_choices, choiceSave, master, turnNumber, {
+    allowBold: !degraded && !isStructuredAppTransaction && characterId && characterId !== 'narrator'
+  });
   return clampPlayerInputEchoedStatChanges({ patch, previousSave, characterId });
 }
 
@@ -4908,7 +4959,7 @@ function applyNpcStatChanges(previous = {}, proposed = {}) {
     const requested = Number(proposed?.[key]?.delta);
     const reason = typeof proposed?.[key]?.reason === 'string' ? proposed[key].reason.trim().slice(0, 240) : '';
     let delta = Number.isFinite(requested) ? Math.trunc(requested) : 0;
-    const maximumDelta = key === '상식수용도' ? 30 : key === '성적민감도' ? 4 : 10;
+    const maximumDelta = key === '상식수용도' ? 30 : key === '성적민감도' ? 4 : 5;
     const minimumDelta = key === '성적민감도' ? 0 : -maximumDelta;
     if (Math.abs(delta) > maximumDelta) {
       errors.push(`${key}: delta ${delta} exceeds allowed ±${maximumDelta}`);
@@ -6624,25 +6675,76 @@ function normalizeFinalChoicesDeterministically(choices, { narrativeText = '', c
   };
 }
 
+const CSA_CHOICE_RELEVANCE_TOPICS = [
+  { key: 'seating', csa: /(?:무릎|앉(?:아|는|기)|좌석|자세|밀착)/, choice: /(?:무릎|앉(?:아|는|기)|좌석|자세|밀착)/, direct: /(?:무릎|앉(?:아|는|기)|좌석)/ },
+  { key: 'clothing', csa: /(?:브래지어|팬티|속옷|유니폼|복장|노브라|노팬티|탈의|벗)/, choice: /(?:브래지어|팬티|속옷|유니폼|복장|노브라|노팬티|탈의|벗)/, direct: /(?:브래지어|팬티|속옷|유니폼|복장|노브라|노팬티|탈의)/ },
+  { key: 'contact', csa: /(?:접촉|만지|손(?:으로|을)|신체|마사지|진정)/, choice: /(?:접촉|만지|손(?:으로|을)|신체|마사지|진정)/, direct: /(?:접촉|만지|손(?:으로|을)|신체|마사지|진정)/ },
+  { key: 'kiss', csa: /(?:키스|입맞춤)/, choice: /(?:키스|입맞춤)/, direct: /(?:키스|입맞춤)/ },
+  { key: 'sex', csa: /(?:성적\s*요구|성행위|성관계|삽입|사정|구강|애널|질(?:내|삽입)?)/, choice: /(?:성적\s*요구|성행위|성관계|삽입|사정|구강|애널|질(?:내|삽입)?)/, direct: /(?:성적\s*요구|성행위|성관계|삽입|사정|구강|애널|질(?:내|삽입)?)/ },
+  { key: 'clinical', csa: /(?:상담|진료|검사|처치|업무)/, choice: /(?:상담|진료|검사|처치|업무)/, direct: /(?:상담|진료|검사|처치)/ }
+];
+
+function resolveCsaDirectRelevance(save = {}, choice = '') {
+  const text = typeof choice === 'string' ? choice : '';
+  if (!text.trim()) return 'none';
+  const choiceTopics = new Set(CSA_CHOICE_RELEVANCE_TOPICS
+    .filter(topic => topic.choice.test(text))
+    .map(topic => topic.key));
+  let relevance = 'none';
+  for (const csa of getApplicableCsaEntries(save)) {
+    const content = typeof csa?.content === 'string' ? csa.content : '';
+    const csaTopics = new Set(CSA_CHOICE_RELEVANCE_TOPICS
+      .filter(topic => topic.csa.test(content))
+      .map(topic => topic.key));
+    if ([...choiceTopics].some(key => !csaTopics.has(key))) continue;
+    for (const topic of CSA_CHOICE_RELEVANCE_TOPICS) {
+      if (!topic.csa.test(content) || !topic.choice.test(text)) continue;
+      if (topic.direct.test(text)) return 'direct';
+      relevance = 'partial';
+    }
+  }
+  return relevance;
+}
+
 function calculateBoldChoiceRate(save = {}, master = {}, choice = '') {
   const characterId = save?.last_character_id;
   const stats = save?.npc_stats?.[characterId] || {};
   const affinity = Number(stats['호감도']) || 0;
   const acceptance = Number(stats['상식수용도']) || 0;
   const resistance = resolveCsaResistance(master?.characters?.[characterId] || {});
+  const csaDirectRelevance = resolveCsaDirectRelevance(save, choice);
   let rate = 25;
-  rate += affinity >= 70 ? 15 : affinity >= 40 ? 5 : affinity < 20 ? -10 : 0;
-  rate += acceptance >= 70 ? 15 : acceptance >= 40 ? 5 : 0;
-  rate += resistance >= 70 ? -10 : 0;
-  if (getActiveCsaEntries(save).length && /(병원|규범|당연|업무|복장|접촉)/.test(choice)) rate += 10;
-  if (/(공개|사람들|근무|위험|방해|들키)/.test(choice)) rate -= 10;
-  return Math.max(10, Math.min(55, Math.round(rate / 5) * 5));
+  rate += affinity >= 80 ? 15 : affinity >= 60 ? 10 : affinity >= 40 ? 5 : affinity >= 20 ? -5 : -15;
+  rate += csaDirectRelevance === 'direct' ? 15 : csaDirectRelevance === 'partial' ? 5 : 0;
+  const acceptanceBonus = csaDirectRelevance !== 'none'
+    ? (acceptance >= 70 ? 10 : acceptance >= 40 ? 5 : 0)
+    : 0;
+  rate += acceptanceBonus;
+  rate += resistance >= 90 ? -15 : resistance >= 70 ? -10 : 0;
+  if (/(?:불법|위조|조작|퇴원\s*(?:기록|절차)|기록\s*변경)/.test(choice)) rate -= 10;
+  if (/(?:업무\s*(?:방해|중단)|진료\s*(?:방해|중단))/.test(choice)) rate -= 5;
+  const currentEmotion = save?.npc_emotion?.[characterId];
+  if (/(?:그만|싫|하지\s*마|거절)/.test(`${currentEmotion?.surface || ''} ${currentEmotion?.inner || ''}`)) rate -= 10;
+  return {
+    success_rate: Math.max(10, Math.min(70, Math.round(rate / 5) * 5)),
+    affinity,
+    csa_direct_relevance: csaDirectRelevance,
+    acceptance_bonus_applied: acceptanceBonus > 0
+  };
 }
 
 function buildChoiceMeta(choices = [], save = {}, master = {}, turnNumber = 0, { allowBold = true } = {}) {
   return choices.map((choice, index) => {
     const bold = allowBold && index === 3;
-    return { choice_id: `turn_${turnNumber}_choice_${index + 1}`, kind: bold ? 'bold' : ['safe', 'relationship', 'progress'][index] || 'safe', success_rate: bold ? calculateBoldChoiceRate(save, master, choice) : null };
+    const details = bold ? calculateBoldChoiceRate(save, master, choice) : null;
+    return {
+      choice_id: `turn_${turnNumber}_choice_${index + 1}`,
+      kind: bold ? 'bold' : ['safe', 'relationship', 'progress'][index] || 'safe',
+      success_rate: details?.success_rate ?? null,
+      affinity: details?.affinity ?? null,
+      csa_direct_relevance: details?.csa_direct_relevance ?? 'none',
+      acceptance_bonus_applied: details?.acceptance_bonus_applied === true
+    };
   });
 }
 
@@ -6656,7 +6758,16 @@ function resolveBoldChoiceAttempt(save = {}, master = {}, playerInput = '', game
   let hash = 2166136261;
   for (let i = 0; i < source.length; i += 1) hash = Math.imul(hash ^ source.charCodeAt(i), 16777619);
   const roll = (hash >>> 0) % 100 + 1;
-  return { choice_id: candidate.choice_id, kind: 'bold', success_rate: Number(candidate.success_rate), roll, success: roll <= Number(candidate.success_rate) };
+  return {
+    choice_id: candidate.choice_id,
+    kind: 'bold',
+    success_rate: Number(candidate.success_rate),
+    roll,
+    success: roll <= Number(candidate.success_rate),
+    affinity: Number(candidate.affinity) || 0,
+    csa_direct_relevance: candidate.csa_direct_relevance || 'none',
+    acceptance_bonus_applied: candidate.acceptance_bonus_applied === true
+  };
 }
 
 // ─────────────────────────────────────────────

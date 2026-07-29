@@ -1266,7 +1266,32 @@ async function handleStory(req, env) {
   const promptStart = Date.now();
   const effectiveSave = buildStructuredEffectiveSave(ctx?.save, structuredPlan);
   const effectiveCtx = { ...ctx, save: effectiveSave, __structured_effective_save: true };
-  const prompt = buildStoryPrompt(effectiveCtx, resolvedPlayerInput, currentTurn, feedback, regeneration_feedback, structuredPlan);
+  let prompt;
+  try {
+    prompt = buildStoryPrompt(
+      effectiveCtx,
+      resolvedPlayerInput,
+      currentTurn,
+      feedback,
+      regeneration_feedback,
+      structuredPlan
+    );
+  } catch (error) {
+    console.error(JSON.stringify({
+      event: 'story_prompt_build_failed',
+      game_id,
+      turn_number: currentTurn + 1,
+      request_id: requestId,
+      error_code: 'STORY_PROMPT_BUILD_FAILED',
+      error: error?.message || String(error),
+      stack: error?.stack
+    }));
+    return jsonResponse({
+      error: error?.message || 'Story prompt generation failed.',
+      error_code: 'STORY_PROMPT_BUILD_FAILED',
+      request_id: requestId
+    }, 500);
+  }
   const promptMs = Date.now() - promptStart;
 
   let deepseekRes;
@@ -3351,6 +3376,7 @@ function buildStoryPrompt(ctx, playerInput, currentTurn, feedback = [], regenera
   const isReentry = !playerInput || playerInput.trim() === '' || playerInput.trim() === '/플레이';
   const isFirstTurn = nextTurn === 1;
   const setupComplete = isSetupComplete(save);
+  const appUsageRequested = isAppUsageInfoRequest(playerInput);
   const structuredSelection = !setupComplete ? resolveRecommendationSelection(playerInput, save.player_setup) : null;
   const savedCustomProfile = normalizePlayerProfile(save.player_setup?.recommendation);
   const hasCustomRecommendation = Object.keys(savedCustomProfile).length > 0

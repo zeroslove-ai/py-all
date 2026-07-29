@@ -15,12 +15,12 @@ window.csaApp = (() => {
     const original = new Map((draft.original || []).map(item => [item.id, item]));
     return draft.csa.flatMap(item => {
       const content = normalize(item.content);
-      if (item._new) return [{ client_id: item.client_id, domain: 'csa', operation: 'activate', scope_type: item.scope_type, strength: item.strength, content }];
+      if (item._new) return [{ client_id: item.client_id, domain: 'csa', operation: 'activate', strength: item.strength, content }];
       const before = original.get(item.id);
       if (!before) return [];
       if (item._deleted) return [{ client_id: `csa:${item.id}`, domain: 'csa', operation: 'deactivate', id: item.id }];
-      return content === normalize(before.content) && item.strength === before.strength && item.scope_type === before.scope_type
-        ? [] : [{ client_id: `csa:${item.id}`, domain: 'csa', operation: 'update', id: item.id, scope_type: item.scope_type, strength: item.strength, content }];
+      return content === normalize(before.content) && item.strength === before.strength
+        ? [] : [{ client_id: `csa:${item.id}`, domain: 'csa', operation: 'update', id: item.id, strength: item.strength, content }];
     }).sort((a, b) => `${a.operation}:${a.id || a.client_id}`.localeCompare(`${b.operation}:${b.id || b.client_id}`));
   };
   const dirty = () => operations().length > 0;
@@ -100,8 +100,8 @@ window.csaApp = (() => {
   function renderCsa(body) {
     const max = Number(appState.home?.status?.csa_max), add = el('button', 'choice-btn', '+ 상식개변 추가');
     add.disabled = applying || (Number.isFinite(max) && active().length >= max);
-    add.onclick = () => { const strength = (appState.strength_options || []).find(item => item.available)?.id; const scope = (appState.scope_options || []).find(item => item.available)?.id;
-      if (!strength || !scope) return; draft.csa.push({ _new: true, client_id: `draft_csa_${crypto.randomUUID()}`, strength, scope_type: scope, content: '' }); renderTab('csa'); };
+    add.onclick = () => { const strength = (appState.strength_options || []).find(item => item.available)?.id;
+      if (!strength) return; draft.csa.push({ _new: true, client_id: `draft_csa_${crypto.randomUUID()}`, strength, scope_type: 'world', scope_label: '병원 전체', content: '' }); renderTab('csa'); };
     body.appendChild(add); if (add.disabled && active().length >= max) body.appendChild(el('p', 'csa-app-error', '활성 슬롯이 가득 찼습니다. 기존 항목을 해제한 뒤 추가해 주세요.'));
     if (!active().length) body.appendChild(el('p', '', '현재 활성 상식개변이 없습니다.'));
     draft.csa.forEach(item => {
@@ -110,12 +110,11 @@ window.csaApp = (() => {
       const toggle = el('button', 'choice-btn', item._deleted ? '해제 취소' : '해제'); toggle.disabled = applying;
       toggle.onclick = () => { if (item._new) draft.csa.splice(draft.csa.indexOf(item), 1); else item._deleted = !item._deleted; renderTab('csa'); };
       header.appendChild(toggle);
-      const strength = el('select', 'csa-app-select'), scope = el('select', 'csa-app-select'), content = el('textarea', 'csa-app-textarea');
+      const strength = el('select', 'csa-app-select'), scope = el('p', 'csa-app-scope-label', '적용 범위: 병원 전체'), content = el('textarea', 'csa-app-textarea');
       (appState.strength_options || []).forEach(option => { const optionNode = el('option', '', option.available || item.strength === option.id ? option.label : `${option.label} · Lv.${option.unlock_level}`); optionNode.value = option.id; optionNode.disabled = !option.available && item.strength !== option.id; optionNode.selected = item.strength === option.id; strength.appendChild(optionNode); });
-      (appState.scope_options || []).forEach(option => { const optionNode = el('option', '', option.available || item.scope_type === option.id ? option.label : `${option.label} · Lv.${option.unlock_level}`); optionNode.value = option.id; optionNode.disabled = !option.available && item.scope_type !== option.id; optionNode.selected = item.scope_type === option.id; scope.appendChild(optionNode); });
       content.value = item.content || ''; content.placeholder = '이 공간에서 적용할 사회적 상식을 입력하세요.';
-      [strength, scope, content].forEach(node => node.disabled = item._deleted || applying);
-      strength.onchange = () => { item.strength = strength.value; syncDraftBar(); }; scope.onchange = () => { item.scope_type = scope.value; syncDraftBar(); }; content.oninput = () => { item.content = content.value; syncDraftBar(); };
+      [strength, content].forEach(node => node.disabled = item._deleted || applying);
+      strength.onchange = () => { item.strength = strength.value; syncDraftBar(); }; content.oninput = () => { item.content = content.value; syncDraftBar(); };
       card.append(header, strength, scope, content); body.appendChild(card);
     });
   }

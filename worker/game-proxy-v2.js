@@ -609,7 +609,7 @@ async function handleAppValidate(req, env) {
   return jsonResponse({ ok: true, canonical_action: result.canonical_action, display_input: result.display_input, summary: result.summary });
 }
 
-const MANUAL_SCOPE_LABELS = { location: '현재 장소', ward: '병동', floor: '해당 층 전체', building: '건물 전체', world: '전 세계' };
+const MANUAL_SCOPE_LABELS = { world: '병원 전체' };
 const MANUAL_TIER_META = [
   ['weak', '약함', 1, '감각·주의·기분·가벼운 충동을 변화시키지만 핵심 금기와 행동 선택은 유지합니다.'],
   ['medium', '중간', 3, '특정 조건에서 부끄러움·거리감·행동 기준을 바꾸고 실제 행동을 자연스럽게 유도합니다.'],
@@ -967,34 +967,31 @@ function buildAppManualPayload(master, save, turnCount = 0) {
       available_strength: capability.available_strength,
       csa_active: capability.csa_active_count,
       csa_max: capability.csa_max_active,
-      csa_scope_type: limits.scope_type,
-      csa_scope_label: MANUAL_SCOPE_LABELS[limits.scope_type]
+      csa_scope_type: 'world',
+      csa_scope_label: '병원 전체'
     },
     diagnostics,
     quick_start: [
-      '상식개변은 지정 공간 안의 사회적 상식만 변경합니다.',
+      '모든 상식개변은 서울중앙병원 전체의 공동 사회 규범으로 적용됩니다.',
       '변경은 반드시 상식개변 어플 UI에서 생성·수정·해제합니다.',
       '강도는 직접 의미 범위 안의 확신과 사회적 압력만 바꾸며 의미 범위를 넓히지 않습니다.',
-      '범위를 벗어나면 현재 적용은 멈추지만 이미 벌어진 사건의 기억은 유지됩니다.',
+      '해제하면 현재 규범 적용만 멈추고 이미 벌어진 사건의 기억과 물리 상태는 유지됩니다.',
       '매뉴얼 열람과 탭 이동은 턴을 소비하지 않습니다.'
     ],
     common_sense: {
       title: '상식개변',
-      description: '특정 개인이 아니라 지정 공간의 사회적 규범을 변경합니다. 범위 안의 인물은 각자의 성격을 유지한 채 그 규범을 당연한 전제로 받아들입니다.',
+      description: '특정 개인이 아니라 서울중앙병원 전체의 사회적 규범을 변경합니다. 인물은 각자의 성격을 유지한 채 그 규범을 당연한 전제로 받아들입니다.',
       rules: [
         'activate는 새 항목과 활성 슬롯을 만듭니다.',
-        'update는 같은 슬롯에서 내용·강도·범위를 변경합니다.',
+        'update는 같은 슬롯에서 내용과 강도를 변경합니다.',
         'deactivate는 효과만 해제하며 기억과 현재 물리 상태는 유지합니다.',
         '여러 항목을 합쳐 어느 항목에도 없는 더 강한 규칙을 만들지 않습니다.',
         '직접 의미 범위 밖 행동은 NPC의 성격·관계·상황과 자발적 선택으로 별도 판정합니다.',
-        '현재 강도·공간 범위·활성 슬롯을 넘는 요청은 저장되지 않습니다.'
+        '레벨은 사용할 수 있는 강도와 동시에 활성화할 수 있는 개수만 늘립니다.'
       ],
-      current_scope: { type: limits.scope_type, label: MANUAL_SCOPE_LABELS[limits.scope_type] },
-      scope_unlocks: [[1, 'Lv.1~3'], [4, 'Lv.4~6'], [7, 'Lv.7~9'], [10, 'Lv.10']]
-        .map(([unlockLevel, levelRange]) => {
-          const item = getCsaLimits(unlockLevel);
-          return { level_range: levelRange, scope_type: item.scope_type, scope_label: MANUAL_SCOPE_LABELS[item.scope_type], max_active: item.max_active, available: level >= unlockLevel };
-        }),
+      current_scope: normalizeCsaScope(),
+      scope_unlocks: [[1, 'Lv.1~2'], [3, 'Lv.3~4'], [5, 'Lv.5~9'], [10, 'Lv.10']]
+        .map(([unlockLevel, levelRange]) => ({ level_range: levelRange, scope_type: 'world', scope_label: '병원 전체', max_active: getCsaLimits(unlockLevel).max_active, available: level >= unlockLevel })),
       tiers: csaTiers
     },
     hospital_map: buildHospitalMapPayload(master, save),
@@ -1003,12 +1000,10 @@ function buildAppManualPayload(master, save, turnCount = 0) {
       { id: 'trust', label: '신뢰도', range: '0~100', description: 'NPC가 플레이어의 말과 행동, 신분과 의도를 믿는 정도입니다.', change_rule: '턴당 최대 -5~+5' }
     ],
     unlocks: [
-      { level: 1, items: ['약함 강도', '병동 범위', '활성 1개'] },
-      { level: 3, items: ['중간 강도'] },
-      { level: 4, items: ['층 범위', '활성 2개'] },
-      { level: 5, items: ['강함 강도'] },
-      { level: 7, items: ['건물 범위', '활성 3개'] },
-      { level: 10, items: ['전 세계 범위', '활성 4개'] }
+      { level: 1, items: ['약함 강도', '병원 전체 범위', '활성 2개'] },
+      { level: 3, items: ['중간 강도', '활성 3개'] },
+      { level: 5, items: ['강함 강도', '활성 4개'] },
+      { level: 10, items: ['활성 5개'] }
     ],
     active_effects: { common_sense: activeCommonSense },
     common_failures: [
@@ -1165,11 +1160,9 @@ function buildAppStatePayload(master, save, turnCount = 0) {
   });
   const strength_options = [['weak', '약함', 1], ['medium', '중간', 3], ['strong', '강함', 5]]
     .map(([id, label, unlock_level]) => ({ id, label, available: manual.status.level >= unlock_level, unlock_level }));
-  const scope_options = [['location', '현재 장소', 1], ['ward', '병동', 1], ['floor', '해당 층 전체', 4], ['building', '건물 전체', 7], ['world', '전 세계', 10]]
-    .map(([id, label, unlock_level]) => ({ id, label, available: manual.status.level >= unlock_level, unlock_level }));
-  const common_sense = (Array.isArray(save?.csa_active) ? save.csa_active : [])
-    .filter(item => item?.active === true)
-    .map(item => ({ id: item.id, strength: appStrengthId(item.strength), strength_label: item.strength || '약함', content: item.content || '', scope_type: item.scope_type || '', scope_label: item.scope_label || '', created_turn: item.created_turn ?? null }));
+  const scope_options = [{ id: 'world', label: '병원 전체', available: true, unlock_level: 1 }];
+  const common_sense = getActiveCsaEntries(save)
+    .map(item => ({ id: item.id, strength: appStrengthId(item.strength), strength_label: item.strength || '약함', content: item.content || '', ...normalizeCsaScope(), created_turn: item.created_turn ?? null }));
   return {
     version: 2,
     mode: GAMEPLAY_MODE,
@@ -1248,6 +1241,7 @@ async function handleStory(req, env) {
   try {
     ctx = await supabaseRpc(env, 'get_story_context', { p_game_id: game_id, p_recent_count: 5 });
   } catch (error) {
+    console.error(JSON.stringify({ event: 'story_failed', game_id, turn_number: null, request_id: requestId, error_code: 'SUPABASE_ERROR', structured_action_type: structured_action?.type || null, is_csa_action: structured_action?.type === 'app_transaction', has_world_state: false }));
     return jsonResponse({ error: error.message, error_code: 'SUPABASE_ERROR', request_id: requestId }, 502);
   }
   const contextMs = Date.now() - contextStart;
@@ -1294,12 +1288,14 @@ async function handleStory(req, env) {
     }, STORY_HEADERS_TIMEOUT_MS);
   } catch (error) {
     const code = error.name === 'AbortError' ? 'UPSTREAM_TIMEOUT' : 'STORY_UPSTREAM_FAILED';
+    console.error(JSON.stringify({ event: 'story_failed', game_id, turn_number: currentTurn + 1, request_id: requestId, error_code: code, structured_action_type: structured_action?.type || null, is_csa_action: structured_action?.type === 'app_transaction', has_world_state: isPlainObject(ctx?.save?.world_state) }));
     return jsonResponse({ error: error.message, error_code: code, request_id: requestId }, 502);
   }
   const upstreamMs = Date.now() - upstreamStart;
 
   if (!deepseekRes.ok) {
     const text = await deepseekRes.text();
+    console.error(JSON.stringify({ event: 'story_failed', game_id, turn_number: currentTurn + 1, request_id: requestId, error_code: 'STORY_UPSTREAM_FAILED', structured_action_type: structured_action?.type || null, is_csa_action: structured_action?.type === 'app_transaction', has_world_state: isPlainObject(ctx?.save?.world_state) }));
     return jsonResponse({ error: `DeepSeek error: ${deepseekRes.status} ${text}`, error_code: 'STORY_UPSTREAM_FAILED', request_id: requestId }, 502);
   }
 
@@ -4549,46 +4545,33 @@ function applyNpcStatChanges(previous = {}, proposed = {}) {
   return { stats, changes, errors };
 }
 
-const CSA_SCOPE_RANK = { location: 1, ward: 2, floor: 3, building: 4, world: 5 };
-
 function getCsaLimits(level) {
   const clamped = Math.max(1, Number(level) || 1);
-  if (clamped >= 10) return { scope_type: 'world', max_active: 5 };
-  if (clamped >= 7) return { scope_type: 'building', max_active: 4 };
-  if (clamped >= 5) return { scope_type: 'floor', max_active: 4 };
-  if (clamped >= 4) return { scope_type: 'floor', max_active: 3 };
-  if (clamped >= 3) return { scope_type: 'ward', max_active: 3 };
-  return { scope_type: 'ward', max_active: 2 };
+  if (clamped >= 10) return { max_active: 5 };
+  if (clamped >= 5) return { max_active: 4 };
+  if (clamped >= 3) return { max_active: 3 };
+  return { max_active: 2 };
 }
+
+// Legacy callers normalize any historical scope to the single CSA-only scope.
+const CSA_SCOPE_RANK = { world: 1 };
+const CSA_SCOPE_LABELS = { world: '병원 전체' };
+function resolveCsaScopeId() { return 'world'; }
 
 function currentUtcDateString() {
   return new Date().toISOString().slice(0, 10);
 }
 
-const CSA_SCOPE_LABELS = {
-  seoul_central_hospital: '서울중앙병원',
-  hospital_floor_3: '서울중앙병원 3층',
-  hospital_floor_5: '서울중앙병원 5층',
-  hospital_floor_6: '서울중앙병원 6층',
-  hospital_3ward: '서울중앙병원 3병동',
-  hospital_6ward: '서울중앙병원 6병동',
-  world: '병원 전체'
-};
+function normalizeCsaScope() {
+  return { scope_type: 'world', scope_id: 'world', scope_label: '병원 전체' };
+}
 
-// The LLM proposes a scope_type only; the Worker resolves scope_id from the
-// server-owned world_state so activation scope can never be forged by the model.
-function resolveCsaScopeId(scopeType, worldState = {}) {
-  worldState = inferHospitalWorldStateFromLocationLabel(worldState);
-  if (scopeType === 'world') return 'world';
-  if (scopeType === 'location') {
-    const building = typeof worldState?.building === 'string' ? worldState.building.trim() : '';
-    const floor = typeof worldState?.floor === 'string' ? worldState.floor.trim() : '';
-    const ward = typeof worldState?.ward === 'string' ? worldState.ward.trim() : '';
-    const label = normalizeLocationLabel(worldState?.location_label).replace(/\s+/g, '');
-    return building && floor && ward && label ? `location:${building}:${floor}:${ward}:${label}` : null;
-  }
-  const value = worldState?.[scopeType];
-  return typeof value === 'string' && value.trim() ? value.trim() : null;
+function normalizeStoredCsaEntry(entry = {}) {
+  return { ...entry, ...normalizeCsaScope() };
+}
+
+function normalizeStoredCsaEntries(value) {
+  return (Array.isArray(value) ? value : []).filter(isPlainObject).map(normalizeStoredCsaEntry);
 }
 
 function applyCsaAction(save, action, level, turnNumber, worldState = {}) {
@@ -4688,24 +4671,18 @@ function applyCsaAction(save, action, level, turnNumber, worldState = {}) {
   };
 }
 
-function isCsaApplicable(csa, worldState = {}) {
-  if (csa?.active !== true) return false;
-  if (csa.scope_type === 'world') return true;
-  if (csa.scope_type === 'location') return csa.scope_id === resolveCsaScopeId('location', worldState);
-  return csa.scope_id === worldState[csa.scope_type];
+function isCsaApplicable(csa) {
+  return csa?.active === true;
 }
 
 // Shared by the Story prompt section and the Extract-side omission check —
 // both must agree on exactly which CSAs are in force this turn.
 function getActiveCsaEntries(save = {}) {
-  return (Array.isArray(save?.csa_active) ? save.csa_active : []).filter(item => item?.active === true);
+  return normalizeStoredCsaEntries(save?.csa_active).filter(item => item.active === true);
 }
 
 function getApplicableCsaEntries(save, activeCsa = getActiveCsaEntries(save)) {
-  const world = inferHospitalWorldStateFromLocationLabel(
-    isPlainObject(save?.world_state) ? save.world_state : (isPlainObject(save?.player_location) ? save.player_location : {})
-  );
-  return activeCsa.filter(csa => isCsaApplicable(csa, world));
+  return activeCsa.filter(isCsaApplicable);
 }
 
 function buildCurrentCsaStatusSnapshot(save = {}, master = {}, activeCsa = getActiveCsaEntries(save)) {
@@ -4746,12 +4723,10 @@ function buildMindEffectBoundarySection({ hasApplicableCsa = false } = {}) {
 }
 
 function buildApplicableCsaSection(save, activeCsa = getActiveCsaEntries(save)) {
-  const world = isPlainObject(save?.world_state) ? save.world_state : (isPlainObject(save?.player_location) ? save.player_location : {});
   const applicable = getApplicableCsaEntries(save, activeCsa);
   if (!applicable.length) return '';
-  const locationLabel = typeof world.location_label === 'string' && world.location_label.trim() ? world.location_label.trim() : '현재 위치';
   const lines = applicable.map(csa => `- ${csa.content}`).join('\n');
-  return `\n\n[CURRENT APPLICABLE COMMON-SENSE CHANGES — HARD CONSTRAINT, NOT REFERENCE INFO]\n\n현재 장소:\n${locationLabel}\n\n적용 중인 상식(강제 규칙):\n${lines}\n\n적용 규칙:\n- 아래 상식은 단순 배경 설정이 아니라 이번 턴 서사에서 실제로 집행해야 하는 강제 규칙이다.\n- 규칙에 조건("~마다", "~할 때", "~하면")이 있으면, 이번 턴 서사 안에서 그 조건이 실제로 발생할 때마다 매번 그 행동을 직접 묘사한다. 예: "1문장을 말할 때마다 볼뽀뽀"라면, 이번 턴에 그 NPC가 문장을 말할 때마다 볼뽀뽀 행동을 실제로 서술한다 — 한 번만 언급하고 넘어가지 않는다.\n- 현재 범위 안에 있고 조건을 충족하는 등록 NPC 전원에게 예외 없이 동일하게 적용한다. 특정 NPC만 봐주거나 조용히 생략하지 않는다.\n- 현재 장면의 NPC와 배경 인물은 위 내용을 당연한 상식으로 받아들인다.\n- 플레이어만 원래 상식과 변경된 상식의 차이를 기억한다.\n- 이미 적용된 상식개변의 성공 여부를 다시 의심하지 마라.\n- NPC가 이유 없이 위화감을 느끼거나 규칙을 부정하지 않게 한다.\n- 현재 범위를 벗어나면 적용하지 않는다.\n- 해제되거나 비활성인 개변은 적용하지 않는다.\n- 강제성은 각 상식 문장의 직접 의미 범위 안에서만 적용한다.\n- 직접 범위 밖 행동은 [MIND EFFECT BOUNDARY]에 따라 별도로 판정한다.\n- NPC의 성격은 유지하며, 변경된 상식은 그 문장의 직접 범위 안에서만 판단 전제로 사용한다.`;
+  return `\n\n[ACTIVE COMMON-SENSE CHANGES — HOSPITAL-WIDE HARD CONSTRAINT]\n\n활성 상식개변은 서울중앙병원 전체의 공동 사회 규범으로 적용된다.\n${lines}\n\n적용 규칙:\n- 아래 상식은 단순 배경 설정이 아니라 이번 턴 서사에서 실제로 집행해야 하는 강제 규칙이다.\n- 규칙에 조건("~마다", "~할 때", "~하면")이 있으면, 이번 턴 서사 안에서 그 조건이 실제로 발생할 때마다 매번 그 행동을 직접 묘사한다.\n- 현재 장면의 NPC와 배경 인물은 위 내용을 당연한 상식으로 받아들인다.\n- 플레이어만 원래 상식과 변경된 상식의 차이를 기억한다.\n- 해제되거나 비활성인 개변은 적용하지 않는다.\n- 강제성은 각 상식 문장의 직접 의미 범위 안에서만 적용한다.\n- 직접 범위 밖 행동은 [MIND EFFECT BOUNDARY]에 따라 별도로 판정한다.\n- NPC의 성격은 유지하며, 변경된 상식은 그 문장의 직접 범위 안에서만 판단 전제로 사용한다.`;
 }
 
 // Legacy helper retained for saved-data compatibility only; structured app
@@ -5280,7 +5255,7 @@ function planAppTransaction(previousSave, master, action, { turnNumber }) {
 
   const capability = calculateCsaCapability(previousSave, master);
   const csaLimits = getCsaLimits(capability.current_level);
-  const csa = cloneCsaList(previousSave?.csa_active);
+  const csa = normalizeStoredCsaEntries(previousSave?.csa_active);
   const issues = [];
   const seenClientIds = new Set();
   const seenTargets = new Set();
@@ -5332,23 +5307,13 @@ function planAppTransaction(previousSave, master, action, { turnNumber }) {
 
     if (raw.operation === 'activate') {
       const storageStrength = validateStrength();
-      const scopeType = typeof raw.scope_type === 'string' ? raw.scope_type.trim() : '';
       if (!validateContent() || !storageStrength) continue;
-      if (!CSA_SCOPE_RANK[scopeType] || CSA_SCOPE_RANK[scopeType] > CSA_SCOPE_RANK[csaLimits.scope_type]) {
-        issues.push(appIssue(raw, 'CSA_SCOPE_LOCKED', '현재 레벨에서 사용할 수 없는 상식개변 범위입니다.', index));
-        continue;
-      }
-      const scopeId = resolveCsaScopeId(scopeType, previousSave?.world_state || {});
-      if (!scopeId) {
-        issues.push(appIssue(raw, 'LOCATION_UNAVAILABLE', '현재 위치에서 해당 범위를 설정할 수 없습니다.', index));
-        continue;
-      }
-      if (csa.some(item => item?.active && normalizeAppContent(item.content) === content && item.scope_id === scopeId)) {
+      if (csa.some(item => item?.active && normalizeAppContent(item.content) === content)) {
         issues.push(appIssue(raw, 'DUPLICATE_TARGET', '같은 범위에 동일한 활성 상식개변이 있습니다.', index));
         continue;
       }
-      csa.push({ id: nextAppCsaId(csa, turnNumber), active: true, content, strength: storageStrength, scope_type: scopeType, scope_id: scopeId, scope_label: buildAppScopeLabel(scopeId), created_turn: turnNumber });
-      canonicalOperations.push({ version: 1, client_id: raw.client_id, domain: 'csa', operation: 'activate', strength, scope_type: scopeType, content });
+      csa.push({ id: nextAppCsaId(csa, turnNumber), active: true, content, strength: storageStrength, ...normalizeCsaScope(), created_turn: turnNumber });
+      canonicalOperations.push({ version: 1, client_id: raw.client_id, domain: 'csa', operation: 'activate', strength, scope_type: 'world', content });
       continue;
     }
 
@@ -5369,28 +5334,18 @@ function planAppTransaction(previousSave, master, action, { turnNumber }) {
     }
 
     const storageStrength = validateStrength();
-    const scopeType = typeof raw.scope_type === 'string' && raw.scope_type.trim() ? raw.scope_type.trim() : target.scope_type;
     if (!validateContent() || !storageStrength) continue;
-    if (!CSA_SCOPE_RANK[scopeType] || CSA_SCOPE_RANK[scopeType] > CSA_SCOPE_RANK[csaLimits.scope_type]) {
-      issues.push(appIssue(raw, 'CSA_SCOPE_LOCKED', '현재 레벨에서 사용할 수 없는 상식개변 범위입니다.', index));
-      continue;
-    }
-    const scopeId = scopeType === target.scope_type ? target.scope_id : resolveCsaScopeId(scopeType, previousSave?.world_state || {});
-    if (!scopeId) {
-      issues.push(appIssue(raw, 'LOCATION_UNAVAILABLE', '현재 위치에서 해당 범위를 설정할 수 없습니다.', index));
-      continue;
-    }
-    if (normalizeAppContent(target.content) === content && target.strength === storageStrength && target.scope_type === scopeType) {
+    if (normalizeAppContent(target.content) === content && target.strength === storageStrength) {
       issues.push(appIssue(raw, 'NO_CHANGES', '상식개변의 실제 변경사항이 없습니다.', index));
       continue;
     }
-    if (csa.some(item => item !== target && item?.active && normalizeAppContent(item.content) === content && item.scope_id === scopeId)) {
+    if (csa.some(item => item !== target && item?.active && normalizeAppContent(item.content) === content)) {
       issues.push(appIssue(raw, 'DUPLICATE_TARGET', '같은 범위에 동일한 활성 상식개변이 있습니다.', index));
       continue;
     }
     const at = csa.indexOf(target);
-    csa[at] = { ...target, content, strength: storageStrength, scope_type: scopeType, scope_id: scopeId, scope_label: scopeType === target.scope_type ? target.scope_label : buildAppScopeLabel(scopeId), updated_turn: turnNumber };
-    canonicalOperations.push({ version: 1, client_id: raw.client_id, domain: 'csa', operation: 'update', id, strength, scope_type: scopeType, content });
+    csa[at] = { ...target, content, strength: storageStrength, ...normalizeCsaScope(), updated_turn: turnNumber };
+    canonicalOperations.push({ version: 1, client_id: raw.client_id, domain: 'csa', operation: 'update', id, strength, scope_type: 'world', content });
   }
 
   if (issues.length) return { ok: false, status: 422, error_code: 'APP_ACTION_INVALID', issues };

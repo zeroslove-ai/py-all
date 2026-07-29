@@ -1,5 +1,12 @@
 # CSA-only branch
 
+## CSA scope
+
+CSA scope is fixed to hospital-wide. Stored scope values are normalized to
+`scope_type=world`, `scope_id=world`, and `scope_label=병원 전체`.
+Location data remains available for narrative continuity and NPC tracking, but
+it is never used to validate, create, update, deactivate, or apply a CSA.
+
 - Branch: `feature/csa-only`
 - Preserved baseline: `archive/pre-csa-only` (`3e9716dd6c424dff8f850102eed76884d4e907fa`)
 - The sole app-managed gameplay effect is spatial common-sense alteration (CSA).

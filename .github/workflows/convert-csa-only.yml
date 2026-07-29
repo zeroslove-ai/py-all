@@ -7,6 +7,11 @@ on:
     paths:
       - .github/workflows/convert-csa-only.yml
       - .github/scripts/convert_csa_only.py
+  pull_request:
+    branches:
+      - feature/csa-only
+    paths:
+      - .github/scripts/csa_only_trigger.txt
   workflow_dispatch:
 
 permissions:
@@ -14,7 +19,7 @@ permissions:
 
 jobs:
   convert:
-    if: ${{ !contains(github.event.head_commit.message, 'refactor: convert game to csa-only mode') }}
+    if: ${{ github.event_name != 'push' || !contains(github.event.head_commit.message, 'refactor: convert game to csa-only mode') }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4

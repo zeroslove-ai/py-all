@@ -29,11 +29,21 @@ jobs:
           from pathlib import Path
           path = Path('.github/scripts/convert_csa_only.py')
           text = path.read_text(encoding='utf-8')
-          old = "updated, count = re.subn(pattern, replacement, text, count=1, flags=flags)"
-          new = "updated, count = re.subn(pattern, lambda _match: replacement, text, count=1, flags=flags)"
-          if old not in text:
-              raise SystemExit('sub_once implementation anchor not found')
-          path.write_text(text.replace(old, new, 1), encoding='utf-8')
+          replacements = [
+              (
+                  "updated, count = re.subn(pattern, replacement, text, count=1, flags=flags)",
+                  "updated, count = re.subn(pattern, lambda _match: replacement, text, count=1, flags=flags)"
+              ),
+              (
+                  r'r"function buildAppStrengthExampleSection\(system\) \{.*?\n\}\n\nfunction buildAppStrengthValidationPrompt\(candidates, master\) \{.*?\n\}",',
+                  r'r"function buildAppStrengthExampleSection\(system\) \{.*?(?=\n\nasync function classifyAppOperationStrengths)",'
+              )
+          ]
+          for old, new in replacements:
+              if old not in text:
+                  raise SystemExit(f'converter patch anchor not found: {old[:80]}')
+              text = text.replace(old, new, 1)
+          path.write_text(text, encoding='utf-8')
           PY
 
       - name: Apply conversion and record result

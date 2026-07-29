@@ -302,6 +302,7 @@
     .choice-btn.explicit {
       border-color: var(--warning);
     }
+    .choice-btn.bold-choice { border-color: var(--warning); }
     .choice-btn.selected { border-color: var(--accent); background: rgba(233, 69, 96, .18); }
     .choice-btn:disabled { cursor: not-allowed; opacity: .7; }
 
@@ -1102,7 +1103,7 @@
           sidebar.updateCharacter(pending.extract.character_id); sidebar.updateMind(pending.extract.npc_emotion); sidebar.renderStats(pending.extract.npc_stats, pending.extract.character_id, pending.extract.npc_stat_changes);
           prepareMedia(pending.extract);
         }
-        ui.renderGameplayChoices(pending.extract.choices, submitChoice, { setup: pending.mode === 'player_setup' });
+        ui.renderGameplayChoices(pending.extract.choices, submitChoice, { setup: pending.mode === 'player_setup', choiceMeta: state.context?.save?.last_choice_meta || [] });
         console.info('[turn-timing]', {
           turn: pending.nextTurn,
           story_first_content_ms: pending.timing?.story?.first_content_ms ?? null,
@@ -1250,7 +1251,7 @@
       const savedChoices = Array.isArray(state.context?.save?.last_choices) ? state.context.save.last_choices : [];
       const choices = savedChoices.length ? savedChoices : ui.parseChoices(state.context?.recent_memories?.at(-1)?.content || '');
       const setup = state.context?.save?.player_setup?.status !== 'complete';
-      ui.renderGameplayChoices(choices, submitChoice, { setup });
+      ui.renderGameplayChoices(choices, submitChoice, { setup, choiceMeta: state.context?.save?.last_choice_meta || [] });
       ui.showSystemMessage(message);
     }
 

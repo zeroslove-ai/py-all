@@ -1,7 +1,8 @@
 const sidebar = {
   stats: [
     { key: '호감도', label: '호감' },
-    { key: '상식수용도', label: '수용' }
+    { key: '상식수용도', label: '수용' },
+    { key: '성적민감도', label: '민감' }
   ],
   previousStats: {},
 
@@ -48,16 +49,24 @@ const sidebar = {
     document.getElementById('npc-status-title').textContent = `${character.name || characterId} 상태`;
     this.renderCharacterInfo(character);
     const relationship = context?.save?.npc_relationship_state?.[characterId] || {};
-    const playerEjaculationCount = Number.isInteger(relationship.player_ejaculation_count)
-      ? Math.max(0, relationship.player_ejaculation_count)
-      : 0;
-    const npcOrgasmCount = Number.isInteger(relationship.npc_orgasm_count)
-      ? Math.max(0, relationship.npc_orgasm_count)
-      : 0;
+    const history = relationship?.sexual_history || {};
+    const number = (key, fallback = 0) => Number.isFinite(Number(history[key])) ? Math.max(0, Number(history[key])) : fallback;
+    const playerEjaculationCount = number('player_ejaculation_count', Math.max(0, Number(relationship.player_ejaculation_count) || 0));
+    const npcOrgasmCount = number('npc_orgasm_count', Math.max(0, Number(relationship.npc_orgasm_count) || 0));
     document.getElementById('npc-relationship-title').textContent = `${character.name || characterId} 관계 기록`;
     const relationshipRoot = document.getElementById('npc-relationship');
     relationshipRoot.replaceChildren();
-    relationshipRoot.append('💦 플레이어 사정 ', this.emphasis(`${playerEjaculationCount}회`), ` · ✨ ${character.name || characterId} 오르가즘 `, this.emphasis(`${npcOrgasmCount}회`));
+    relationshipRoot.append('✨ NPC 오르가즘 ', this.emphasis(`${npcOrgasmCount}회`), ' · 💦 플레이어 사정 ', this.emphasis(`${playerEjaculationCount}회`));
+    const experience = document.createElement('div');
+    experience.textContent = `질 ${number('vaginal_sex_count')} · 항문 ${number('anal_sex_count')} · 구강 ${number('oral_sex_count')}`;
+    relationshipRoot.appendChild(experience);
+    const details = document.createElement('details');
+    const summary = document.createElement('summary'); summary.textContent = '상세 기록'; details.appendChild(summary);
+    const detail = document.createElement('div');
+    const vaginal = Number.isInteger(history.first_vaginal_turn) ? `완료 · ${history.first_vaginal_turn}턴` : '미완료';
+    const anal = Number.isInteger(history.first_anal_turn) ? `완료 · ${history.first_anal_turn}턴` : '미완료';
+    detail.textContent = `질 개통: ${vaginal}\n항문 개통: ${anal}\n질내 ${number('vaginal_ejaculation_count')} · 항문내 ${number('anal_ejaculation_count')} · 입안 ${number('oral_ejaculation_count')} · 얼굴 ${number('facial_ejaculation_count')} · 몸 ${number('body_ejaculation_count')} · 위치 미확정 ${number('unspecified_ejaculation_count')}`;
+    details.appendChild(detail); relationshipRoot.appendChild(details);
     this.renderStats(context?.save?.npc_stats?.[characterId] || {}, characterId, context?.save?.npc_stat_changes?.[characterId]);
   },
 
@@ -101,7 +110,7 @@ const sidebar = {
     root.append(document.createTextNode(' · '));
     const resistanceNode = document.createElement('span');
     resistanceNode.className = 'stat-value';
-    resistanceNode.textContent = `상식저항력 ${Math.max(0, Math.min(100, resistance))}`;
+    resistanceNode.textContent = `저항 ${Math.max(0, Math.min(100, resistance))}`;
     root.append(resistanceNode);
     if (characterId) this.previousStats[characterId] = next;
   },

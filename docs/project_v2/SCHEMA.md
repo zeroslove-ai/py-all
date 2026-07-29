@@ -123,6 +123,18 @@ create table game_save (
 }
 ```
 
+CSA-only runtime additions inside `game_save.data` (no database column or migration):
+
+```json
+{
+  "npc_stats": {"heroine1": {"호감도": 0, "상식수용도": 0, "성적흥분도": 0}},
+  "npc_relationship_state": {"heroine1": {"intimacy_state": {"stage": "none", "active_boundaries": [], "recent_refusal": null, "last_explicit_consent": null, "updated_turn": 0}}},
+  "csa_aftereffect_state": {}
+}
+```
+
+`npc_stats[*].성적민감도` is legacy JSONB retained for compatibility only. New Worker logic ignores it; fixed `성적민감도초기` is read from the character master solely to scale physical arousal changes. These are JSONB payload additions only: no DB column, RPC, or migration changes are required.
+
 `turn_count`는 JSONB 안에 중복 저장하지 않는다.
 
 ### `csa_active` 프리셋 필드 (2026-07 추가, 마이그레이션 없음)

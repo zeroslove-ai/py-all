@@ -97,7 +97,7 @@ const LEGACY_MENTAL_EFFECT_PATTERNS = [
 function csaOnlyNpcStats(stats = {}) {
   if (!isPlainObject(stats)) return {};
   const result = {};
-  for (const key of ['호감도', '상식수용도', '성적민감도']) {
+  for (const key of ['호감도', '상식수용도', '성적흥분도']) {
     const value = Number(stats[key]);
     if (Number.isFinite(value)) result[key] = Math.max(0, Math.min(100, value));
   }
@@ -107,7 +107,7 @@ function csaOnlyNpcStats(stats = {}) {
 function csaOnlyNpcStatChanges(changes = {}) {
   if (!isPlainObject(changes)) return {};
   return Object.fromEntries(Object.entries(changes)
-    .filter(([key]) => key === '호감도' || key === '상식수용도' || key === '성적민감도'));
+    .filter(([key]) => key === '호감도' || key === '상식수용도' || key === '성적흥분도'));
 }
 
 function sanitizeLegacyMentalEffectText(value) {
@@ -157,10 +157,6 @@ function buildCsaOnlyEffectiveSave(save = {}, master = {}) {
     const next = { ...stats };
     if (!Number.isFinite(Number(next['상식수용도']))) {
       next['상식수용도'] = Math.max(0, Math.min(100, 100 - resolveCsaResistance(characters[characterId] || {})));
-    }
-    if (!Number.isFinite(Number(next['성적민감도']))) {
-      const initial = Number(characters[characterId]?.['성적민감도초기']);
-      next['성적민감도'] = Number.isFinite(initial) ? Math.max(0, Math.min(100, initial)) : 30;
     }
     return [characterId, next];
   }));
@@ -1322,6 +1318,26 @@ async function handleStory(req, env) {
     if (structured_action.type === 'app_transaction') structuredPlan.canonical_action = structured_action;
   }
   const resolvedPlayerInput = structuredPlan?.ok ? structuredPlan.display_input : resolveMarkerChoiceInput(player_input, ctx?.save?.last_choices);
+  const effectiveSave = buildStructuredEffectiveSave(ctx?.save, structuredPlan);
+  const effectiveCtx = { ...ctx, save: effectiveSave, __structured_effective_save: true };
+  const sexualGate = !structuredPlan
+    ? resolveSexualActionGate({
+      save: effectiveSave,
+      master: ctx?.master || {},
+      characterId: effectiveSave?.last_character_id || '',
+      playerInput: resolvedPlayerInput,
+      currentLocation: effectiveSave?.world_state?.location_label || ''
+    })
+    : null;
+  if (sexualGate?.route === 'csa_direct') sexualGate.success = true;
+  if (sexualGate?.route === 'blocked') sexualGate.success = false;
+  if (sexualGate?.route === 'voluntary_eligible') {
+    const source = `${game_id}:${currentTurn + 1}:sexual:${resolvedPlayerInput}`;
+    let hash = 2166136261;
+    for (let i = 0; i < source.length; i += 1) hash = Math.imul(hash ^ source.charCodeAt(i), 16777619);
+    sexualGate.roll = (hash >>> 0) % 100 + 1;
+    sexualGate.success = sexualGate.roll <= sexualGate.success_rate;
+  }
   const boldChoiceAttempt = !structuredPlan
     ? resolveBoldChoiceAttempt(ctx?.save || {}, ctx?.master || {}, resolvedPlayerInput, game_id, currentTurn + 1)
     : null;
@@ -1339,8 +1355,6 @@ async function handleStory(req, env) {
     }));
   }
   const promptStart = Date.now();
-  const effectiveSave = buildStructuredEffectiveSave(ctx?.save, structuredPlan);
-  const effectiveCtx = { ...ctx, save: effectiveSave, __structured_effective_save: true };
   let prompt;
   try {
     prompt = buildStoryPrompt(
@@ -1349,7 +1363,8 @@ async function handleStory(req, env) {
       currentTurn,
       feedback,
       regeneration_feedback,
-      structuredPlan
+      structuredPlan,
+      sexualGate
     );
     if (boldChoiceAttempt) {
       prompt.messages[0].content += `\n\n[BOLD CHOICE RESOLUTION — ESTABLISHED FACT]\n예상 성공률 ${boldChoiceAttempt.success_rate}%, 판정 ${boldChoiceAttempt.success ? '성공' : '실패'} (roll ${boldChoiceAttempt.roll}). 시도는 반드시 서사에 반영하되, ${boldChoiceAttempt.success ? '목표 행동을 자연스럽게 완료할 수 있다.' : '목표 행동을 그대로 성공시키지 말고 거절·부분 성공·갈등·새 정보 중 자연스러운 결과로 진행한다.'}`;
@@ -2570,7 +2585,7 @@ async function runCommitPipeline(env, { game_id, turn_number, content: rawConten
   // into state.context.save right after commit instead of showing stale
   // pre-commit values until the next full /api/context reload.
   const statePatch = {};
-  for (const key of ['player_progress', 'csa_active', 'world_state', 'player_location', 'npc_locations', 'npc_emotion', 'npc_stats', 'npc_stat_changes', 'npc_relationship_state', 'last_character_id', 'last_npcs_present', 'last_choices', 'last_choice_meta']) {
+  for (const key of ['player_progress', 'csa_active', 'world_state', 'player_location', 'npc_locations', 'npc_emotion', 'npc_stats', 'npc_stat_changes', 'npc_relationship_state', 'csa_aftereffect_state', 'last_character_id', 'last_npcs_present', 'last_choices', 'last_choice_meta']) {
     if (key in patch) statePatch[key] = patch[key];
   }
 
@@ -3135,7 +3150,7 @@ function buildGeneralActionJudgmentSection() {
 [일반 행동 판정]
 - 플레이어 입력은 시도이며 NPC의 반응·동의·감정·관계·과거·오르가즘·스탯을 확정하지 않는다.
 - 일상 대화·업무 행동은 특별한 방해가 없으면 자연스럽게 진행한다. 부담 있는 부탁·설득·친밀 행동은 호감도, 성격·관계·장소·직전 사건으로 성공·부분 성공·실패를 판단한다. 상식개변 수용도는 현재 적용 중인 상식개변의 자발적·협조적 실행에만 영향을 주며 호감·동의·관계 수치를 대신하지 않는다.
-- 강압적·성적·위험한 행동은 명확한 자발적 참여나 직접 관련된 현재 장소의 상식개변이 없으면 성공시키지 않는다.
+- 직접 관련 CSA가 없는 성기 노출·성기 접촉·구강성교·삽입·공개 성행위는 기본적으로 매우 어려운 행동이다. 저장된 친밀 단계와 현재 경계가 선행 조건을 충족하지 않으면 성공률 0이며 완료하지 않는다. 호감도는 거절의 태도와 관계 대화 가능성에만 영향을 주며 성행위 성공률을 올리지 않는다.
 - 상식개변은 적힌 직접 범위 밖의 복종·성적 행동·관계·기억 효과로 확장하지 않는다.`;
 }
 
@@ -3197,7 +3212,7 @@ function buildCsaWeakSynergySection() {
 - 한 규범에 없는 행동을 다른 규범의 분위기만으로 새로 만들지 않는다.
 - 서로 다른 규범이 자세·접촉·복장·지속을 각각 허용하면 한 장면에서 함께 나타낼 수 있다.
 - 어느 규범도 직접 성행위를 허용하지 않으면 NPC가 자동으로 성행위를 시작하지 않는다.
-- 플레이어가 추가 행동을 시도하면 호감도·성격·관계·과감 판정으로 별도 처리한다.
+- 플레이어가 CSA 직접 범위 밖의 성적 행동을 시도하면 성적 행동 관문으로 별도 처리한다. 호감도·성적흥분도만으로 완료하지 않는다. 비성적 친밀 행동만 기존 일반 관계 판정을 사용한다.
 - 약함 시너지는 자동 강도 승격이 아니라 직접 허용된 요소의 동시 실행이다.`;
 }
 
@@ -3495,7 +3510,30 @@ function buildNpcDialogueMinimumSection() {
 }
 
 function buildMoanVocalReactionSection() {
-  return `\n\n[MOAN AND VOCAL REACTION — FLEXIBLE]\n- 실제 성적 자극이 지속되는 장면에서는 NPC의 숨, 신음, 떨림, 끊어진 말, 감정 표현을 장면 강도와 성적민감도에 맞게 자연스럽게 충분히 묘사한다.\n- 고정된 단계별 횟수·최소 대사 수는 없다. 정상 대사와 관찰 가능한 신체 반응 사이에 분산하고 같은 음절·문장을 반복하지 않는다.\n- 단순 접촉이나 가벼운 업무 장면을 절정으로 과장하지 않으며, 절정은 실제 완료 장면에서만 묘사한다.\n- 신음만 나열하지 말고 현재 감정, 판단, 망설임, 반응을 담은 대사를 남긴다. 직접 발화는 기존 화자명과 연기지시 형식을 따른다.\n- 성적민감도는 반응의 빠르기와 강도만 보조하며 동의·호감·복종을 보장하지 않는다.`;
+  return `\n\n[MOAN AND VOCAL REACTION — FLEXIBLE]\n- 실제 성적 자극이 지속되는 장면에서는 NPC의 숨, 신음, 떨림, 끊어진 말, 감정 표현을 장면 강도와 고정 성향 성적민감도초기에 맞게 자연스럽게 묘사한다.\n- 현재 성적흥분도는 신체 반응일 뿐 동의·호감·복종을 보장하지 않는다.\n- 단순 접촉이나 가벼운 업무 장면을 절정으로 과장하지 않으며, 절정은 실제 완료 장면에서만 묘사한다.\n- 신음만 나열하지 말고 현재 감정, 판단, 망설임, 반응을 담은 대사를 남긴다. 직접 발화는 기존 화자명과 연기지시 형식을 따른다.`;
+}
+
+function buildSexualAgencyAndConsentSection() {
+  return `\n\n[SEXUAL AGENCY AND CONSENT — HIGHEST PRIORITY]\n- 호감도는 애정과 관계 감정이며 성적 동의가 아니다. 성적흥분도는 신체 반응이며 성적 동의가 아니다.\n- 높은 호감도·흥분도·과거 성행위 경험만으로 현재 성행위를 완료하지 않는다.\n- 활성 CSA가 직접 허용한 행동은 그 정확한 범위에서만 수행하고, CSA 때문에 수행한 행동을 사랑·자발적 관계 발전·현재 동의로 바꾸지 않는다.\n- 직접 관련 CSA가 없으면 저장된 친밀 단계, 현재 경계, 최근 거절, 이번 장면의 명시적 자발성을 모두 확인한다. 플레이어 입력은 행동 시도이며 동의나 성공 결과를 확정하지 않는다.\n- 관문이 blocked이면 요청한 성행위를 완료하지 않는다. voluntary_eligible이라도 NPC의 명확한 현재 동의를 먼저 표현한 뒤에만 완료한다. 거절하면서 신체 반응을 보일 수 있으며 그것은 거절을 무효화하지 않는다.\n- 관문상 0%인 성적 행동을 선택지로 적극 추천하지 말고, 동의 확인·관계 대화·사적 장소 이동을 우선 제안한다.`;
+}
+
+function buildCurrentIntimacyStateSection(save = {}, characterId = '') {
+  if (!characterId || characterId === 'narrator') return '';
+  const state = normalizeIntimacyState(save?.npc_relationship_state?.[characterId]?.intimacy_state);
+  return `\n\n[CURRENT NPC INTIMACY STATE — ESTABLISHED FACT]\n- stage: ${state.stage}\n- active boundaries: ${state.active_boundaries.join(', ') || 'none'}\n- recent refusal: ${state.recent_refusal?.action || 'none'}\n- past consent is this-turn-only and never creates automatic future consent.`;
+}
+
+function buildCurrentSexualGateSection(gate = null) {
+  if (!gate || gate.route === 'not_sexual') return '';
+  const direct = gate.direct_csa_ids?.length ? gate.direct_csa_ids.join(', ') : '없음';
+  return `\n\n[CURRENT SEXUAL ACTION GATE — ESTABLISHED FACT]\n- 분류: ${gate.action}\n- 경로: ${gate.route}\n- 완료 허용: ${gate.completion_allowed === true}\n- 성공률: ${gate.success_rate}%\n- 현재 친밀 단계: ${gate.stage}\n- 차단 경계: ${gate.blocking_boundaries?.join(', ') || '없음'}\n- 직접 허용 CSA: ${direct}\n${gate.route === 'blocked' || gate.success === false ? '- 이번 턴에는 요청한 성행위를 완료하지 않는다. 거절·경계 확인·대화·거리 조절만 가능하다.' : ''}${gate.route === 'voluntary_eligible' && gate.success === true ? '\n- 이번 턴에는 NPC의 명확한 현재 동의를 먼저 서술한 뒤에만 행동을 완료한다.' : ''}${gate.route === 'csa_direct' ? `\n- 허용 범위: ${gate.exact_scope || '직접 CSA의 정확한 범위'}\n- 이 범위를 일반 성행위·연애·복종으로 확장하지 않는다.` : ''}`;
+}
+
+function buildCsaAftereffectStorySection(save = {}, characterId = '') {
+  const entries = Object.values(save?.csa_aftereffect_state?.[characterId] || {}).filter(isPlainObject);
+  if (!entries.length) return '';
+  const phases = entries.map(item => `${item.phase}:${item.canonical_content || '해제된 규범'}`).join('\n- ');
+  return `\n\n[CSA DEACTIVATION AFTEREFFECT — ESTABLISHED FACT]\n- 해제된 규범의 당연함은 사라졌지만 기억과 현재 물리 상태는 유지된다. 기억상실·시간 공백·자동 복장은 금지한다.\n- 현재 후유증: \n- ${phases}\n- shock은 즉시 인식과 행동 중단/정리/거리 조절, processing은 재평가와 경계 대화, integrated는 기억은 남되 같은 충격을 반복하지 않는 상태다.`;
 }
 
 function buildAntiRepetitionSection() {
@@ -3512,7 +3550,7 @@ function buildRegenerationFeedbackSection(regenerationFeedback) {
   return `\n\n[USER FEEDBACK — HIGHEST PRIORITY FOR REGENERATION]\n- 아래 피드백은 직전 생성 결과의 오류를 바로잡기 위한 사용자 정정이다.\n- 피드백 내용을 이번 턴의 최우선 사실로 적용한다.\n- 이전에 생성됐다가 취소된 마지막 턴의 내용은 존재하지 않는 것으로 취급한다.\n- 원래 플레이어 행동은 유지하되, 피드백과 충돌하는 묘사는 만들지 않는다.\n\n[피드백 내용]\n${text}`;
 }
 
-function buildStoryPrompt(ctx, playerInput, currentTurn, feedback = [], regenerationFeedback = null, structuredPlan = null) {
+function buildStoryPrompt(ctx, playerInput, currentTurn, feedback = [], regenerationFeedback = null, structuredPlan = null, sexualGate = null) {
   ctx = withSetupCompatibility(ctx);
   const master = ctx?.master || {};
   const rawSave = ctx?.__structured_effective_save === true
@@ -3642,6 +3680,10 @@ ${recentMemorySlice.map((m, index) => clipHeadTail(sanitizeRecentNarrativeForPro
   const csaPublicSceneSection = csaSection ? buildCsaPublicSceneSection() : '';
   const csaWeakSynergySection = getApplicableCsaEntries(save, activeCsa).length > 1 ? buildCsaWeakSynergySection() : '';
   const relationshipInterpretationSection = buildRelationshipInterpretationSection();
+  const sexualAgencySection = buildSexualAgencyAndConsentSection();
+  const intimacyStateSection = buildCurrentIntimacyStateSection(save, save.last_character_id);
+  const sexualGateSection = buildCurrentSexualGateSection(sexualGate);
+  const csaAftereffectSection = buildCsaAftereffectStorySection(save, save.last_character_id);
   const csaAcceptanceScopeSection = buildCsaAcceptanceScopeSection();
   const mindEffectBoundarySection = buildMindEffectBoundarySection({
     hasApplicableCsa: Boolean(csaSection)
@@ -3696,7 +3738,7 @@ ${recentMemorySlice.map((m, index) => clipHeadTail(sanitizeRecentNarrativeForPro
   // everything above it, including [최근 기억]'s now-stale account of the
   // turn that was just rolled back.
   const regenerationFeedbackSection = buildRegenerationFeedbackSection(regenerationFeedback);
-  const systemPrompt = (coreRules + playerGate + modeSection + rulebookSection + openingScenarioSection + appUsageSection + eligibleNpcRosterSection + buildCsaRuntimeSection() + buildGeneralActionJudgmentSection() + relationshipInterpretationSection + csaAcceptanceScopeSection + buildCsaDeactivationNarrativeRule() + currentSceneSection + hospitalLocationMemorySection + npcProfileSection + relationshipMemorySection + sexualHistorySection + explicitMentionSection + csaSection + csaPersistentSceneSection + csaPublicSceneSection + csaWeakSynergySection + mindEffectBoundarySection + physicalSceneStateSection + narrativeLengthSection + narrativeParagraphSection + npcDialogueSection + moanVocalReactionSection + antiRepetitionSection + playerStatusPanel + contextSection + feedbackSection + continuitySection + finalFormatRules + openingFlow + playerSetupReminder + registeredNpcChoiceReminder + choiceLengthReminder + buildAddressAbbreviationSection() + regenerationFeedbackSection + buildStructuredActionStorySection(structuredPlan, save, activeCsa) + playerAttemptSection)
+  const systemPrompt = (coreRules + playerGate + modeSection + rulebookSection + openingScenarioSection + appUsageSection + eligibleNpcRosterSection + buildCsaRuntimeSection() + buildGeneralActionJudgmentSection() + sexualAgencySection + relationshipInterpretationSection + csaAcceptanceScopeSection + buildCsaDeactivationNarrativeRule() + currentSceneSection + hospitalLocationMemorySection + npcProfileSection + intimacyStateSection + sexualGateSection + csaAftereffectSection + relationshipMemorySection + sexualHistorySection + explicitMentionSection + csaSection + csaPersistentSceneSection + csaPublicSceneSection + csaWeakSynergySection + mindEffectBoundarySection + physicalSceneStateSection + narrativeLengthSection + narrativeParagraphSection + npcDialogueSection + moanVocalReactionSection + antiRepetitionSection + playerStatusPanel + contextSection + feedbackSection + continuitySection + finalFormatRules + openingFlow + playerSetupReminder + registeredNpcChoiceReminder + choiceLengthReminder + buildAddressAbbreviationSection() + regenerationFeedbackSection + buildStructuredActionStorySection(structuredPlan, save, activeCsa) + playerAttemptSection)
     .replaceAll('상식개변 어플', '상식개변 앱');
 
   return {
@@ -3769,7 +3811,7 @@ function buildExtractPrompt(narrativeText, playerInput, ctx, images, turnCount, 
 
   return `너는 플레이 LLM이 방금 쓴 서사와 플레이어의 원본 입력을 읽고, 저장/이미지/음성에 필요한 값만 구조화하는 역할이다. NPC 수치만은 아래 delta 계약에 따라 이번 턴의 실제 변화와 근거를 판단한다. 유효한 JSON 객체 하나만 출력한다. 마크다운 코드펜스와 설명문을 절대 쓰지 마라.
 
-성적민감도는 이번 최종 Story에서 현재 NPC에게 실제 완료된 신체적 성적 반응이 있을 때만 0~+4 한 번으로 제안하며, 호감·동의·CSA 존재만으로 올리지 않는다. sexual_events에는 이번 턴에 실제 완료된 사건만 넣고 누적 카운터나 과거 경험은 절대 반환하지 않는다. 플레이어 사정 이벤트는 이번 입력에 명시적 사정 지시가 있고 Story가 완료를 서술한 경우만 반환한다.
+arousal_event는 이번 최종 Story의 실제 신체적 성적 반응이 있을 때만 {active:true, intensity:low|medium|high|climax, evidence}로 반환한다. 노출·호감·CSA 존재·플레이어 입력 선언만으로 만들지 않는다. 성적흥분도 수치는 Worker만 계산한다. sexual_events에는 이번 턴에 실제 완료된 사건만 넣고 누적 카운터나 과거 경험은 절대 반환하지 않는다. 플레이어 사정 이벤트는 이번 입력에 명시적 사정 지시가 있고 Story가 완료를 서술한 경우만 반환한다.
 
 [입력과 결과]
 player_input은 플레이어의 말과 행동 의도를 보여주는 자료일 뿐이며, NPC와 세계의 실제 결과는 Story 본문만 근거로 한다. 입력에 적힌 감정·관계·과거·취향·성공·횟수를 복사하지 않는다. 정식 상식개변 상태는 signed structured action 결과만 사용한다. 거부·부분 성공·실패에서는 긍정 수치를 올리지 않는다.
@@ -3832,6 +3874,7 @@ npc_stat_changes에는 호감도와 상식개변 수용도만 반환한다. 호�
 [CURRENT NPC RELATIONSHIP RECORD]
 sexual_events에는 현재 장면의 등록 NPC에게 실제로 완료된 사건만 넣는다. 시도·직전·실패·가짜·상상·회상·다른 NPC 사건은 넣지 않는다. 누적 수치와 npc_relationship_state는 반환하지 않는다.
 relationship_memory_patch는 최종 Story에서 실제로 완료된 중요한 관계 사건이 있을 때만 현재 메인 NPC에 대해 {character_id, text, permanent} 형태로 최대 2개 반환한다. character_id는 현재 메인 NPC ID를 정확히 쓴다. permanent:true는 첫 키스·첫 질/구강/항문 삽입·첫 질내 사정 또는 임신 가능 사건, 결혼·이혼·임신·출산·가족관계 변화, 중대한 배신·용서·고백·약속처럼 관계를 영구적으로 바꾼 완료 사건에만 쓴다. 애매하면 false다. 플레이어 입력만의 결과 선언, 실패·추측·감정 과장, 매 턴 반복되는 일반 사실은 넣지 않는다. 정신 효과 중 실제 완료된 객관적 사건은 저장할 수 있지만, 효과 수행만으로 NPC의 진심·영구 취향·일반 복종·완전한 동의가 되었다는 해석은 저장하지 않는다.
+npc_intimacy_state_patch는 이번 턴에 실제로 생긴 현재 NPC의 관계 변화만 반환한다. CSA 직접 수행으로 생긴 키스·성적 접촉·성행위는 stage 상승이나 explicit_consent로 반환하지 않는다. stage는 명시적 자발성과 완료된 Story 근거가 있을 때만 none|romantic_interest|kissed|sexual_touch|oral|intercourse 중 하나다. 경계와 최근 거절은 명시적 대화·합의·거절 근거가 있을 때만 바꾼다.
 
 [NPC PHYSICAL SCENE STATE PATCH]
 npc_scene_state_patch는 최종 Story에서 등록 NPC가 실제로 옷을 입거나 벗고, 열고 잠그고, 올리거나 내리고, 갈아입거나 자세를 바꾼 완료 사건만 반영한다. 플레이어 입력만의 선언, 실패·시도·계획, 상식개변의 생성·해제만으로는 반환하지 않는다. 기존 상태를 유지할 키는 생략하고, 등록 NPC·허용 enum만 사용한다.
@@ -3894,6 +3937,8 @@ ${JSON.stringify(imageCatalog)}
   "csa_runtime_updates": [{"csa_id": "필수 행동이 실제로 시작·계속·종료된 프리셋 CSA의 내부 ID", "character_id": "그 행동을 수행한 등록 NPC ID", "target_type": "player 또는 대상 구분, 없으면 생략", "status": "active|ended", "action_state": "짧은 행동 상태, 없으면 생략", "position_label": "관찰 가능한 현재 자세 한 문장, 없으면 생략", "reason": "짧은 근거"}],
   "sexual_events": [{"character_id": "현재 등장한 등록 NPC ID", "type": "vaginal_penetration|anal_penetration|oral_sex|npc_orgasm|player_orgasm|vaginal_ejaculation|anal_ejaculation|oral_ejaculation|facial_ejaculation|body_ejaculation|unspecified_ejaculation", "completed": true, "evidence": "이번 최종 Story에서 실제 완료된 짧은 근거"}],
   "relationship_memory_patch": [{"character_id": "현재 메인 NPC ID", "text": "최종 Story에서 실제 완료된 중요한 관계 사건의 짧은 사실", "permanent": false}],
+  "arousal_event": null,
+  "npc_intimacy_state_patch": null,
   "npc_scene_state_patch": {"heroine1": {"clothing": {"uniform_top": "worn|removed|open|unknown", "uniform_bottom": "worn|removed|open|unknown", "underwear_top": "worn|removed|unknown", "underwear_bottom": "worn|removed|unknown"}, "posture": "standing|sitting|kneeling|lying|unknown", "current_action": "실제 현재 행동, 없으면 생략"}},
   "player_scene_state_patch": {"posture": "standing|sitting|kneeling|lying_supine|lying_prone|side_lying|straddling|bent_forward|leaning|walking|crouching|carrying|unknown", "position_label": "최종 Story에서 실제 완료된 플레이어의 현재 자세/방향, 없으면 생략"},
   "turn_summary": "이번 턴에서 변한 핵심 사실 1~3문장",
@@ -4087,6 +4132,8 @@ function normalizeRegisteredNpcExtract(extract = {}, characters = {}, lastCharac
     normalized.npc_relationship_state = null;
     normalized.sexual_events = [];
     normalized.relationship_memory_patch = [];
+    normalized.arousal_event = null;
+    normalized.npc_intimacy_state_patch = null;
     normalized.npc_scene_state_patch = {};
     normalized.player_scene_state_patch = null;
     normalized.image_id = null;
@@ -4224,10 +4271,11 @@ function buildSavePatch(extract, enginePatch = {}, summaryPlan = null, previousS
     const firstEncounterStats = !structured && !legacy ? normalizeFirstEncounterStats(extract.first_encounter_stats) : null;
     const character = isPlainObject(master?.characters?.[characterId]) ? master.characters[characterId] : {};
     const resistance = resolveCsaResistance(character);
+    const priorStats = previousSave?.npc_stats?.[characterId] || {};
     let workerStatChangeInput = {
       호감도: extract.npc_stat_changes?.호감도 || { delta: 0, reason: '' },
       상식수용도: extract.npc_stat_changes?.상식수용도 || { delta: 0, reason: '' },
-      성적민감도: extract.npc_stat_changes?.성적민감도 || { delta: 0, reason: '' }
+      성적흥분도: { delta: 0, reason: '' }
     };
     const currentSceneCsa = getApplicableCsaEntries({ ...previousSave, world_state: mergedWorldState });
     const currentSceneHasCsa = !degraded
@@ -4250,21 +4298,20 @@ function buildSavePatch(extract, enginePatch = {}, summaryPlan = null, previousS
       };
     }
 
-    if (!degraded && !extract.sexual_events?.length) workerStatChangeInput.성적민감도 = { delta: 0, reason: '' };
+    const arousal = calculateArousalStatChange(priorStats, character, degraded ? null : extract.arousal_event, {
+      sceneChanged: Boolean(worldStatePatch)
+    });
+    workerStatChangeInput.성적흥분도 = arousal.change;
     const statChangeInput = firstEncounterStats
       ? { ...workerStatChangeInput, 호감도: { delta: 0, reason: '' }, 상식수용도: { delta: 0, reason: '' } }
       : workerStatChangeInput;
-    const priorStats = previousSave?.npc_stats?.[characterId] || {};
     const statUpdate = applyNpcStatChanges(priorStats, statChangeInput);
     if (!Number.isFinite(Number(priorStats['상식수용도']))) {
       statUpdate.stats['상식수용도'] = Math.max(0, Math.min(100, 100 - resistance));
       statUpdate.changes['상식수용도'] = { delta: 0, reason: '' };
     }
-    if (!Number.isFinite(Number(priorStats['성적민감도']))) {
-      const initialSensitivity = Number(character?.['성적민감도초기']);
-      statUpdate.stats['성적민감도'] = Number.isFinite(initialSensitivity) ? Math.max(0, Math.min(100, initialSensitivity)) : 30;
-      statUpdate.changes['성적민감도'] = { delta: 0, reason: '' };
-    }
+    statUpdate.stats['성적흥분도'] = arousal.next;
+    statUpdate.changes['성적흥분도'] = arousal.change;
     if (statUpdate.errors.length) console.warn('NPC stat delta rejected:', { characterId, errors: statUpdate.errors });
 
     if (firstEncounterStats) {
@@ -4283,18 +4330,20 @@ function buildSavePatch(extract, enginePatch = {}, summaryPlan = null, previousS
       updated_turn: turnNumber
     };
     patch.npc_emotion = { [characterId]: normalizedEmotion };
-    if (!degraded && (extract.sexual_events?.length || extract.relationship_memory_patch?.length)) {
+    if (!degraded && (extract.sexual_events?.length || extract.relationship_memory_patch?.length || extract.npc_intimacy_state_patch)) {
       const previousRelationship = isPlainObject(previousSave?.npc_relationship_state?.[characterId])
         ? previousSave.npc_relationship_state[characterId]
         : {};
       const npcSwitchTurn = previousSave?.last_character_id !== characterId;
+      const sexualGate = resolveSexualActionGate({ save: { ...previousSave, world_state: mergedWorldState }, master, characterId, playerInput, currentLocation: mergedWorldState.location_label || '' });
       const sexual = applySexualEvents(previousRelationship, extract.sexual_events, turnNumber, {
         playerInput,
         narrativeText,
         characterId,
         npcsPresent: Array.isArray(extract.npcs_present) ? extract.npcs_present : [],
         characters: master?.characters || {},
-        npcSwitchTurn
+        npcSwitchTurn,
+        sexualGate
       });
       const relationshipMemoryPatch = filterCurrentRelationshipMemoryPatch(extract.relationship_memory_patch, {
         characterId,
@@ -4305,13 +4354,21 @@ function buildSavePatch(extract, enginePatch = {}, summaryPlan = null, previousS
         npcSwitchTurn
       });
       const hasExistingRelationship = Object.keys(previousRelationship).length > 0;
-      if (!hasExistingRelationship && sexual.accepted === 0 && relationshipMemoryPatch.length === 0) {
+      const intimacyState = mergeIntimacyState(previousRelationship.intimacy_state, extract.npc_intimacy_state_patch, {
+        characterId,
+        npcsPresent: Array.isArray(extract.npcs_present) ? extract.npcs_present : [],
+        narrativeText,
+        gate: sexualGate,
+        turnNumber
+      });
+      const hasIntimacyPatch = Boolean(extract.npc_intimacy_state_patch?.character_id === characterId);
+      if (!hasExistingRelationship && sexual.accepted === 0 && relationshipMemoryPatch.length === 0 && !hasIntimacyPatch) {
         // A new NPC cannot inherit a flat or inferred relationship record from another NPC.
       } else {
       const merged = normalizeRelationshipState(previousRelationship, {
         player_ejaculation_count: sexual.history.player_ejaculation_count,
         npc_orgasm_count: sexual.history.npc_orgasm_count
-      }, turnNumber, relationshipMemoryPatch, sexual.accepted > 0);
+      }, turnNumber, relationshipMemoryPatch, sexual.accepted > 0, intimacyState);
       merged.sexual_history = sexual.history;
       merged.sexual_events = sexual.sexual_events;
       patch.npc_relationship_state = { [characterId]: merged };
@@ -4427,6 +4484,8 @@ function buildSavePatch(extract, enginePatch = {}, summaryPlan = null, previousS
     const npcsPresentForRuntime = Array.isArray(extract.npcs_present) ? extract.npcs_present : [];
     const runtimeStatePatch = buildCsaRuntimeStatePatch(previousSave, extract.csa_runtime_updates, finalActiveCsa, npcsPresentForRuntime, turnNumber);
     if (runtimeStatePatch) patch.csa_runtime_state = runtimeStatePatch;
+    const aftereffectPatch = buildCsaAftereffectPatch(previousSave, structuredPlan, npcsPresentForRuntime, turnNumber);
+    if (aftereffectPatch) patch.csa_aftereffect_state = aftereffectPatch;
   }
   const choiceSave = {
     ...previousSave,
@@ -4434,7 +4493,8 @@ function buildSavePatch(extract, enginePatch = {}, summaryPlan = null, previousS
     csa_active: patch.csa_active ?? previousSave?.csa_active,
     world_state: patch.world_state ?? previousSave?.world_state,
     npc_stats: { ...(previousSave?.npc_stats || {}), ...(patch.npc_stats || {}) },
-    npc_emotion: { ...(previousSave?.npc_emotion || {}), ...(patch.npc_emotion || {}) }
+    npc_emotion: { ...(previousSave?.npc_emotion || {}), ...(patch.npc_emotion || {}) },
+    npc_relationship_state: { ...(previousSave?.npc_relationship_state || {}), ...(patch.npc_relationship_state || {}) }
   };
   patch.last_choice_meta = buildChoiceMeta(patch.last_choices, choiceSave, master, turnNumber, {
     allowBold: !degraded && !isStructuredAppTransaction && characterId && characterId !== 'narrator'
@@ -4529,6 +4589,27 @@ function hasSpeakableTtsContent(text) {
   return /[^\s.,!?~\-–—…]/u.test(text || '');
 }
 
+function normalizeArousalEvent(value) {
+  if (!isPlainObject(value) || value.active !== true || !['low', 'medium', 'high', 'climax'].includes(value.intensity)) return null;
+  const evidence = typeof value.evidence === 'string' ? value.evidence.trim().replace(/\s+/g, ' ').slice(0, 180) : '';
+  return evidence ? { active: true, intensity: value.intensity, evidence } : null;
+}
+
+function normalizeNpcIntimacyStatePatch(value) {
+  if (!isPlainObject(value) || typeof value.character_id !== 'string' || !value.character_id.trim()) return null;
+  const result = { character_id: value.character_id.trim(), stage: null, add_boundaries: [], remove_boundaries: [], recent_refusal: null, explicit_consent: null };
+  if (Object.prototype.hasOwnProperty.call(INTIMACY_STAGE_RANK, value.stage)) result.stage = value.stage;
+  result.add_boundaries = [...new Set((Array.isArray(value.add_boundaries) ? value.add_boundaries : []).filter(item => INTIMACY_BOUNDARIES.has(item)))];
+  result.remove_boundaries = [...new Set((Array.isArray(value.remove_boundaries) ? value.remove_boundaries : []).filter(item => INTIMACY_BOUNDARIES.has(item)))];
+  for (const key of ['recent_refusal', 'explicit_consent']) {
+    const item = value[key];
+    if (!isPlainObject(item) || !Object.prototype.hasOwnProperty.call(SEXUAL_ACTION_RANK, item.action)) continue;
+    const evidence = typeof item.evidence === 'string' ? item.evidence.trim().replace(/\s+/g, ' ').slice(0, 180) : '';
+    if (evidence) result[key] = { action: item.action, evidence, ...(key === 'recent_refusal' && typeof item.reason === 'string' ? { reason: item.reason.trim().slice(0, 120) } : {}) };
+  }
+  return result;
+}
+
 function normalizeExtract(extract) {
   const normalized = extract && typeof extract === 'object' ? { ...extract } : {};
   if (normalized.image_id !== null && normalized.image_id !== undefined) {
@@ -4546,6 +4627,8 @@ function normalizeExtract(extract) {
   if (!isPlainObject(normalized.player_recommendation)) normalized.player_recommendation = null;
   if (!Array.isArray(normalized.player_recommendations)) normalized.player_recommendations = [];
   normalized.is_sexual = normalized.is_sexual === true;
+  normalized.arousal_event = normalizeArousalEvent(normalized.arousal_event);
+  normalized.npc_intimacy_state_patch = normalizeNpcIntimacyStatePatch(normalized.npc_intimacy_state_patch);
   if (typeof normalized.turn_summary !== 'string') normalized.turn_summary = '';
   normalized.csa_omission = Array.isArray(normalized.csa_omission)
     ? normalized.csa_omission.filter(item => typeof item === 'string' && item.trim())
@@ -4599,7 +4682,29 @@ function filterMainNpcDialogue(extract, characters) {
   }).map(line => ({ speaker: mainName, text: line.text.trim(), direction: typeof line.direction === 'string' && line.direction.trim() ? line.direction.trim() : 'neutral' }));
 }
 
-function normalizeRelationshipState(previous = {}, patch = {}, turnNumber = 0, relationshipMemoryPatch = [], isSexual = false) {
+function mergeIntimacyState(previous = {}, rawPatch = null, { characterId = '', npcsPresent = [], narrativeText = '', gate = null, turnNumber = 0 } = {}) {
+  const current = normalizeIntimacyState(previous);
+  if (!rawPatch || rawPatch.character_id !== characterId || !npcsPresent.includes(characterId)) return current;
+  const narrative = extractNarrativeActionSection(narrativeText);
+  const currentName = typeof characterId === 'string' ? characterId : '';
+  const explicitConsent = rawPatch.explicit_consent && /(?:동의|원해|괜찮아|좋아|해도\s*돼|원한다|받아들)/.test(`${rawPatch.explicit_consent.evidence} ${narrative}`);
+  const next = { ...current, active_boundaries: [...current.active_boundaries] };
+  if (rawPatch.recent_refusal && /(?:싫|거절|안\s*돼|준비되지|멈춰|하지\s*마)/.test(`${rawPatch.recent_refusal.evidence} ${narrative}`)) {
+    next.recent_refusal = { action: rawPatch.recent_refusal.action, reason: rawPatch.recent_refusal.reason || '현재 행동을 명시적으로 거절함', turn: turnNumber, evidence: rawPatch.recent_refusal.evidence };
+  }
+  for (const boundary of rawPatch.add_boundaries || []) if (!next.active_boundaries.includes(boundary)) next.active_boundaries.push(boundary);
+  if (explicitConsent && /(?:대화|논의|확인|합의)/.test(narrative)) {
+    next.active_boundaries = next.active_boundaries.filter(boundary => !(rawPatch.remove_boundaries || []).includes(boundary));
+    if (next.recent_refusal && SEXUAL_ACTION_RANK[rawPatch.explicit_consent.action] >= SEXUAL_ACTION_RANK[next.recent_refusal.action]) next.recent_refusal = null;
+  }
+  if (rawPatch.stage && INTIMACY_STAGE_RANK[rawPatch.stage] > INTIMACY_STAGE_RANK[current.stage]
+    && gate?.route !== 'csa_direct' && gate?.route !== 'blocked' && explicitConsent) next.stage = rawPatch.stage;
+  if (explicitConsent && gate?.route !== 'csa_direct' && gate?.route !== 'blocked') next.last_explicit_consent = { action: rawPatch.explicit_consent.action, turn: turnNumber, scope: 'this_turn_only', evidence: rawPatch.explicit_consent.evidence };
+  next.updated_turn = turnNumber;
+  return next;
+}
+
+function normalizeRelationshipState(previous = {}, patch = {}, turnNumber = 0, relationshipMemoryPatch = [], isSexual = false, intimacyState = null) {
   const previousPlayerEjaculationCount = Math.max(0, Number(previous?.player_ejaculation_count) || 0);
   const previousNpcOrgasmCount = Math.max(0, Number(previous?.npc_orgasm_count) || 0);
   const proposedPlayerEjaculationCount = Number.isInteger(patch?.player_ejaculation_count) && patch.player_ejaculation_count >= 0
@@ -4642,7 +4747,8 @@ function normalizeRelationshipState(previous = {}, patch = {}, turnNumber = 0, r
     intimate_info_unlocked: previous?.intimate_info_unlocked === true || hasIntimateExperience,
     has_had_sex_with_player: hasIntimateExperience,
     has_received_player_ejaculation: previous?.has_received_player_ejaculation === true || playerEjaculationCount > 0,
-    relationship_memory: relationshipMemory
+    relationship_memory: relationshipMemory,
+    intimacy_state: normalizeIntimacyState(intimacyState || previous?.intimacy_state)
   };
   if (firstIntimateTurn !== null) result.first_intimate_turn = firstIntimateTurn;
   if (lastIntimateTurn !== null) result.last_intimate_turn = lastIntimateTurn;
@@ -4860,7 +4966,7 @@ function filterCurrentRelationshipMemoryPatch(items = [], {
 }
 
 function applySexualEvents(previous = {}, events = [], turnNumber = 0, {
-  playerInput = '', narrativeText = '', characterId = '', npcsPresent = [], characters = {}, npcSwitchTurn = false
+  playerInput = '', narrativeText = '', characterId = '', npcsPresent = [], characters = {}, npcSwitchTurn = false, sexualGate = null
 } = {}) {
   const history = emptySexualHistory(previous);
   const seen = new Set((Array.isArray(previous?.sexual_events) ? previous.sexual_events : []).map(item => item?.id).filter(Boolean));
@@ -4871,6 +4977,7 @@ function applySexualEvents(previous = {}, events = [], turnNumber = 0, {
   let accepted = 0;
   for (const event of events) {
     let reason = '';
+    if (sexualGate?.route === 'blocked') reason = 'sexual gate blocked completion';
     if (!isPlainObject(event) || !isPlainObject(characters?.[event.character_id])) reason = 'sexual event character is not registered';
     else if (event.character_id !== characterId) reason = 'sexual event character mismatch';
     else if (!npcsPresent.includes(event.character_id)) reason = 'sexual event character is not present';
@@ -5002,7 +5109,7 @@ function sanitizeCsaDeactivationMemoryExtract(extract = {}, structuredPlan = nul
   return sanitized;
 }
 
-const CSA_ONLY_MUTABLE_NPC_STATS = new Set(['호감도', '상식수용도', '성적민감도']);
+const CSA_ONLY_MUTABLE_NPC_STATS = new Set(['호감도', '상식수용도', '성적흥분도']);
 const CSA_ONLY_FIXED_NPC_STATS = new Set(['상식저항력']);
 const NPC_STAT_KEYS = [...CSA_ONLY_MUTABLE_NPC_STATS];
 
@@ -5049,8 +5156,8 @@ function applyNpcStatChanges(previous = {}, proposed = {}) {
     const requested = Number(proposed?.[key]?.delta);
     const reason = typeof proposed?.[key]?.reason === 'string' ? proposed[key].reason.trim().slice(0, 240) : '';
     let delta = Number.isFinite(requested) ? Math.trunc(requested) : 0;
-    const maximumDelta = key === '상식수용도' ? 30 : key === '성적민감도' ? 4 : 5;
-    const minimumDelta = key === '성적민감도' ? 0 : -maximumDelta;
+    const maximumDelta = key === '상식수용도' ? 30 : key === '성적흥분도' ? 15 : 5;
+    const minimumDelta = key === '성적흥분도' ? -20 : -maximumDelta;
     if (Math.abs(delta) > maximumDelta) {
       errors.push(`${key}: delta ${delta} exceeds allowed ±${maximumDelta}`);
       delta = 0;
@@ -5060,6 +5167,24 @@ function applyNpcStatChanges(previous = {}, proposed = {}) {
     changes[key] = { delta: stats[key] - current, reason: delta === 0 ? '' : reason };
   }
   return { stats, changes, errors };
+}
+
+function calculateArousalStatChange(previousStats = {}, character = {}, arousalEvent = null, { sceneChanged = false } = {}) {
+  const current = Math.max(0, Math.min(100, Number(previousStats?.성적흥분도) || 0));
+  if (!arousalEvent) {
+    const delta = -Math.min(current, sceneChanged ? 20 : 10);
+    return { next: current + delta, change: { delta, reason: delta ? '직접 자극이 이어지지 않아 현재 흥분도가 감소함' : '' } };
+  }
+  if (arousalEvent.intensity === 'climax') {
+    const next = Math.max(current, 90);
+    return { next, change: { delta: next - current, reason: '실제 절정 완료가 서사에 확인되어 현재 흥분도가 상승함' } };
+  }
+  const sensitivity = Math.max(0, Math.min(100, Number(character?.성적민감도초기) || 30));
+  const multiplier = sensitivity <= 25 ? 0.75 : sensitivity <= 50 ? 1 : sensitivity <= 75 ? 1.25 : 1.5;
+  const base = { low: 3, medium: 7, high: 12 }[arousalEvent.intensity] || 0;
+  const delta = Math.min(15, Math.round(base * multiplier));
+  const next = Math.min(100, current + delta);
+  return { next, change: { delta: next - current, reason: '이번 장면의 실제 신체 반응으로 현재 흥분도가 상승함' } };
 }
 
 function resolveCsaResistance(character = {}) {
@@ -5288,6 +5413,41 @@ function buildCsaRuntimeStatePatch(previousSave, csaRuntimeUpdates, activeCsa, n
   }
 
   return changed ? next : null;
+}
+
+function buildCsaAftereffectPatch(previousSave = {}, structuredPlan = null, npcsPresent = [], turnNumber = 0) {
+  const previous = isPlainObject(previousSave?.csa_aftereffect_state) ? structuredClone(previousSave.csa_aftereffect_state) : {};
+  let changed = false;
+  const present = new Set((Array.isArray(npcsPresent) ? npcsPresent : []).filter(id => typeof id === 'string'));
+  for (const [characterId, entries] of Object.entries(previous)) {
+    if (!present.has(characterId) || !isPlainObject(entries)) continue;
+    for (const [csaId, state] of Object.entries(entries)) {
+      if (!isPlainObject(state) || state.phase === 'integrated') continue;
+      if (state.phase === 'shock') entries[csaId] = { ...state, phase: 'processing', processed_encounters: 1, last_processed_turn: turnNumber };
+      else if (state.phase === 'processing' && Number(state.processed_encounters) >= Number(state.required_processing_encounters || 1)) entries[csaId] = { ...state, phase: 'integrated', last_processed_turn: turnNumber };
+      else entries[csaId] = { ...state, processed_encounters: Number(state.processed_encounters || 0) + 1, last_processed_turn: turnNumber };
+      changed = true;
+    }
+  }
+  const deactivated = structuredPlan?.canonical_action?.type === 'app_transaction'
+    ? (structuredPlan.canonical_action.operations || []).filter(item => item?.domain === 'csa' && item?.operation === 'deactivate') : [];
+  const activeById = new Map((Array.isArray(previousSave?.csa_active) ? previousSave.csa_active : []).filter(item => item?.active === true).map(item => [item.id, item]));
+  const runtime = normalizeCsaRuntimeState(previousSave?.csa_runtime_state);
+  for (const operation of deactivated) {
+    const csa = activeById.get(operation.id);
+    const runtimeEntry = runtime[operation.id];
+    const characterId = runtimeEntry?.status === 'active' && present.has(runtimeEntry.character_id) ? runtimeEntry.character_id : null;
+    if (!csa || !characterId) continue;
+    previous[characterId] ||= {};
+    previous[characterId][csa.id] = {
+      phase: 'shock', strength: csa.strength || 'weak', started_turn: turnNumber, last_processed_turn: turnNumber,
+      processed_encounters: 0, required_processing_encounters: csaStrengthRank(csa.strength) >= 3 ? 3 : csaStrengthRank(csa.strength) === 2 ? 2 : 1,
+      canonical_content: csa.content || '', actual_execution_confirmed: true,
+      requires_boundary_review: csaStrengthRank(csa.strength) >= 2 && classifySexualAction(csa.content) !== 'none'
+    };
+    changed = true;
+  }
+  return changed ? previous : null;
 }
 
 // Structural (LLM-free) omission signal: a preset CSA whose runtime status
@@ -7641,8 +7801,101 @@ function resolveCsaDirectRelevance(save = {}, choice = '') {
   return best;
 }
 
+const INTIMACY_STAGE_RANK = { none: 0, romantic_interest: 1, kissed: 2, sexual_touch: 3, oral: 4, intercourse: 5 };
+const INTIMACY_BOUNDARIES = new Set(['not_ready', 'private_only', 'kiss_only', 'no_genital_touch', 'no_oral', 'no_penetration', 'needs_discussion']);
+const SEXUAL_ACTION_RANK = { none: 0, kiss: 1, sexual_touch: 2, genital_exposure: 3, genital_touch: 4, oral: 5, penetration: 6, public_sex: 7 };
+
+function classifySexualAction(value = '') {
+  const text = typeof value === 'string' ? value : '';
+  if (!text.trim()) return 'none';
+  const publicPlace = /(?:사람들?s*앞|공개s*장소|복도|스테이션|로비|병실s*밖|모두s*보는)/.test(text);
+  const penetration = /(?:삽입|성관계|섹스|질(?:에|로)?s*넣|항문(?:에|으로)?s*넣|박아)/.test(text);
+  const oral = /(?:펠라티오|구강성교|커닐링구스|입으로s*(?:빨|해)|빨아s*(?:줘|라)|구강s*(?:으로|성교))/.test(text);
+  const genitalTouch = /(?:성기|음경|자지|질|보지|클리토리스).{0,12}(?:만지|잡|비비|핥|문지|자극)|(?:만지|잡|비비|핥|문지|자극).{0,12}(?:성기|음경|자지|질|보지|클리토리스)/.test(text);
+  const genitalExposure = /(?:성기|음경|자지|질|보지).{0,12}(?:꺼내|보여|드러내|노출)|(?:꺼내|보여|드러내|노출).{0,12}(?:성기|음경|자지|질|보지)/.test(text);
+  const sexualTouch = /(?:가슴|유방|엉덩이|허벅지s*안쪽).{0,12}(?:만지|주무르|쓰다듬|더듬)|(?:만지|주무르|쓰다듬|더듬).{0,12}(?:가슴|유방|엉덩이|허벅지s*안쪽)/.test(text);
+  const kiss = /(?:키스|입맞춤|입술을?s*맞대)/.test(text);
+  const action = penetration ? 'penetration' : oral ? 'oral' : genitalTouch ? 'genital_touch' : genitalExposure ? 'genital_exposure' : sexualTouch ? 'sexual_touch' : kiss ? 'kiss' : 'none';
+  return publicPlace && action !== 'none' ? 'public_sex' : action;
+}
+
+function normalizeIntimacyState(value = {}) {
+  const source = isPlainObject(value) ? value : {};
+  return {
+    stage: Object.prototype.hasOwnProperty.call(INTIMACY_STAGE_RANK, source.stage) ? source.stage : 'none',
+    active_boundaries: [...new Set((Array.isArray(source.active_boundaries) ? source.active_boundaries : []).filter(item => INTIMACY_BOUNDARIES.has(item)))],
+    recent_refusal: isPlainObject(source.recent_refusal) ? source.recent_refusal : null,
+    last_explicit_consent: isPlainObject(source.last_explicit_consent) ? source.last_explicit_consent : null,
+    updated_turn: Number.isInteger(source.updated_turn) ? source.updated_turn : 0
+  };
+}
+
+function actionBlockedByBoundary(action, boundary) {
+  if (boundary === 'not_ready' || boundary === 'needs_discussion') return action !== 'none';
+  if (boundary === 'kiss_only') return SEXUAL_ACTION_RANK[action] > SEXUAL_ACTION_RANK.kiss;
+  if (boundary === 'no_genital_touch') return ['genital_touch', 'oral', 'penetration', 'public_sex'].includes(action);
+  if (boundary === 'no_oral') return ['oral', 'penetration', 'public_sex'].includes(action);
+  if (boundary === 'no_penetration') return ['penetration', 'public_sex'].includes(action);
+  return false;
+}
+
+function resolveSexualCsaAuthorization(save = {}, sexualAction = 'none', playerInput = '') {
+  if (sexualAction === 'none') return { authorized: false, mode: 'none', csa_ids: [], exact_scope: '' };
+  const matches = [];
+  for (const csa of getApplicableCsaEntries(save)) {
+    const content = typeof csa.content === 'string' ? csa.content : '';
+    const strength = normalizeStrengthForStorage(csa.strength) || 'weak';
+    if (strength === 'weak') continue;
+    const tags = Array.isArray(csa?.preset?.direct_meaning_tags) ? csa.preset.direct_meaning_tags.filter(tag => typeof tag === 'string') : [];
+    const required = String(csa?.preset?.required_action || '');
+    const haystack = `${content}\n${required}\n${tags.join(' ')}`;
+    const direct = sexualAction === 'kiss' ? /키스|입맞춤/.test(haystack)
+      : sexualAction === 'sexual_touch' ? /가슴|엉덩이|허벅지|신체s*접촉/.test(haystack)
+      : sexualAction === 'genital_exposure' ? /성기.{0,16}(?:노출|확인|보이)|(?:노출|확인).{0,16}성기/.test(haystack)
+      : sexualAction === 'genital_touch' ? /성기.{0,16}(?:직접|손|확인|접촉)|(?:직접|손).{0,16}성기/.test(haystack)
+      : sexualAction === 'oral' ? /구강성교|펠라|커닐링|입으로/.test(haystack)
+      : sexualAction === 'penetration' ? /삽입|성관계|섹스/.test(haystack)
+      : false;
+    if (direct && (csa.source_type === 'preset' || /(성기|구강|삽입|성관계)/.test(content))) matches.push(csa);
+  }
+  return matches.length ? { authorized: true, mode: 'direct', csa_ids: matches.map(item => item.id), exact_scope: matches.map(item => item?.preset?.required_action || item.content).join(' / ') } : { authorized: false, mode: 'none', csa_ids: [], exact_scope: '' };
+}
+
+function resolveSexualActionGate({ save = {}, master = {}, characterId = '', playerInput = '', choiceMeta = null, currentLocation = '' } = {}) {
+  const action = classifySexualAction(playerInput);
+  if (action === 'none') return { action, route: 'not_sexual', completion_allowed: true, success_rate: null, blocking_boundaries: [], direct_csa_ids: [], stage: 'none' };
+  const relationship = save?.npc_relationship_state?.[characterId] || {};
+  const intimacy = normalizeIntimacyState(relationship.intimacy_state);
+  const direct = resolveSexualCsaAuthorization(save, action, playerInput);
+  if (direct.authorized) return { action, route: 'csa_direct', completion_allowed: true, success_rate: 100, blocking_boundaries: [], direct_csa_ids: direct.csa_ids, exact_scope: direct.exact_scope, stage: intimacy.stage };
+  const blocking = intimacy.active_boundaries.filter(boundary => actionBlockedByBoundary(action, boundary));
+  const publicPlace = /(?:복도|스테이션|로비|병실s*밖|사람들?s*앞|공개)/.test(`${currentLocation} ${playerInput}`);
+  if (intimacy.active_boundaries.includes('private_only') && publicPlace) blocking.push('private_only');
+  const refusal = intimacy.recent_refusal;
+  if (refusal && SEXUAL_ACTION_RANK[refusal.action] >= SEXUAL_ACTION_RANK[action]) blocking.push('recent_refusal');
+  const required = { kiss: 'romantic_interest', sexual_touch: 'kissed', genital_exposure: 'kissed', genital_touch: 'sexual_touch', oral: 'sexual_touch', penetration: 'sexual_touch', public_sex: 'intercourse' }[action] || 'intercourse';
+  const stageEnough = INTIMACY_STAGE_RANK[intimacy.stage] >= INTIMACY_STAGE_RANK[required];
+  if (action === 'public_sex' || !stageEnough || blocking.length) return { action, route: 'blocked', completion_allowed: false, success_rate: 0, blocking_boundaries: [...new Set(blocking)], direct_csa_ids: [], stage: intimacy.stage, reason: blocking.length ? '현재 경계 또는 최근 거절이 남아 있음' : '자발적 친밀 단계가 부족함' };
+  const rates = { kiss: 25, sexual_touch: 15, genital_exposure: 10, genital_touch: 10, oral: 10, penetration: 5 };
+  return { action, route: 'voluntary_eligible', completion_allowed: true, success_rate: rates[action] || 0, blocking_boundaries: [], direct_csa_ids: [], stage: intimacy.stage };
+}
+
 function calculateBoldChoiceRate(save = {}, master = {}, choice = '') {
   const characterId = save?.last_character_id;
+  const sexualGate = resolveSexualActionGate({ save, master, characterId, playerInput: choice, currentLocation: save?.world_state?.location_label || '' });
+  if (sexualGate.route !== 'not_sexual') {
+    return {
+      success_rate: sexualGate.success_rate,
+      affinity: Number(save?.npc_stats?.[characterId]?.호감도) || 0,
+      csa_direct_relevance: sexualGate.route === 'csa_direct' ? 'direct' : 'none',
+      acceptance_bonus_applied: false,
+      sexual_action: sexualGate.action,
+      sexual_gate: sexualGate.route,
+      blocking_boundaries: sexualGate.blocking_boundaries,
+      direct_csa_ids: sexualGate.direct_csa_ids,
+      intimacy_stage: sexualGate.stage
+    };
+  }
   const stats = save?.npc_stats?.[characterId] || {};
   const affinity = Number(stats['호감도']) || 0;
   const acceptance = Number(stats['상식수용도']) || 0;
@@ -7678,7 +7931,12 @@ function buildChoiceMeta(choices = [], save = {}, master = {}, turnNumber = 0, {
       success_rate: details?.success_rate ?? null,
       affinity: details?.affinity ?? null,
       csa_direct_relevance: details?.csa_direct_relevance ?? 'none',
-      acceptance_bonus_applied: details?.acceptance_bonus_applied === true
+      acceptance_bonus_applied: details?.acceptance_bonus_applied === true,
+      sexual_action: details?.sexual_action ?? 'none',
+      sexual_gate: details?.sexual_gate ?? 'not_sexual',
+      blocking_boundaries: details?.blocking_boundaries ?? [],
+      direct_csa_ids: details?.direct_csa_ids ?? [],
+      intimacy_stage: details?.intimacy_stage ?? null
     };
   });
 }
@@ -7701,7 +7959,12 @@ function resolveBoldChoiceAttempt(save = {}, master = {}, playerInput = '', game
     success: roll <= Number(candidate.success_rate),
     affinity: Number(candidate.affinity) || 0,
     csa_direct_relevance: candidate.csa_direct_relevance || 'none',
-    acceptance_bonus_applied: candidate.acceptance_bonus_applied === true
+    acceptance_bonus_applied: candidate.acceptance_bonus_applied === true,
+    sexual_action: candidate.sexual_action || 'none',
+    sexual_gate: candidate.sexual_gate || 'not_sexual',
+    blocking_boundaries: Array.isArray(candidate.blocking_boundaries) ? candidate.blocking_boundaries : [],
+    direct_csa_ids: Array.isArray(candidate.direct_csa_ids) ? candidate.direct_csa_ids : [],
+    intimacy_stage: candidate.intimacy_stage || null
   };
 }
 
@@ -8483,6 +8746,10 @@ export {
   selectImageId,
   calculateProgress,
   applyNpcStatChanges,
+  classifySexualAction,
+  resolveSexualCsaAuthorization,
+  resolveSexualActionGate,
+  normalizeIntimacyState,
   getCsaLimits,
   isCsaApplicable,
   filterMainNpcDialogue,

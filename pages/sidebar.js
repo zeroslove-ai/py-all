@@ -2,7 +2,7 @@ const sidebar = {
   stats: [
     { key: '호감도', label: '호감' },
     { key: '상식수용도', label: '수용' },
-    { key: '성적민감도', label: '민감' }
+    { key: '성적흥분도', label: '흥분' }
   ],
   previousStats: {},
 
@@ -130,6 +130,7 @@ const sidebar = {
       if (index) root.append(document.createTextNode(' · '));
       let value = Number(stats[stat.key]);
       if (stat.key === '상식수용도' && !Number.isFinite(value)) value = Math.max(0, Math.min(100, 100 - resistance));
+      if (stat.key === '성적흥분도' && !Number.isFinite(value)) value = 0;
       const valueNode = document.createElement('span');
       valueNode.className = 'stat-value';
       valueNode.textContent = `${stat.label} ${Number.isFinite(value) ? value : '-'}`;

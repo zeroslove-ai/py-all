@@ -135,6 +135,8 @@ CSA-only runtime additions inside `game_save.data` (no database column or migrat
 
 `npc_stats[*].성적민감도` is legacy JSONB retained for compatibility only. New Worker logic ignores it; fixed `성적민감도초기` is read from the character master solely to scale physical arousal changes. These are JSONB payload additions only: no DB column, RPC, or migration changes are required.
 
+`last_choice_meta` may include `sexual_action`, `sexual_is_public`, `sexual_gate`, `blocking_boundaries`, `direct_csa_ids`, and `intimacy_stage` as display metadata. The actual decision is recalculated deterministically at the selected turn. `csa_aftereffect_state` can be created from a confirmed runtime execution record even while that NPC is absent; medium/strong confirmed sexual executions add `needs_discussion` on deactivation. No database migration is involved.
+
 `turn_count`는 JSONB 안에 중복 저장하지 않는다.
 
 ### `csa_active` 프리셋 필드 (2026-07 추가, 마이그레이션 없음)

@@ -588,60 +588,7 @@ async function verifyStructuredActionValidation(env, gameId, structuredAction) {
   return (await verifyAppValidationProof(env, payload, structuredAction.validation_proof)) ? { ok:true } : { ok:false, reason:'signature mismatch' };
 }
 
-async function buildSuggestionResolutions(env, gameId, canonicalAction, semanticResults, save, master, actionDigest) {
-  const capability = calculateHypnosisCapability(save, master);
-  const characters = isPlainObject(master?.characters) ? master.characters : {};
-  const bySemanticId = new Map(semanticResults.map(item => [item.client_id, item]));
-  const results = [];
-  for (const operation of canonicalAction.operations) {
-    if (!['activate', 'update'].includes(operation.operation)) continue;
-    const semantic = bySemanticId.get(operation.client_id);
-    if (!semantic) continue;
-    const result = { client_id: semantic.client_id, required_strength: semantic.required_strength };
-    if (operation.domain === 'suggestion') {
-      const selectedRank = APP_STRENGTH_RANK[operation.strength] || 1;
-      const requiredRank = APP_STRENGTH_RANK[semantic.required_strength] || selectedRank;
-      const effectiveStrength = selectedRank >= requiredRank ? operation.strength : semantic.required_strength;
-      const basisStats = resolveNpcHypnosisStats(save, characters, operation.character_id);
-      const chancePct = calculateSuggestionSuccessChance({
-        level: capability.current_level,
-        compliance: basisStats.compliance,
-        hypnosisDepth: basisStats.hypnosis_depth,
-        resistance: basisStats.resistance,
-        strength: effectiveStrength
-      });
-      const roll = await deriveSuggestionRoll(env, {
-        gameId,
-        baseTurnCount: canonicalAction.base_turn_count,
-        actionDigest,
-        clientId: operation.client_id,
-        characterId: operation.character_id,
-        strength: effectiveStrength
-      });
-      const highResistancePenalty = Math.max(0, basisStats.resistance - 70) * 2.15;
-      const outcome = roll <= chancePct ? 'success' : 'failure';
-      result.resolution = {
-        version: 1,
-        kind: 'suggestion_application',
-        character_id: operation.character_id,
-        effective_strength: effectiveStrength,
-        chance_pct: chancePct,
-        roll,
-        outcome,
-        basis: {
-          level: clampSuggestionNumber(capability.current_level, 1, 10, 1),
-          compliance: basisStats.compliance,
-          hypnosis_depth: basisStats.hypnosis_depth,
-          resistance: basisStats.resistance,
-          high_resistance_penalty: highResistancePenalty
-        }
-      };
-      console.log(JSON.stringify({ event: 'suggestion_resolution', game_id: gameId, character_id: operation.character_id, strength: effectiveStrength, chance_pct: chancePct, roll, outcome, base_turn_count: canonicalAction.base_turn_count }));
-    }
-    results.push(result);
-  }
-  return results;
-}
+
 
 // Read-only preflight for the interactive app. It uses the same server-owned
 // commit context that the later commit integration will use.
@@ -5184,45 +5131,7 @@ function hypnosisStrengthRank(strength) {
   return index === -1 ? 0 : index;
 }
 
-function resolveHypnosisDepthDelta({ previousDepth, currentCharacterId, activeSuggestions, hypnosisReason, extractDegraded }) {
-  const depth = Math.max(0, Math.min(100, Number(previousDepth) || 0));
-  if (extractDegraded || !currentCharacterId || currentCharacterId === 'narrator') {
-    return { delta: 0, reason: '최면 영향 없음' };
-  }
-  const suggestions = normalizeLegacyActiveSuggestions(activeSuggestions);
-  const active = Array.isArray(suggestions[currentCharacterId])
-    ? suggestions[currentCharacterId].filter(item => item?.active === true)
-    : [];
-  if (!active.length) {
-    return { delta: 0, reason: '최면 영향 없음' };
-  }
-  if (hypnosisReason !== '활성 암시 실제 수행') return { delta: 0, reason: '활성 암시 유지' };
-  const strongestRank = active.reduce((max, item) => Math.max(max, hypnosisStrengthRank(item?.strength)), 0);
-  return { delta: Math.min(3, strongestRank + 1), reason: '활성 암시 수행' };
-}
 
-function applyGlobalHypnosisDepthRecovery(previousNpcStats, activeSuggestions, currentStats = {}, currentChanges = {}) {
-  const stats = isPlainObject(currentStats) ? { ...currentStats } : {};
-  const changes = isPlainObject(currentChanges) ? { ...currentChanges } : {};
-  const suggestions = normalizeLegacyActiveSuggestions(activeSuggestions);
-  let changed = false;
-  for (const [characterId, previous] of Object.entries(isPlainObject(previousNpcStats) ? previousNpcStats : {})) {
-    if (characterId === 'narrator' || !isPlainObject(previous)) continue;
-    const active = Array.isArray(suggestions[characterId]) && suggestions[characterId].some(item => item?.active);
-    if (active) continue;
-    const base = isPlainObject(stats[characterId]) ? stats[characterId] : previous;
-    const depth = Math.max(0, Math.min(100, Number(base?.최면깊이) || 0));
-    if (depth <= 0) continue;
-    const nextDepth = Math.max(0, depth - 2);
-    stats[characterId] = { ...base, 최면깊이: nextDepth };
-    changes[characterId] = {
-      ...(isPlainObject(changes[characterId]) ? changes[characterId] : {}),
-      최면깊이: { delta: nextDepth - depth, reason: '암시 해제 후 자연 회복' }
-    };
-    changed = true;
-  }
-  return { stats, changes, changed };
-}
 
 function buildCsaDeactivationNarrativeRule() {
   return `
@@ -5251,40 +5160,26 @@ function calculateHypnosisCapability(save = {}, master = {}, activeCsa = getActi
   const level = Math.max(1, Number(save?.player_progress?.level) || 1);
   const exp = Math.max(0, Number(save?.player_progress?.exp) || 0);
   const nextLevelExp = level >= 10 ? 0 : expForNextLevel(level);
-
-  const suggestionMap = normalizeLegacyActiveSuggestions(save?.active_suggestions);
-  const activeCount = Object.values(suggestionMap).reduce(
-    (total, list) => total + (Array.isArray(list) ? list.filter(item => item?.active === true).length : 0),
-    0
-  );
-  const { max_active: maxActive, available_strength: availableStrength } = getHypnosisSuggestionLimits(level);
-  const remainingSlots = Math.max(0, maxActive - activeCount);
+  const availableStrength = level >= 5 ? '강함' : level >= 3 ? '중간' : '약함';
   const maxStrengthRank = hypnosisStrengthRank(availableStrength);
-
   const csaLimits = getCsaLimits(level);
-  const csaActiveCount = activeCsa.length;
-
   return {
     current_level: level,
     exp,
     next_level_exp: nextLevelExp,
     available_strength: availableStrength,
-    // Explicit per-tier flags instead of one ambiguous "can go deeper"
-    // boolean — Lv.3 unlocks 중간 but must still reject 강한, which a
-    // single strengthRank>0 check couldn't distinguish. Only three tiers
-    // exist (no "깊은 최면"/deep) — see HYPNOSIS_STRENGTH_TIERS.
     max_strength_rank: maxStrengthRank,
     can_use_weak: true,
     can_use_medium: maxStrengthRank >= 1,
     can_use_strong: maxStrengthRank >= 2,
-    active_count: activeCount,
-    max_active: maxActive,
-    remaining_slots: remainingSlots,
-    can_create_suggestion: remainingSlots > 0,
-    can_edit_same_strength: activeCount > 0,
-    can_disable_or_delete: activeCount > 0,
-    can_increase_strength: activeCount > 0 && maxStrengthRank > 0,
-    csa_active_count: csaActiveCount,
+    active_count: 0,
+    max_active: 0,
+    remaining_slots: 0,
+    can_create_suggestion: false,
+    can_edit_same_strength: false,
+    can_disable_or_delete: false,
+    can_increase_strength: false,
+    csa_active_count: activeCsa.length,
     csa_max_active: csaLimits.max_active
   };
 }
@@ -5391,34 +5286,43 @@ function planAppTransaction(previousSave, master, action, { turnNumber }) {
   const rawOperations = Array.isArray(action.operations) ? action.operations : [];
   if (!rawOperations.length) return { ok: false, status: 422, error_code: 'NO_CHANGES', issues: [appIssue(action, 'NO_CHANGES', '적용할 변경사항이 없습니다.')] };
   if (rawOperations.length > 12) return { ok: false, status: 422, error_code: 'TOO_MANY_OPERATIONS', issues: [appIssue(action, 'TOO_MANY_OPERATIONS', '한 번에 최대 12개 작업만 적용할 수 있습니다.')] };
-  const characters = isPlainObject(master?.characters) ? master.characters : {};
+
   const capability = calculateHypnosisCapability(previousSave, master);
   const csaLimits = getCsaLimits(capability.current_level);
-  const virtualSave = previousSave;
-  const suggestions = cloneSuggestionMap(virtualSave.active_suggestions);
-  const csa = cloneCsaList(virtualSave.csa_active);
+  const csa = cloneCsaList(previousSave?.csa_active);
   const issues = [];
   const seenClientIds = new Set();
   const seenTargets = new Set();
-  const ordered = rawOperations.map((operation, index) => ({ operation, index })).sort((a, b) => {
-    const domainOrder = a.operation?.domain === 'suggestion' ? 0 : 1;
-    const otherDomainOrder = b.operation?.domain === 'suggestion' ? 0 : 1;
-    return APP_OPERATION_ORDER[a.operation?.operation] - APP_OPERATION_ORDER[b.operation?.operation] || domainOrder - otherDomainOrder || a.index - b.index;
-  });
+  const ordered = rawOperations
+    .map((operation, index) => ({ operation, index }))
+    .sort((a, b) => APP_OPERATION_ORDER[a.operation?.operation] - APP_OPERATION_ORDER[b.operation?.operation] || a.index - b.index);
   const canonicalOperations = [];
-  const suggestionActivations = [];
+
   for (const { operation: raw, index } of ordered) {
-    if (!isPlainObject(raw) || !['suggestion', 'csa'].includes(raw.domain) || !['activate', 'update', 'deactivate'].includes(raw.operation) || typeof raw.client_id !== 'string' || !raw.client_id.trim() || raw.client_id.length > 80) {
-      issues.push(appIssue(raw, 'INVALID_OPERATION', '잘못된 작업입니다.', index));
+    if (!isPlainObject(raw)
+      || raw.domain !== 'csa'
+      || !['activate', 'update', 'deactivate'].includes(raw.operation)
+      || typeof raw.client_id !== 'string'
+      || !raw.client_id.trim()
+      || raw.client_id.length > 80) {
+      issues.push(appIssue(raw, 'INVALID_OPERATION', '상식개변 작업 형식이 올바르지 않습니다.', index));
       continue;
     }
-    if (seenClientIds.has(raw.client_id)) { issues.push(appIssue(raw, 'DUPLICATE_TARGET', '같은 작업 식별자가 중복되었습니다.', index)); continue; }
+    if (seenClientIds.has(raw.client_id)) {
+      issues.push(appIssue(raw, 'DUPLICATE_TARGET', '같은 작업 식별자가 중복되었습니다.', index));
+      continue;
+    }
     seenClientIds.add(raw.client_id);
-    const targetKey = raw.domain === 'suggestion' && raw.operation !== 'activate'
-      ? `${raw.domain}:${raw.id || ''}`
-      : (raw.domain === 'csa' && raw.operation !== 'activate' ? `${raw.domain}:${raw.id || ''}` : null);
-    if (targetKey && seenTargets.has(targetKey)) { issues.push(appIssue(raw, 'DUPLICATE_TARGET', '같은 대상을 두 번 변경할 수 없습니다.', index)); continue; }
-    if (targetKey) seenTargets.add(targetKey);
+
+    const id = typeof raw.id === 'string' && raw.id.trim().length <= 120 ? raw.id.trim() : '';
+    if (raw.operation !== 'activate') {
+      const targetKey = `csa:${id}`;
+      if (seenTargets.has(targetKey)) {
+        issues.push(appIssue(raw, 'DUPLICATE_TARGET', '같은 상식개변을 두 번 변경할 수 없습니다.', index));
+        continue;
+      }
+      seenTargets.add(targetKey);
+    }
 
     const content = normalizeAppContent(raw.content);
     const strength = typeof raw.strength === 'string' ? raw.strength.trim() : '';
@@ -5428,92 +5332,89 @@ function planAppTransaction(previousSave, master, action, { turnNumber }) {
       return true;
     };
     const validateStrength = () => {
-      if (!APP_STRENGTHS.has(strength) || capability.current_level < APP_STRENGTH_UNLOCKS[strength]) { issues.push(appIssue(raw, 'STRENGTH_LOCKED', '현재 레벨에서 사용할 수 없는 강도입니다.', index)); return null; }
+      if (!APP_STRENGTHS.has(strength) || capability.current_level < APP_STRENGTH_UNLOCKS[strength]) {
+        issues.push(appIssue(raw, 'STRENGTH_LOCKED', '현재 레벨에서 사용할 수 없는 강도입니다.', index));
+        return null;
+      }
       return APP_STRENGTH_LABELS[strength];
     };
 
-    if (raw.domain === 'suggestion') {
-      const characterId = typeof raw.character_id === 'string' ? raw.character_id.trim() : '';
-      if (raw.operation === 'activate') {
-        if (!characterId || !isPlainObject(characters[characterId])) { issues.push(appIssue(raw, 'NPC_NOT_FOUND', '등록된 NPC만 대상으로 지정할 수 있습니다.', index)); continue; }
-        if (!canCreateSuggestionForNpc(previousSave, characters, characterId)) { issues.push(appIssue(raw, 'NPC_NOT_PRESENT', '대상이 현재 장면에 함께 있지 않아 새 개인 암시를 등록할 수 없습니다.', index)); continue; }
-        const storageStrength = validateStrength();
-        if (!validateContent() || !storageStrength) continue;
-        const list = Array.isArray(suggestions[characterId]) ? suggestions[characterId] : [];
-        if (list.some(item => item?.active && normalizeAppContent(item.content) === content)) { issues.push(appIssue(raw, 'DUPLICATE_SUGGESTION', '같은 NPC에게 동일한 활성 암시가 이미 있습니다.', index)); continue; }
-        const id = nextAppSuggestionId(suggestions, turnNumber);
-        const item = { id, active: true, content, strength: storageStrength, created_turn: turnNumber };
-        suggestions[characterId] = [...list, item];
-        canonicalOperations.push({ version: 1, client_id: raw.client_id, domain: 'suggestion', operation: 'activate', character_id: characterId, strength, content });
-        suggestionActivations.push({ character_id: characterId, strength });
-        continue;
-      }
-      if (!characterId || !isPlainObject(characters[characterId])) { issues.push(appIssue(raw, 'NPC_NOT_FOUND', '등록된 NPC를 찾지 못했습니다.', index)); continue; }
-      const list = Array.isArray(suggestions[characterId]) ? suggestions[characterId] : [];
-      const id = typeof raw.id === 'string' && raw.id.trim().length <= 120 ? raw.id.trim() : '';
-      const target = list.find(item => item?.id === id);
-      if (!target) { issues.push(appIssue(raw, 'SUGGESTION_NOT_FOUND', '대상 개인 암시를 찾지 못했습니다.', index)); continue; }
-      if (!target.active) { issues.push(appIssue(raw, 'SUGGESTION_INACTIVE', '이미 비활성화된 개인 암시입니다.', index)); continue; }
-      if (raw.operation === 'deactivate') {
-        suggestions[characterId] = list.map(item => item === target ? { ...item, active: false, updated_turn: turnNumber } : item);
-        canonicalOperations.push({ version: 1, client_id: raw.client_id, domain: 'suggestion', operation: 'deactivate', character_id: characterId, id });
-        continue;
-      }
-      const storageStrength = validateStrength();
-      if (!validateContent() || !storageStrength) continue;
-      if (normalizeAppContent(target.content) === content && target.strength === storageStrength) { issues.push(appIssue(raw, 'NO_CHANGES', '개인 암시의 실제 변경사항이 없습니다.', index)); continue; }
-      if (list.some(item => item !== target && item?.active && normalizeAppContent(item.content) === content)) { issues.push(appIssue(raw, 'DUPLICATE_SUGGESTION', '같은 NPC에게 동일한 활성 암시가 이미 있습니다.', index)); continue; }
-      suggestions[characterId] = list.map(item => item === target ? { ...item, content, strength: storageStrength, updated_turn: turnNumber } : item);
-      canonicalOperations.push({ version: 1, client_id: raw.client_id, domain: 'suggestion', operation: 'update', character_id: characterId, id, strength, content });
-      continue;
-    }
-
-    const id = typeof raw.id === 'string' && raw.id.trim().length <= 120 ? raw.id.trim() : '';
     if (raw.operation === 'activate') {
       const storageStrength = validateStrength();
       const scopeType = typeof raw.scope_type === 'string' ? raw.scope_type.trim() : '';
       if (!validateContent() || !storageStrength) continue;
-      if (!CSA_SCOPE_RANK[scopeType] || CSA_SCOPE_RANK[scopeType] > CSA_SCOPE_RANK[csaLimits.scope_type]) { issues.push(appIssue(raw, 'CSA_SCOPE_LOCKED', '현재 레벨에서 사용할 수 없는 상식개변 범위입니다.', index)); continue; }
-      const scopeId = resolveCsaScopeId(scopeType, previousSave.world_state || {});
-      if (!scopeId) { issues.push(appIssue(raw, 'LOCATION_UNAVAILABLE', '현재 위치에서 해당 범위를 설정할 수 없습니다.', index)); continue; }
-      if (csa.some(item => item?.active && normalizeAppContent(item.content) === content && item.scope_id === scopeId)) { issues.push(appIssue(raw, 'DUPLICATE_TARGET', '같은 범위에 동일한 활성 상식개변이 있습니다.', index)); continue; }
-      const item = { id: nextAppCsaId(csa, turnNumber), active: true, content, strength: storageStrength, scope_type: scopeType, scope_id: scopeId, scope_label: buildAppScopeLabel(scopeId), created_turn: turnNumber };
-      csa.push(item);
+      if (!CSA_SCOPE_RANK[scopeType] || CSA_SCOPE_RANK[scopeType] > CSA_SCOPE_RANK[csaLimits.scope_type]) {
+        issues.push(appIssue(raw, 'CSA_SCOPE_LOCKED', '현재 레벨에서 사용할 수 없는 상식개변 범위입니다.', index));
+        continue;
+      }
+      const scopeId = resolveCsaScopeId(scopeType, previousSave?.world_state || {});
+      if (!scopeId) {
+        issues.push(appIssue(raw, 'LOCATION_UNAVAILABLE', '현재 위치에서 해당 범위를 설정할 수 없습니다.', index));
+        continue;
+      }
+      if (csa.some(item => item?.active && normalizeAppContent(item.content) === content && item.scope_id === scopeId)) {
+        issues.push(appIssue(raw, 'DUPLICATE_TARGET', '같은 범위에 동일한 활성 상식개변이 있습니다.', index));
+        continue;
+      }
+      csa.push({ id: nextAppCsaId(csa, turnNumber), active: true, content, strength: storageStrength, scope_type: scopeType, scope_id: scopeId, scope_label: buildAppScopeLabel(scopeId), created_turn: turnNumber });
       canonicalOperations.push({ version: 1, client_id: raw.client_id, domain: 'csa', operation: 'activate', strength, scope_type: scopeType, content });
       continue;
     }
+
     const target = csa.find(item => item?.id === id);
-    if (!target) { issues.push(appIssue(raw, 'CSA_NOT_FOUND', '대상 상식개변을 찾지 못했습니다.', index)); continue; }
-    if (!target.active) { issues.push(appIssue(raw, 'CSA_INACTIVE', '이미 비활성화된 상식개변입니다.', index)); continue; }
+    if (!target) {
+      issues.push(appIssue(raw, 'CSA_NOT_FOUND', '대상 상식개변을 찾지 못했습니다.', index));
+      continue;
+    }
+    if (!target.active) {
+      issues.push(appIssue(raw, 'CSA_INACTIVE', '이미 비활성화된 상식개변입니다.', index));
+      continue;
+    }
     if (raw.operation === 'deactivate') {
       const at = csa.indexOf(target);
       csa[at] = { ...target, active: false, updated_turn: turnNumber };
       canonicalOperations.push({ version: 1, client_id: raw.client_id, domain: 'csa', operation: 'deactivate', id });
       continue;
     }
+
     const storageStrength = validateStrength();
     const scopeType = typeof raw.scope_type === 'string' && raw.scope_type.trim() ? raw.scope_type.trim() : target.scope_type;
     if (!validateContent() || !storageStrength) continue;
-    if (!CSA_SCOPE_RANK[scopeType] || CSA_SCOPE_RANK[scopeType] > CSA_SCOPE_RANK[csaLimits.scope_type]) { issues.push(appIssue(raw, 'CSA_SCOPE_LOCKED', '현재 레벨에서 사용할 수 없는 상식개변 범위입니다.', index)); continue; }
-    const scopeId = scopeType === target.scope_type ? target.scope_id : resolveCsaScopeId(scopeType, previousSave.world_state || {});
-    if (!scopeId) { issues.push(appIssue(raw, 'LOCATION_UNAVAILABLE', '현재 위치에서 해당 범위를 설정할 수 없습니다.', index)); continue; }
-    if (normalizeAppContent(target.content) === content && target.strength === storageStrength && target.scope_type === scopeType) { issues.push(appIssue(raw, 'NO_CHANGES', '상식개변의 실제 변경사항이 없습니다.', index)); continue; }
-    if (csa.some(item => item !== target && item?.active && normalizeAppContent(item.content) === content && item.scope_id === scopeId)) { issues.push(appIssue(raw, 'DUPLICATE_TARGET', '같은 범위에 동일한 활성 상식개변이 있습니다.', index)); continue; }
+    if (!CSA_SCOPE_RANK[scopeType] || CSA_SCOPE_RANK[scopeType] > CSA_SCOPE_RANK[csaLimits.scope_type]) {
+      issues.push(appIssue(raw, 'CSA_SCOPE_LOCKED', '현재 레벨에서 사용할 수 없는 상식개변 범위입니다.', index));
+      continue;
+    }
+    const scopeId = scopeType === target.scope_type ? target.scope_id : resolveCsaScopeId(scopeType, previousSave?.world_state || {});
+    if (!scopeId) {
+      issues.push(appIssue(raw, 'LOCATION_UNAVAILABLE', '현재 위치에서 해당 범위를 설정할 수 없습니다.', index));
+      continue;
+    }
+    if (normalizeAppContent(target.content) === content && target.strength === storageStrength && target.scope_type === scopeType) {
+      issues.push(appIssue(raw, 'NO_CHANGES', '상식개변의 실제 변경사항이 없습니다.', index));
+      continue;
+    }
+    if (csa.some(item => item !== target && item?.active && normalizeAppContent(item.content) === content && item.scope_id === scopeId)) {
+      issues.push(appIssue(raw, 'DUPLICATE_TARGET', '같은 범위에 동일한 활성 상식개변이 있습니다.', index));
+      continue;
+    }
     const at = csa.indexOf(target);
     csa[at] = { ...target, content, strength: storageStrength, scope_type: scopeType, scope_id: scopeId, scope_label: scopeType === target.scope_type ? target.scope_label : buildAppScopeLabel(scopeId), updated_turn: turnNumber };
     canonicalOperations.push({ version: 1, client_id: raw.client_id, domain: 'csa', operation: 'update', id, strength, scope_type: scopeType, content });
   }
 
   if (issues.length) return { ok: false, status: 422, error_code: 'APP_ACTION_INVALID', issues };
-  const activeSuggestionCount = Object.values(suggestions).flat().filter(item => item?.active === true).length;
   const activeCsaCount = csa.filter(item => item?.active === true).length;
-  if (activeSuggestionCount > capability.max_active) return { ok: false, status: 422, error_code: 'SUGGESTION_SLOT_FULL', issues: [appIssue(action, 'SUGGESTION_SLOT_FULL', '개인 암시 슬롯이 부족합니다.')] };
   if (activeCsaCount > csaLimits.max_active) return { ok: false, status: 422, error_code: 'CSA_SLOT_FULL', issues: [appIssue(action, 'CSA_SLOT_FULL', '상식개변 활성 슬롯이 부족합니다.')] };
+
   const summary = summarizeAppOperations(canonicalOperations);
   const canonical_action = { version: 1, type: 'app_transaction', base_turn_count: action.base_turn_count, operations: canonicalOperations };
-  const labels = [];
-  if (summary.csa_activate + summary.csa_update + summary.csa_deactivate) labels.push(`상식개변 ${summary.csa_activate + summary.csa_update + summary.csa_deactivate}건`);
-  return { ok: true, canonical_action, display_input: `상식개변 어플에서 ${labels.join('과 ')}의 변경사항을 적용한다.`, summary, plan: { csa_active: csa, operations: canonicalOperations, counts: summary } };
+  return {
+    ok: true,
+    canonical_action,
+    display_input: `상식개변 어플에서 상식개변 ${canonicalOperations.length}건의 변경사항을 적용한다.`,
+    summary,
+    plan: { csa_active: csa, operations: canonicalOperations, counts: summary }
+  };
 }
 
 function planStructuredAction(previousSave, master, rawAction, context = {}) {
@@ -6317,7 +6218,6 @@ function validateFinalChoices(choices, { capability, characters = {}, worldState
     problems.push(p);
   });
 
-  if (capability) record(findInfeasibleChoices(choices, capability), 'hypnosis capability');
   // H1 item 4: 'unregistered target' and 'location-ineligible target' are no
   // longer repair triggers — a minor NPC's real name or a registered NPC
   // from outside the current ward roster in a choice is left as-is, never
@@ -6339,22 +6239,13 @@ function clipChoiceText(choice, maxLength = CHOICE_MAX_LENGTH) {
 }
 
 function buildCapabilitySafeChoice(capability, index = 0) {
-  const activeChoices = [
-    '현재 활성 암시의 범위 안에서 자연스럽게 부탁한다.',
-    '상대의 반응을 살피며 평범한 대화를 이어간다.',
-    '주변 상황을 확인하며 다음 행동을 결정한다.',
-    '현재 장면에서 할 수 있는 다른 행동을 시도한다.'
-  ];
-
-  const inactiveChoices = [
+  const choices = [
     '상대의 반응을 살피며 평범한 대화를 이어간다.',
     '현재 상황에 관해 가벼운 질문을 건넨다.',
     '주변 상황을 조용히 관찰한다.',
-    '다른 행동이나 이동을 생각해 본다.'
+    '현재 장면에서 할 수 있는 다른 행동을 시도한다.'
   ];
-
-  const source = capability?.active_count > 0 ? activeChoices : inactiveChoices;
-  return source[index % source.length];
+  return choices[index % choices.length];
 }
 
 // Single deterministic pass covering every validateFinalChoices rule at
@@ -6377,7 +6268,7 @@ function normalizeFinalChoicesDeterministically(choices, { narrativeText = '', c
     normalized.push(buildCapabilitySafeChoice(capability, normalized.length));
   }
 
-  const infeasible = findInfeasibleChoices(normalized, capability);
+  const infeasible = [];
   for (const problem of infeasible) {
     if (Number.isInteger(problem.choice_index) && problem.choice_index >= 0 && problem.choice_index < normalized.length) {
       normalized[problem.choice_index] = buildCapabilitySafeChoice(capability, problem.choice_index);
@@ -7172,7 +7063,6 @@ export {
   selectImageId,
   calculateProgress,
   applyNpcStatChanges,
-  resolveHypnosisDepthDelta,
   getCsaLimits,
   isCsaApplicable,
   filterMainNpcDialogue,

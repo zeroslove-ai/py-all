@@ -97,6 +97,19 @@ window.csaApp = (() => {
       card.appendChild(find); body.appendChild(card);
     });
   }
+  function renderPlayer(body) {
+    const info = appState.player_info || {};
+    const fields = [
+      ['이름', info.name], ['나이', info.age], ['성별', info.gender], ['직업', info.job], ['전공', info.major], ['직급', info.rank],
+      ['키', info.height_cm == null ? null : `${info.height_cm}cm`], ['몸무게', info.weight_kg == null ? null : `${info.weight_kg}kg`], ['성기 길이', info.penis_length_cm == null ? null : `${info.penis_length_cm}cm`], ['외형/스타일', info.style],
+      ['성격', info.personality], ['말투', info.speech_style], ['배경', info.background], ['최초 시작 위치', info.starting_location], ['현재 위치', info.current_location], ['현재 게임 시간', info.time_label], ['현재 자세/상태', info.position_label],
+      ['상식개변 레벨', `Lv.${info.level ?? 1}`], ['EXP', `${info.exp ?? 0} / ${info.next_level_exp ?? 0}`], ['활성 상식개변', `${info.active_csa_count ?? 0} / ${info.max_active_csa ?? 0}`]
+    ];
+    body.appendChild(el('h3', '', '플레이어 정보'));
+    const grid = el('div', 'csa-app-status-grid');
+    fields.forEach(([label, value]) => { const card = el('div', 'csa-app-card'); card.append(el('small', '', label), el('strong', '', value === null || value === undefined || value === '' ? '미설정' : String(value))); grid.appendChild(card); });
+    body.appendChild(grid);
+  }
   function renderCsa(body) {
     const max = Number(appState.home?.status?.csa_max), add = el('button', 'choice-btn', '+ 상식개변 추가');
     add.disabled = applying || (Number.isFinite(max) && active().length >= max);
@@ -133,9 +146,9 @@ window.csaApp = (() => {
     section(body, '자주 발생하는 실패 원인', root => (manual.common_failures || []).forEach(item => { root.append(el('h4', '', item.title)); list(root, item.reasons); }));
   }
   function renderTab(tab) {
-    if (!overlay || !draft) return; draft.tab = ['home', 'npc', 'csa', 'manual'].includes(tab) ? tab : 'home'; const body = overlay.querySelector('.csa-app-body'); body.replaceChildren();
+    if (!overlay || !draft) return; draft.tab = ['home', 'player', 'npc', 'csa', 'manual'].includes(tab) ? tab : 'home'; const body = overlay.querySelector('.csa-app-body'); body.replaceChildren();
     (draft.issues || []).forEach(issue => body.appendChild(el('p', 'csa-app-error', issue.message || String(issue))));
-    ({ home: renderHome, npc: renderNpcs, csa: renderCsa, manual: renderManual })[draft.tab](body);
+    ({ home: renderHome, player: renderPlayer, npc: renderNpcs, csa: renderCsa, manual: renderManual })[draft.tab](body);
     if (draft.notice) { body.prepend(el('p', 'csa-app-diagnostic info', draft.notice)); draft.notice = ''; }
     overlay.querySelectorAll('[role="tab"]').forEach(node => node.setAttribute('aria-selected', String(node.dataset.tab === draft.tab))); syncDraftBar();
   }
@@ -160,7 +173,7 @@ window.csaApp = (() => {
     if (overlay) { draft.notice = options.notice || ''; renderTab(initialTab); return; }
     opener = document.activeElement; overlay = el('div', 'csa-app-overlay'); const modal = el('div', 'csa-app-modal'); modal.setAttribute('role', 'dialog'); modal.setAttribute('aria-modal', 'true');
     const header = el('header', 'csa-app-header'), close = el('button', 'app-manual-close', '닫기'); close.setAttribute('aria-label', '상식개변 앱 닫기'); close.onclick = () => requestClose(); header.append(el('h2', '', '📱 상식개변 앱'), close);
-    const tabs = el('div', 'csa-app-tabs'); tabs.setAttribute('role', 'tablist'); [['home', '홈'], ['npc', 'NPC'], ['csa', '상식개변'], ['manual', '매뉴얼']].forEach(([id, label]) => { const button = el('button', 'csa-app-tab', label); button.dataset.tab = id; button.setAttribute('role', 'tab'); button.onclick = () => renderTab(id); tabs.appendChild(button); });
+    const tabs = el('div', 'csa-app-tabs'); tabs.setAttribute('role', 'tablist'); [['home', '홈'], ['player', '플레이어 정보'], ['npc', 'NPC'], ['csa', '상식개변'], ['manual', '매뉴얼']].forEach(([id, label]) => { const button = el('button', 'csa-app-tab', label); button.dataset.tab = id; button.setAttribute('role', 'tab'); button.onclick = () => renderTab(id); tabs.appendChild(button); });
     modal.append(header, tabs, el('div', 'csa-app-body'), el('div', 'csa-app-draft-bar')); overlay.appendChild(modal); overlay.onclick = event => { if (event.target === overlay) requestClose(); };
     keydownHandler = event => { if (event.key === 'Escape') requestClose(); }; document.addEventListener('keydown', keydownHandler);
     historyToken = crypto.randomUUID(); history.pushState({ ...(history.state || {}), csaApp: historyToken }, '', location.href); historyPushed = true; popstateHandler = () => { historyPushed = false; requestClose('popstate'); }; window.addEventListener('popstate', popstateHandler);

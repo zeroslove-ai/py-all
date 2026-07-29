@@ -1136,6 +1136,25 @@ function canCreateSuggestionForNpc(save = {}, characters = {}, characterId) {
     && getCurrentPresentNpcIds(save, characters).includes(characterId);
 }
 
+function buildPlayerInfoPayload(master = {}, save = {}) {
+  const player = isPlainObject(save?.player) ? save.player : {};
+  const setup = isPlainObject(save?.player_setup) ? save.player_setup : {};
+  const progress = calculateCsaCapability(save, master);
+  const world = isPlainObject(save?.world_state) ? save.world_state : {};
+  const scene = isPlainObject(save?.player_scene_state) ? save.player_scene_state : {};
+  const value = key => player[key] ?? setup?.selected_profile?.[key] ?? null;
+  return {
+    name: value('name'), age: value('age'), gender: value('gender'), job: value('job'), major: value('major'), rank: value('rank'),
+    height_cm: value('height_cm'), weight_kg: value('weight_kg'), penis_length_cm: value('penis_length_cm'),
+    style: value('style'), personality: value('personality'), speech_style: value('speech_style'), background: value('background'),
+    starting_location: value('starting_location'), current_location: world.location_label || save?.player_location || null,
+    time_label: world.time_label || null, position_label: scene.position_label || null,
+    level: progress.current_level, exp: progress.current_exp, next_level_exp: progress.next_level_exp,
+    active_csa_count: progress.csa_active_count, max_active_csa: progress.csa_max_active,
+    setup_source: setup.source || null
+  };
+}
+
 function buildAppStatePayload(master, save, turnCount = 0) {
   const manual = buildAppManualPayload(master, save, turnCount);
   const characters = isPlainObject(master?.characters) ? master.characters : {};
@@ -1196,7 +1215,8 @@ function buildAppStatePayload(master, save, turnCount = 0) {
     scope_options,
     npcs,
     common_sense,
-    manual
+    manual,
+    player_info: buildPlayerInfoPayload(master, save)
   };
 }
 
@@ -3381,7 +3401,7 @@ function buildNpcDialogueMinimumSection() {
 }
 
 function buildMoanVocalReactionSection() {
-  return `\n\n[MOAN AND VOCAL REACTION CONTRACT]\n\n- 장면의 실제 자극·반응만으로 none/mild/aroused/near_climax/climax/afterglow 중 강도를 내부 판단하며, 단계명은 출력하지 않는다. 단순 접촉만으로 near_climax·climax를 쓰지 않고, climax는 실제 절정 완료가 명확할 때만 쓴다.\n- VOCAL STYLE A/B/C는 발성량을 줄이는 규칙이 아니라 표현 방식이다: A는 억누름·수치심·부정에서 무너짐, B는 솔직한 쾌감·적극 반응·길어진 호흡, C는 업무·치료·절차 합리화에서 문장이 무너진다.\n- 발성·호흡 단위는 서로 다른 숨 삼킴·억누른 신음·길어진 호흡·끊어진 말·무너지는 문장·직후 힘 빠진 목소리 같은 반응 하나이며, 같은 음절 반복으로 채우거나 한 대사 블록에 몰지 말고 신체 반응과 여러 대사 사이에 분산한다.\n- mild: 발성·호흡 1~2단위, NPC 대사 블록 1개 이상, 관찰 가능한 신체 반응 1개 이상. aroused: 3~5단위, 대사 2개 이상, 신체 반응 2개 이상.\n- near_climax: 발성·호흡 5~8단위, NPC 대사 블록 3개 이상, 신체 반응 3개 이상, 통제를 유지하려는 말 또는 무너지는 문장을 포함하되 절정 완료로 쓰지 않는다.\n- climax: 직전 → 절정 순간 → 직후의 3단계가 보여야 한다. 발성·호흡 8~12단위, NPC 대사 블록 4개 이상, 신체 반응 4개 이상이며, 직전에는 대사 2개 이상·통제하려는 말·긴장 반응, 순간에는 대사 1~2개와 완료가 명확한 반응, 직후에는 대사 1개 이상·잔여 발성·호흡·힘 풀림 또는 떨림·혼란/수치심/만족/자기합리화 중 하나를 쓴다. 한 단어 신음으로 끝내지 않는다.\n- afterglow: 잔여 발성·호흡 2~4단위, NPC 대사 블록 2개 이상, 호흡 회복·잔여 신체 반응·심리 반응을 포함한다. 사용자가 계속 관찰하거나 자극하면 위 권장량을 줄이지 않는다.\n- 신음과 정상 대사·끊어진 말을 섞고, 같은 신음 문자열을 한 턴이나 직전 턴과 반복하지 않는다. 캐릭터 말투를 유지하며 정상 대사를 완전히 없애지 않는다. 일시적 반응을 사랑·영구 복종으로 자동 확정하지 않고 갈등·혼란·수치심·자기합리화는 남긴다.\n- 현재 관계에서 성립하지 않은 "주인님"/"여보"/"사랑해"/소유 표현, 하트·이모지·장식 기호는 자동 생성하지 않는다. 같은 음절을 과도하게 늘이지 않고, 신음·감탄도 화자명과 짧은 연기지시가 있는 대사 형식을 따른다. 평범한 대화·업무 장면에는 억지로 넣지 않는다.`;
+  return `\n\n[MOAN AND VOCAL REACTION — FLEXIBLE]\n- 실제 성적 자극이 지속되는 장면에서는 NPC의 숨, 신음, 떨림, 끊어진 말, 감정 표현을 장면 강도와 성적민감도에 맞게 자연스럽게 충분히 묘사한다.\n- 고정된 단계별 횟수·최소 대사 수는 없다. 정상 대사와 관찰 가능한 신체 반응 사이에 분산하고 같은 음절·문장을 반복하지 않는다.\n- 단순 접촉이나 가벼운 업무 장면을 절정으로 과장하지 않으며, 절정은 실제 완료 장면에서만 묘사한다.\n- 신음만 나열하지 말고 현재 감정, 판단, 망설임, 반응을 담은 대사를 남긴다. 직접 발화는 기존 화자명과 연기지시 형식을 따른다.\n- 성적민감도는 반응의 빠르기와 강도만 보조하며 동의·호감·복종을 보장하지 않는다.`;
 }
 
 function buildAntiRepetitionSection() {
@@ -3712,6 +3732,7 @@ relationship_memory_patch는 최종 Story에서 실제로 완료된 중요한 �
 
 [NPC PHYSICAL SCENE STATE PATCH]
 npc_scene_state_patch는 최종 Story에서 등록 NPC가 실제로 옷을 입거나 벗고, 열고 잠그고, 올리거나 내리고, 갈아입거나 자세를 바꾼 완료 사건만 반영한다. 플레이어 입력만의 선언, 실패·시도·계획, 상식개변의 생성·해제만으로는 반환하지 않는다. 기존 상태를 유지할 키는 생략하고, 등록 NPC·허용 enum만 사용한다.
+player_scene_state_patch도 최종 Story에서 플레이어 자세·위치·방향 변화가 실제 완료된 경우만 반환한다. 단순 시도·선택지·계획만으로 갱신하지 않으며, 불명확하면 기존 상태를 유지하도록 생략한다.
 
 [WORLD STATE PATCH CONTRACT]
 플레이어가 실제로 출발해서 새 장소에 도착했고 장면이 그 새 장소로 전환된 경우, world_state_patch에 building, floor, ward, location_label을 모두 채워서 반환한다. 바뀌지 않은 필드는 이전 저장값의 기존 명칭을 그대로 다시 적고, 실제로 바뀐 필드만 새 값으로 적는다. building/floor/ward는 장소를 설명하는 한국어 명칭으로 적으면 Worker가 표준 ID로 정규화하며, 표준 ID로 정규화되지 않는 값은 무시된다. 이동을 제안하거나 준비만 했을 뿐 아직 도착하지 않았다면 world_state_patch를 채우지 말고 비워둔다. 기존 지도 장소를 우선 재사용하고, 새 구체적 방이 실제 장면 위치가 되면 기존 1·3·5·6층과 3·6병동 안의 정확한 location_label만 반환한다. 새 병원·건물·층·병동과 단순 언급·가정 장소를 만들거나 저장하지 마라. 빈 문자열로 기존 값을 덮어쓰지 마라.
@@ -3770,6 +3791,7 @@ ${JSON.stringify(imageCatalog)}
   "sexual_events": [{"character_id": "현재 등장한 등록 NPC ID", "type": "vaginal_penetration|anal_penetration|oral_sex|npc_orgasm|player_orgasm|vaginal_ejaculation|anal_ejaculation|oral_ejaculation|facial_ejaculation|body_ejaculation|unspecified_ejaculation", "completed": true, "evidence": "이번 최종 Story에서 실제 완료된 짧은 근거"}],
   "relationship_memory_patch": [{"text": "최종 Story에서 실제 완료된 중요한 관계 사건의 짧은 사실", "permanent": false}],
   "npc_scene_state_patch": {"heroine1": {"clothing": {"uniform_top": "worn|removed|open|unknown", "uniform_bottom": "worn|removed|open|unknown", "underwear_top": "worn|removed|unknown", "underwear_bottom": "worn|removed|unknown"}, "posture": "standing|sitting|kneeling|lying|unknown", "current_action": "실제 현재 행동, 없으면 생략"}},
+  "player_scene_state_patch": {"posture": "standing|sitting|kneeling|lying_supine|lying_prone|side_lying|straddling|bent_forward|leaning|walking|crouching|carrying|unknown", "position_label": "최종 Story에서 실제 완료된 플레이어의 현재 자세/방향, 없으면 생략"},
   "turn_summary": "이번 턴에서 변한 핵심 사실 1~3문장",
   "is_sexual": false,
   "choices": ["서사의 선택지를 그대로 옮겨라"],
@@ -3962,6 +3984,7 @@ function normalizeRegisteredNpcExtract(extract = {}, characters = {}, lastCharac
     normalized.sexual_events = [];
     normalized.relationship_memory_patch = [];
     normalized.npc_scene_state_patch = {};
+    normalized.player_scene_state_patch = null;
     normalized.image_id = null;
     normalized.is_sexual = false;
     normalized.first_encounter_stats = null;
@@ -4187,6 +4210,8 @@ function buildSavePatch(extract, enginePatch = {}, summaryPlan = null, previousS
   if (!degraded) {
     const sceneState = buildNpcSceneStatePatch(previousSave, extract.npc_scene_state_patch, turnNumber);
     if (sceneState) patch.npc_scene_state = sceneState;
+    const playerSceneState = buildPlayerSceneStatePatch(previousSave, extract.player_scene_state_patch, turnNumber);
+    if (playerSceneState) patch.player_scene_state = playerSceneState;
     const registeredPresent = [...new Set((Array.isArray(extract.npcs_present) ? extract.npcs_present : []).filter(id => typeof id === 'string' && id && id !== 'narrator'))];
     patch.last_npcs_present = registeredPresent;
     const locationLabel = mergedWorldState.location_label || previousSave?.player_location || previousSave?.world_state?.location_label || '';
@@ -4394,6 +4419,7 @@ function normalizeExtract(extract) {
   normalized.sexual_events = normalizeSexualEvents(normalized.sexual_events);
   normalized.relationship_memory_patch = normalizeRelationshipMemoryItems(normalized.relationship_memory_patch, { limit: 2 });
   normalized.npc_scene_state_patch = normalizeNpcSceneStatePatch(normalized.npc_scene_state_patch);
+  normalized.player_scene_state_patch = normalizePlayerSceneStatePatch(normalized.player_scene_state_patch);
   if (!isPlainObject(normalized.first_encounter_stats)) normalized.first_encounter_stats = null;
   if (!isPlainObject(normalized.world_state_patch)) normalized.world_state_patch = null;
   delete normalized.image_reasoning;
@@ -4497,6 +4523,27 @@ function normalizeNpcSceneStatePatch(value) {
     if (Object.keys(state).length) result[characterId] = state;
   }
   return result;
+}
+
+const PLAYER_SCENE_POSTURES = new Set(['standing', 'sitting', 'kneeling', 'lying_supine', 'lying_prone', 'side_lying', 'straddling', 'bent_forward', 'leaning', 'walking', 'crouching', 'carrying', 'unknown']);
+
+function normalizePlayerSceneStatePatch(value) {
+  if (!isPlainObject(value)) return null;
+  const result = {};
+  if (PLAYER_SCENE_POSTURES.has(value.posture)) result.posture = value.posture;
+  const label = typeof value.position_label === 'string' ? value.position_label.trim().replace(/\s+/g, ' ').slice(0, 100) : '';
+  if (label) result.position_label = label;
+  for (const key of ['support', 'orientation']) {
+    const text = typeof value[key] === 'string' ? value[key].trim().replace(/\s+/g, ' ').slice(0, 80) : '';
+    if (text) result[key] = text;
+  }
+  return Object.keys(result).length ? result : null;
+}
+
+function buildPlayerSceneStatePatch(previousSave = {}, rawPatch = null, turnNumber = 0) {
+  const next = normalizePlayerSceneStatePatch(rawPatch);
+  if (!next) return null;
+  return { ...(isPlainObject(previousSave?.player_scene_state) ? previousSave.player_scene_state : {}), ...next, updated_turn: turnNumber };
 }
 
 function buildNpcSceneStatePatch(previousSave = {}, sceneStatePatch = {}, turnNumber = 0) {
@@ -4920,7 +4967,9 @@ function buildCurrentCsaStatusPanelText(save = {}, master = {}, activeCsa = getA
   const csaLines = snapshot.applicableCsa.length
     ? snapshot.applicableCsa.map(item => `- [${item.strength}] ${item.content}`).join('\n')
     : '- 없음';
-  return `📱 상식개변 앱: Lv.${snapshot.level} · EXP ${snapshot.exp}/${snapshot.next} · 활성 ${snapshot.csaCount}/${snapshot.csaMax}\n\n🌐 병원 전체 적용 상식\n${csaLines}`;
+  const playerScene = isPlainObject(save?.player_scene_state) ? save.player_scene_state : {};
+  const position = typeof playerScene.position_label === 'string' && playerScene.position_label.trim() ? playerScene.position_label.trim() : '미설정';
+  return `🧍 자세/상태: ${position}\n\n📱 상식개변 앱: Lv.${snapshot.level} · EXP ${snapshot.exp}/${snapshot.next} · 활성 ${snapshot.csaCount}/${snapshot.csaMax}\n\n🌐 병원 전체 적용 상식\n${csaLines}`;
 }
 
 function buildCurrentNpcSexualHistorySection(save = {}, characters = {}) {

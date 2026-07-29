@@ -2649,7 +2649,7 @@ function withSetupCompatibility(ctx = {}) {
     ...ctx,
     save: {
       ...save,
-      player_setup: { status: 'complete', recommendation: normalizeRecommendation(save.player) }
+      player_setup: { status: 'complete', recommendation: normalizePlayerProfile(save.player) }
     }
   };
 }
@@ -2663,28 +2663,72 @@ function isApprovalInput(input = '') {
   return ['①', '1', ...phrases].includes(String(input).trim()) || phrases.includes(normalized);
 }
 
-function normalizeRecommendation(value = {}) {
+function normalizePlayerProfile(value = {}) {
   if (!isPlainObject(value)) return {};
   const result = {};
-  for (const key of ['name', 'gender', 'job', 'major', 'rank', 'style', 'background']) {
+  for (const key of [
+    'name',
+    'gender',
+    'job',
+    'major',
+    'rank',
+    'style',
+    'personality',
+    'speech_style',
+    'background',
+    'location',
+    'starting_location',
+    'short_feature',
+    'play_hook'
+  ]) {
     if (typeof value[key] === 'string' && value[key].trim()) result[key] = value[key].trim();
   }
-  // A structured preset carries starting_location; a legacy/custom
-  // recommendation may carry location directly — either maps onto the same
-  // game_save.player.location field.
-  const location = typeof value.location === 'string' && value.location.trim()
-    ? value.location.trim()
-    : (typeof value.starting_location === 'string' && value.starting_location.trim() ? value.starting_location.trim() : null);
-  if (location) result.location = location;
-  for (const key of ['age', 'height_cm', 'weight_kg', 'penis_length_cm']) {
-    const number = Number(value[key]);
-    if (Number.isFinite(number) && number > 0) result[key] = Math.round(number);
-  }
+  const age = isIntegerInRange(value.age, [MIN_ADULT_AGE, MAX_ADULT_AGE]);
+  if (age !== null) result.age = age;
+  const heightCm = isIntegerInRange(value.height_cm, PLAYER_HEIGHT_RANGE_CM);
+  if (heightCm !== null) result.height_cm = heightCm;
+  const weightKg = isIntegerInRange(value.weight_kg, PLAYER_WEIGHT_RANGE_KG);
+  if (weightKg !== null) result.weight_kg = weightKg;
+  const penisLengthCm = isIntegerInRange(value.penis_length_cm, PLAYER_PENIS_LENGTH_RANGE_CM);
+  if (penisLengthCm !== null) result.penis_length_cm = penisLengthCm;
   return result;
 }
 
+function toPlayerSave(profile = {}) {
+  const normalized = normalizePlayerProfile(profile);
+  const result = {};
+  for (const key of [
+    'name',
+    'age',
+    'gender',
+    'job',
+    'major',
+    'rank',
+    'height_cm',
+    'weight_kg',
+    'penis_length_cm',
+    'style',
+    'background'
+  ]) {
+    if (Object.prototype.hasOwnProperty.call(normalized, key)) result[key] = normalized[key];
+  }
+  const location = normalized.starting_location || normalized.location;
+  if (location) result.location = location;
+  return result;
+}
+
+function mergePlayerProfile(previous = {}, patch = {}) {
+  return { ...normalizePlayerProfile(previous), ...normalizePlayerProfile(patch) };
+}
+
+// Compatibility aliases retained for existing callers that only knew the
+// older, narrower recommendation helper names.
+function normalizeRecommendation(value = {}) {
+  return normalizePlayerProfile(value);
+}
+
 function mergeRecommendation(previous = {}, patch = {}) {
-  return { ...normalizeRecommendation(previous), ...normalizeRecommendation(patch) };
+  return mergePlayerProfile(previous, patch);
 }
 
 // ─────────────────────────────────────────────
@@ -2780,7 +2824,7 @@ function normalizeRecommendationCandidate(value, index, narrativeChoice = '') {
   const penisLengthCm = isIntegerInRange(value.penis_length_cm, PLAYER_PENIS_LENGTH_RANGE_CM);
   if (penisLengthCm !== null) candidate.penis_length_cm = penisLengthCm;
 
-  for (const key of ['style', 'speech_style', 'personality', 'background', 'starting_location', 'short_feature', 'major', 'rank']) {
+  for (const key of ['style', 'speech_style', 'personality', 'background', 'starting_location', 'short_feature', 'play_hook', 'major', 'rank']) {
     if (typeof value[key] === 'string' && value[key].trim()) candidate[key] = value[key].trim();
   }
 
@@ -2867,46 +2911,68 @@ function resolveRecommendationSelection(input, playerSetup) {
 // this very turn takes priority, then a previously-selected preset, then the
 // legacy single recommendation, then whatever raw player fields exist.
 function resolveConfirmedPlayerProfile(save, selection) {
-  if (isPlainObject(selection)) return selection;
+  if (isPlainObject(selection)) return normalizePlayerProfile(selection);
   const setupInfo = isPlainObject(save?.player_setup) ? save.player_setup : {};
   const recommendations = Array.isArray(setupInfo.recommendations) ? setupInfo.recommendations : [];
   const matched = setupInfo.selected_id ? recommendations.find(r => r.id === setupInfo.selected_id) : null;
-  if (matched) return matched;
-  if (isPlainObject(setupInfo.recommendation)) return setupInfo.recommendation;
-  return isPlainObject(save?.player) ? save.player : {};
+  if (isPlainObject(setupInfo.selected_profile)) {
+    return mergePlayerProfile(
+      matched || setupInfo.recommendation || save?.player,
+      setupInfo.selected_profile
+    );
+  }
+  if (matched) return normalizePlayerProfile(matched);
+  if (isPlainObject(setupInfo.recommendation)) return normalizePlayerProfile(setupInfo.recommendation);
+  return normalizePlayerProfile(save?.player);
+}
+
+function buildPlayerProfileDetailLines(profile = {}) {
+  const normalized = normalizePlayerProfile(profile);
+  const lines = [];
+  if (normalized.name) lines.push(`이름: ${normalized.name}`);
+  if (Number.isFinite(normalized.age)) lines.push(`나이: ${normalized.age}`);
+  if (normalized.gender) lines.push(`성별: ${normalized.gender}`);
+  if (normalized.job) lines.push(`직업: ${normalized.job}`);
+  const rankPart = [normalized.major, normalized.rank].filter(Boolean).join(' / ');
+  if (rankPart) lines.push(`전공/직급: ${rankPart}`);
+  if (Number.isFinite(normalized.height_cm)) lines.push(`키: ${normalized.height_cm}cm`);
+  if (Number.isFinite(normalized.weight_kg)) lines.push(`몸무게: ${normalized.weight_kg}kg`);
+  if (Number.isFinite(normalized.penis_length_cm)) lines.push(`성기 크기: ${normalized.penis_length_cm}cm`);
+  if (normalized.style) lines.push(`외형: ${normalized.style}`);
+  if (normalized.personality) lines.push(`성격: ${normalized.personality}`);
+  if (normalized.speech_style) lines.push(`말투: ${normalized.speech_style}`);
+  if (normalized.background) lines.push(`배경: ${normalized.background}`);
+  const location = normalized.starting_location || normalized.location;
+  if (location) lines.push(`시작 장소: ${location}`);
+  const feature = normalized.short_feature || normalized.play_hook;
+  if (feature) lines.push(`특징: ${feature}`);
+  return lines;
 }
 
 // H3-A item 5: only lines with a real value are emitted — never
 // "undefined"/blank placeholders — since a candidate's optional fields may
 // now legitimately be absent.
 function buildConfirmedPlayerSetupSection(profile = {}) {
-  const lines = [`이름: ${profile.name || ''}`];
-  if (Number.isFinite(profile.age)) lines.push(`나이: ${profile.age}`);
-  lines.push(`성별: ${profile.gender || '남성'}`);
-  lines.push(`직업: ${profile.job || ''}`);
-  const rankPart = [profile.major, profile.rank].filter(Boolean).join(' / ');
-  if (rankPart) lines.push(`전공/직급: ${rankPart}`);
-  if (Number.isFinite(profile.height_cm)) lines.push(`키: ${profile.height_cm}cm`);
-  if (Number.isFinite(profile.weight_kg)) lines.push(`몸무게: ${profile.weight_kg}kg`);
-  if (Number.isFinite(profile.penis_length_cm)) lines.push(`성기 크기: ${profile.penis_length_cm}cm`);
-  if (profile.style) lines.push(`외형: ${profile.style}`);
-  if (profile.personality) lines.push(`성격: ${profile.personality}`);
-  if (profile.speech_style) lines.push(`말투: ${profile.speech_style}`);
-  if (profile.background) lines.push(`배경: ${profile.background}`);
-  const location = profile.starting_location || profile.location;
-  if (location) lines.push(`시작 장소: ${location}`);
-  const feature = profile.short_feature || profile.play_hook;
-  if (feature) lines.push(`특징: ${feature}`);
+  const lines = buildPlayerProfileDetailLines(profile);
   return `\n\n[CONFIRMED PLAYER SETUP — ESTABLISHED FACT]\n\n${lines.join('\n')}\n\n규칙:\n- 이 설정을 다시 추천하거나 질문하지 않는다.\n- 위에 표시된 값만 확정 사실이며, 없는 값을 임의로 새로 만들지 않는다.\n- 표시된 값을 임의로 바꾸지 않는다.\n- 선택한 캐릭터로 병원 오프닝을 즉시 시작한다.`;
 }
 
-function buildPlayerSetupGenerationSection() {
+function buildPlayerSetupGenerationSectionBase() {
   return `\n\n[PLAYER SETUP PHASE — GENERATE 4 CANDIDATES — HIGHEST PRIORITY, NO QUESTIONS]\n사용자에게 "어떤 캐릭터를 원하시나요?", "어떤 세계에서 시작하고 싶나요?" 같은 열린 질문을 절대 하지 않는다. 사용자의 대답을 기다리지 말고, 지금 이 응답 안에서 아래 4개 후보를 전부 직접 만들어서 완성된 형태로 즉시 보여준다. "대기", "대기 중", "곧 결정됩니다", "캐릭터 생성 단계"처럼 후보 생성을 다음 턴으로 미루거나 진행 중이라고 암시하는 표현을 본문 어디에도 쓰지 않는다. [3. 선택지]를 비워두거나 다른 용도로 쓰지 않는다 — 반드시 아래 4번(플레이어 후보 4개의 짧은 선택지)으로 채운다. [3. 선택지]에 등록 NPC 이름이나 NPC를 고르는 선택지를 넣지 않는다 — 이건 플레이어 자신의 캐릭터를 고르는 단계이지 NPC를 고르는 단계가 아니다.\n1. 삭제되지 않는 최면 어플 발견과 핵심 기능을 2~3문장으로 짧게 알린다.\n2. 병원 장면이나 등록 NPC는 아직 등장시키지 않는다.\n3. 바로 이어서, 플레이어 캐릭터 후보 4개를 전부 확정해서 만든다(질문으로 대체하지 않는다). 네 후보 모두 성인 남성이다. 역할 슬롯은 고정한다:\n   1번(hospital_worker): 병원에서 근무하는 성인 남성 — 의사, 인턴, 간호사, 임상병리사, 방사선사, 물리치료사, 병원 행정직, 보안요원 등\n   2번(patient): 현재 입원 중이거나 외래 진료를 받는 성인 남성 환자. 질병·부상은 정상적인 플레이를 막지 않는 수준이어야 하며, 의식불명이나 심각한 인지장애 등 플레이가 어려운 설정은 금지한다.\n   3번(hospital_adjacent): 병원과 연결된 성인 남성 외부인 — 보호자, 면회객, 납품업자, 보험조사원, 기자, 실습생, 병원 재단 관계자 등\n   4번(wildcard): 앞의 세 역할과 플레이 방식이 겹치지 않으면서 병원 세계관에서 자연스럽게 시작할 수 있는 성인 남성\n4. 이름·나이·직업 세부 설정은 매번 새롭고 다양하게 만들되, 네 후보는 신분과 병원 접근 권한, NPC에게 접근하는 방식, 초반 난이도, 최면 어플을 쓸 동기, 시작 장소가 서로 확실히 달라야 한다.\n5. 모든 후보는 성인(만 19세 이상)이며 성별은 남성으로 고정한다.\n6. 네 후보 각각에 키(cm)·몸무게(kg)·성기 크기(cm)를 현실적인 성인 범위 안에서 반드시 정하고, 외형(style)·성격(personality)·말투(speech_style)도 각 후보가 서로 다르게 만든다.\n7. 네 후보 각각을 다음 카드 형식으로 짧고 정보 중심으로 출력한다 — 배경은 최대 2문장, 플레이 특징은 한 문장으로 압축한다(병원 접근 권한·초반 난이도·어플 활용 동기를 그 한 문장 안에 녹인다). 마크다운 굵게 **는 새로 쓰지 않는다:\n[후보 N · 역할 한글명]\n이름 · 나이 · 남성\n직업: 직업 / 전공·직급(있으면)\n신체: 키cm / 몸무게kg / 성기 크기cm\n외형: style\n성격·말투: personality / speech_style\n배경: 최대 2문장\n특징: 한 문장\n8. [선택지]에는 정확히 네 개, 각 후보를 "이름 · 직업" 형태로만 짧게 적는다(공백 포함 24자 이하 목표). 시작 장소·접근 방식·어플 활용 계획·배경 설명 등 긴 문장을 넣지 않는다. 번호나 마커 없이 "이름 · 직업" 문구 자체만 적는다. 카테고리를 묻는 질문형 선택지나 NPC 선택지를 만들지 않는다.\n9. 항목별로 하나씩 질문하지 않는다. 사용자가 특정 조건을 말하면 다음 응답에서 네 후보 전체를 그 조건에 맞게 다시 만든다.\n\n[출력 형태 예시 — 실제 이름·설정은 매번 새로 만들 것, 이 예시를 그대로 베끼지 말 것]\n[1. 서사 및 행동]\n(어플 발견 2~3문장)\n\n[후보 1 · 병원 직원]\n(이름) · (나이) · 남성\n직업: (직업)\n신체: (키)cm / (몸무게)kg / (성기 크기)cm\n외형: (style)\n성격·말투: (personality) / (speech_style)\n배경: (최대 2문장)\n특징: (한 문장)\n\n[후보 2 · 환자] ... (후보 3, 4도 동일한 형식으로 이어짐)\n\n[2. 플레이어 상황판]\n(간단한 상태 표시, "대기" 표현 없이)\n\n[3. 선택지]\n(후보1 이름) · (후보1 직업)\n(후보2 이름) · (후보2 직업)\n(후보3 이름) · (후보3 직업)\n(후보4 이름) · (후보4 직업)`;
+}
+
+function buildPlayerSetupGenerationSection() {
+  return `\n\n[FREE CUSTOM PLAYER INPUT — HIGH PRIORITY]\n사용자가 네 후보 대신 원하는 플레이어 캐릭터 한 명을 구체적으로 설명하면, 이 규칙이 아래 4후보 규칙보다 우선한다. 그 설명을 반영한 완성형 커스텀 추천안 하나를 보여주고 승인을 받는다. 사용자가 명시한 값은 바꾸지 말고, 누락된 필드만 세계관과 입력에 맞춰 보완한다. 이름·나이·성별·직업·전공/직급·키·몸무게·성기 크기·외형·성격·말투·배경·시작 장소·특징을 실제 값이 있는 범위에서 카드로 보여준다. 승인 전에는 병원 오프닝을 시작하지 않으며, [3. 선택지]에는 승인 또는 일부 수정 의도만 제시하고 네 후보를 만들지 않는다.`
+    + buildPlayerSetupGenerationSectionBase();
 }
 
 // H3-A item 5: same no-placeholder rule as buildConfirmedPlayerSetupSection
 // — a card only ever shows fields that actually have a value.
-function buildPlayerSetupRedisplaySection(recommendations) {
+function buildPlayerSetupRedisplaySection(recommendations, customRecommendation = null) {
+  const customProfile = normalizePlayerProfile(customRecommendation);
+  if (!Array.isArray(recommendations) && Object.keys(customProfile).length) {
+    return `\n\n[PLAYER SETUP PHASE — CUSTOM RECOMMENDATION PENDING]\n아래는 사용자의 자유 입력을 바탕으로 한 완성형 추천안이다. 사용자가 새 캐릭터 설명을 입력하면 이 설정을 유지한 채 요청한 부분만 수정해 전체 추천안을 다시 보여준다. “추천 설정으로 시작한다” 또는 “이 설정으로 시작한다”라고 확인하기 전에는 병원 오프닝을 시작하지 않는다.\n\n${buildPlayerProfileDetailLines(customProfile).join('\n')}\n\n[선택지]에는 “추천 설정으로 시작한다”와 “설정 일부 수정”처럼 승인 또는 수정 의도만 제시한다.`;
+  }
   const cards = recommendations.map((rec, index) => {
     const label = SETUP_ROLE_LABELS[rec.slot] || rec.slot;
     const rankPart = [rec.major, rec.rank].filter(Boolean).join(' / ');
@@ -2926,7 +2992,8 @@ function buildPlayerSetupRedisplaySection(recommendations) {
     const styleParts = [rec.personality, rec.speech_style].filter(Boolean).join(' / ');
     if (styleParts) lines.push(`성격·말투: ${styleParts}`);
     if (rec.background) lines.push(`배경: ${rec.background}`);
-    if (rec.short_feature) lines.push(`특징: ${rec.short_feature}`);
+    const feature = rec.short_feature || rec.play_hook;
+    if (feature) lines.push(`특징: ${feature}`);
     lines.push(`선택지 문구: ${rec.choice_label}`);
     return lines.join('\n');
   }).join('\n\n');
@@ -3272,9 +3339,17 @@ function buildStoryPrompt(ctx, playerInput, currentTurn, feedback = [], regenera
   const isFirstTurn = nextTurn === 1;
   const setupComplete = isSetupComplete(save);
   const structuredSelection = !setupComplete ? resolveRecommendationSelection(playerInput, save.player_setup) : null;
-  const legacyApprovalPending = !setupComplete && !structuredSelection && Boolean(save.player_setup?.recommendation) && isApprovalInput(playerInput);
+  const savedCustomProfile = normalizePlayerProfile(save.player_setup?.recommendation);
+  const hasCustomRecommendation = Object.keys(savedCustomProfile).length > 0
+    && (save.player_setup?.source === 'custom' || !Array.isArray(save.player_setup?.recommendations));
+  const hasStructuredRecommendations = Array.isArray(save.player_setup?.recommendations)
+    && save.player_setup.recommendations.length === 4
+    && !hasCustomRecommendation;
+  const legacyApprovalPending = !setupComplete
+    && !structuredSelection
+    && Boolean(savedCustomProfile.name && savedCustomProfile.job)
+    && isApprovalInput(playerInput);
   const approvalPending = Boolean(structuredSelection) || legacyApprovalPending;
-  const hasStructuredRecommendations = Array.isArray(save.player_setup?.recommendations) && save.player_setup.recommendations.length === 4;
   const needsOpening = setupComplete && save.opening_started !== true;
   const needsRulebook = isFirstTurn || needsOpening || nextTurn % 10 === 0;
   const mode = isReentry ? 'reentry' : (!setupComplete ? (approvalPending ? 'opening' : 'player_setup') : (needsOpening ? 'opening' : 'normal'));
@@ -3296,7 +3371,11 @@ function buildStoryPrompt(ctx, playerInput, currentTurn, feedback = [], regenera
 
   // ─── 섹션 2: 플레이어 게이트 (조걸) ───
   const playerGate = !setupComplete && !approvalPending
-    ? (hasStructuredRecommendations ? buildPlayerSetupRedisplaySection(save.player_setup.recommendations) : buildPlayerSetupGenerationSection())
+    ? (hasStructuredRecommendations
+      ? buildPlayerSetupRedisplaySection(save.player_setup.recommendations)
+      : (hasCustomRecommendation
+        ? buildPlayerSetupRedisplaySection(null, save.player_setup.recommendation)
+        : buildPlayerSetupGenerationSection()))
     : '';
   let modeSection = '';
   if (isReentry) {
@@ -3546,8 +3625,8 @@ ${mindEffectExtractFirewallSection}
 save.player_setup.status가 complete가 아니면 이 턴의 서사가 무엇이었는지부터 확인한다.
 - 방금 서사가 4개의 새 후보 카드를 만들었다면(선택지가 4개의 짧은 "이름 · 직업" 문구인 경우) player_recommendations에 정확히 4개를 반환한다. 각 항목은 id("preset_1"~"preset_4"), slot(hospital_worker/patient/hospital_adjacent/wildcard 중 하나, 4개 슬롯 각각 정확히 하나씩 사용), name, age(19 이상 정수), gender(항상 "남성"), job, height_cm/weight_kg/penis_length_cm(서사의 "신체" 줄에서 가져온 현실적인 성인 범위의 정수, 빠짐없이 채운다), style(서사의 "외형"), speech_style·personality(서사의 "성격·말투"에서 분리), background(서사의 "배경"), starting_location, short_feature(서사의 "특징" 한 문장), choice_label(서사의 [선택지]에 실제로 적은 "이름 · 직업" 문구와 완전히 동일한 문자열)을 모두 채운다. major/rank는 서사에 있으면 채운다. 이 필드 중 하나라도 서사에 없으면 만들어서 채우지 말고 해당 항목을 빈 문자열/0으로 두지도 말라 — 서사 자체를 다시 확인해 누락 없이 채운다.
 - 방금 서사가 이미 저장된 4개 후보를 내용 변경 없이 그대로 다시 보여줬을 뿐이면(사용자가 아직 선택하지 않음) player_recommendations는 빈 배열 []로 둔다.
-- 사용자가 4개 후보 대신 원하는 캐릭터를 직접 설명해서 서사가 그 설명을 반영한 하나의 커스텀 캐릭터를 새로 제안했다면 player_recommendation(단수)에 name, age, gender, job, major, rank, height_cm, weight_kg, style, background를 모두 채운 완성형 추천안을 반환한다. 일부만 바꾼 요청이면 사용자가 명시적으로 바꾼 필드만 반환한다.
-- 이 단계에서는 player_patch에 값을 넣지 마라. 후보 선택(번호, ①~④, 선택 문장, "추천 설정으로 시작한다" 등)은 Worker가 저장된 recommendations에서 직접 판정하므로 player_patch나 player_recommendation에 선택 결과를 추측해 넣지 마라.
+- 사용자가 4개 후보 대신 원하는 캐릭터를 직접 설명했거나, 기존 자유 입력 추천안의 일부 수정을 요청해 서사가 하나의 커스텀 추천안을 제시했다면 player_recommendation(단수)만 사용한다. 반환 가능한 필드는 name, age, gender, job, major, rank, height_cm, weight_kg, penis_length_cm, style, personality, speech_style, background, starting_location, short_feature, play_hook이다. 사용자가 직접 명시한 값은 바꾸지 않으며, 새 자유 입력 추천이면 입력에 없는 값만 세계관과 요청에 맞춰 보완한다. 기존 추천 수정이면 Story가 실제로 바꾼 필드만 반환한다.
+- 이미 저장된 자유 입력 추천을 승인하는 턴에는 새 player_recommendation을 추측하거나 만들지 않는다. setup 미완료 상태에서는 player_patch에 값을 넣지 마라. 후보 선택과 자유 입력 추천 승인은 Worker가 저장된 상태로 직접 판정한다.
 
 [줄거리 요약 갱신 — 크기 고정형]
 story_summary_recent100(1000자) 뒤에 이번 턴 핵심 사건을 이어붙인다. 1000자 초과 시 오래된 부분 압축.
@@ -3649,7 +3728,7 @@ ${JSON.stringify(imageCatalog)}
   "npc_stat_changes": {"호감도": {"delta": 0, "reason": "변화 근거 없음"}, "신뢰도": {"delta": 0, "reason": "변화 근거 없음"}, "최면깊이": {"delta": 0, "reason": "일반 대화"}, "순응도": {"delta": 0, "reason": "변화 근거 없음"}, "최면저항력": {"delta": 0, "reason": "고정값"}},
   "first_encounter_stats": null,
   "player_patch": {"name": "", "age": 0, "gender": "", "height_cm": 0, "weight_kg": 0, "job": "", "background": "", "location": "", "style": "", "penis_length_cm": 0},
-  "player_recommendation": {"name": "", "age": 0, "gender": "", "job": "", "major": "", "rank": "", "height_cm": 0, "weight_kg": 0, "style": "", "background": ""},
+  "player_recommendation": {"name": "", "age": 0, "gender": "", "job": "", "major": "", "rank": "", "height_cm": 0, "weight_kg": 0, "penis_length_cm": 0, "style": "", "personality": "", "speech_style": "", "background": "", "starting_location": "", "short_feature": "", "play_hook": ""},
   "player_recommendations": [{"id": "preset_1", "slot": "hospital_worker", "name": "", "age": 0, "gender": "남성", "job": "", "major": "", "rank": "", "height_cm": 0, "weight_kg": 0, "penis_length_cm": 0, "style": "", "speech_style": "", "personality": "", "background": "", "starting_location": "", "short_feature": "", "choice_label": "이름 · 직업 형태의 짧은 문구"}],
   "growth_event": "none | minor | standard | major (사건의 의미만 제안, 경험치 숫자는 결정하지 말 것)",
   "world_state_patch": {"building": "이동 완료 시 기존 또는 새 건물명, 이동 없으면 전체 비움", "floor": "이동 완료 시 기존 또는 새 층 명칭", "ward": "이동 완료 시 기존 또는 새 병동 명칭", "location_label": "이동 완료 시 도착한 새 장소, 이동 없으면 전체 비움"},
@@ -4064,39 +4143,56 @@ function buildSavePatch(extract, enginePatch = {}, summaryPlan = null, previousS
     // approval silently fail the way exact-string isApprovalInput() did.
     const selection = resolveRecommendationSelection(playerInput, previousSetup);
     if (selection) {
-      patch.player = normalizeRecommendation(selection);
-      // speech_style/personality have no column on game_save.player and are
-      // never merged into style/background — they live only in this JSONB
-      // sub-object, no migration required.
+      const fullProfile = normalizePlayerProfile(selection);
+      patch.player = toPlayerSave(fullProfile);
       patch.player_setup = {
         ...previousSetup,
         status: 'complete',
+        source: 'preset',
         selected_id: selection.id,
-        selected_profile: { speech_style: selection.speech_style || '', personality: selection.personality || '' }
+        selected_profile: fullProfile
       };
       patch.opening_started = true;
     } else {
       // Legacy/custom-description path: kept for saves mid-flow under the old
       // single-recommendation shape, and for a player who free-types their
       // own character instead of picking one of the 4 presets.
-      const legacyRecommendation = mergeRecommendation(previousSetup.recommendation, extract.player_recommendation);
+      const recommendationPatch = normalizePlayerProfile(extract.player_recommendation);
+      const fallbackPatch = Object.keys(recommendationPatch).length
+        ? recommendationPatch
+        : normalizePlayerProfile(extract.player_patch);
+      const customRecommendation = mergePlayerProfile(previousSetup.recommendation, fallbackPatch);
       const legacyApproval = Boolean(previousSetup.recommendation) && isApprovalInput(playerInput);
       const newRecommendations = normalizeRecommendations(extract.player_recommendations, extract.choices);
       if (legacyApproval) {
-        patch.player = legacyRecommendation;
-        patch.player_setup = { ...previousSetup, status: 'complete', recommendation: legacyRecommendation };
-        patch.opening_started = true;
+        const confirmedProfile = normalizePlayerProfile(previousSetup.recommendation);
+        if (confirmedProfile.name && confirmedProfile.job) {
+          patch.player = toPlayerSave(confirmedProfile);
+          patch.player_setup = {
+            ...previousSetup,
+            status: 'complete',
+            source: 'custom',
+            selected_id: 'custom',
+            recommendation: confirmedProfile,
+            selected_profile: confirmedProfile
+          };
+          patch.opening_started = true;
+        }
+      } else if (Object.keys(fallbackPatch).length > 0) {
+        patch.player_setup = {
+          ...previousSetup,
+          status: 'recommended',
+          source: 'custom',
+          recommendation: customRecommendation
+        };
       } else if (newRecommendations) {
         patch.player_setup = { ...previousSetup, status: 'recommended', recommendations: newRecommendations };
-      } else if (Object.keys(normalizeRecommendation(extract.player_recommendation)).length > 0) {
-        patch.player_setup = { ...previousSetup, status: 'recommended', recommendation: legacyRecommendation };
-      } else if (extract.player_patch && Object.keys(extract.player_patch).length > 0) {
-        patch.player = extract.player_patch;
       }
     }
   }
   if (!previousSave?.player_setup && setupComplete) {
-    patch.player_setup = { status: 'complete', recommendation: normalizeRecommendation(previousSave.player) };
+    const profile = normalizePlayerProfile(previousSave.player);
+    patch.player_setup = { status: 'complete', source: 'legacy', recommendation: profile, selected_profile: profile };
   }
   if (enginePatch?.opening_started === true) {
     patch.opening_started = true;
@@ -4996,7 +5092,7 @@ function applySuggestionAction(previousSave, action, currentCharacterId, turnNum
 // Injects every registered NPC's active suggestions (not just the current
 // scene's NPC), each clearly labeled, so continuity holds even if the story
 // references or revisits an NPC who isn't on screen this turn.
-function buildActiveSuggestionSectionBase(save, characters = {}) {
+function buildActiveSuggestionSection(save, characters = {}) {
   const map = normalizeLegacyActiveSuggestions(save?.active_suggestions);
   const entries = Object.entries(map)
     .map(([characterId, list]) => [characterId, (Array.isArray(list) ? list : []).filter(item => item?.active === true)])
@@ -5007,14 +5103,7 @@ function buildActiveSuggestionSectionBase(save, characters = {}) {
     const lines = list.map(item => `- ${item.content}\n  강도: ${item.strength}\n  적용 턴: ${item.created_turn}`).join('\n');
     return `${name}(${characterId})\n${lines}`;
   }).join('\n\n');
-  return `\n\n[ACTIVE PERSONAL SUGGESTIONS — ESTABLISHED FACTS]\n\n${blocks}\n\n규칙:\n- 위 암시는 각 NPC에게 이미 성공해 활성 상태다.\n- 성공 여부를 다시 의심하거나 같은 암시를 다시 거는 장면을 만들지 않는다.\n- 해당 NPC는 암시 범위 안의 요청을 자기 성격에 맞게 자연스럽게 따른다. 실제 수행 효과는 최면깊이에 누적될 수 있으나, 같은 내용을 반복 문장으로 쓰지 않는다.\n- 암시 범위를 벗어난 무조건 복종으로 확대하지 않는다.\n- 다른 NPC에게 잘못 적용하지 않는다.\n- 활성 암시 슬롯이 가득 찼으면 신규 암시는 반드시 실패한다.\n- 사용자가 명시적으로 삭제·해제·수정·교체하지 않은 기존 암시는 절대 변경하지 않는다.\n- 대상 NPC에게 기존 활성 암시가 없으면 기존 암시 수정으로 처리하지 않는다.\n- 실패한 암시의 효과나 신체 반응을 발생시키지 않는다.\n\n[금지 표현]\n- 암시가 먹힌 것 같다\n- 암시가 제대로 적용됐는지 모르겠다\n- 다시 걸어봐야겠다\n- 효과를 확인해야겠다\n- 아까 최면이 성공했는지 확실하지 않다`;
-}
-
-function buildActiveSuggestionSection(save, characters = {}) {
-  return buildActiveSuggestionSectionBase(save, characters).replace(
-    '- 암시 범위를 벗어난 무조건 복종으로 확대하지 않는다.',
-    '- 효과 해석은 [MIND EFFECT BOUNDARY]를 따른다.'
-  );
+  return `\n\n[ACTIVE PERSONAL SUGGESTIONS — ESTABLISHED FACTS]\n\n${blocks}\n\n규칙:\n- 위 암시는 각 NPC에게 이미 성공해 활성 상태다.\n- 성공 여부를 다시 의심하거나 같은 암시를 다시 거는 장면을 만들지 않는다.\n- 해당 NPC는 암시 범위 안의 요청을 자기 성격에 맞게 자연스럽게 따른다. 실제 수행 효과는 최면깊이에 누적될 수 있으나, 같은 내용을 반복 문장으로 쓰지 않는다.\n- 효과 해석은 [MIND EFFECT BOUNDARY]를 따른다.\n- 다른 NPC에게 잘못 적용하지 않는다.\n- 활성 암시 슬롯이 가득 찼으면 신규 암시는 반드시 실패한다.\n- 사용자가 명시적으로 삭제·해제·수정·교체하지 않은 기존 암시는 절대 변경하지 않는다.\n- 대상 NPC에게 기존 활성 암시가 없으면 기존 암시 수정으로 처리하지 않는다.\n- 실패한 암시의 효과나 신체 반응을 발생시키지 않는다.\n\n[금지 표현]\n- 암시가 먹힌 것 같다\n- 암시가 제대로 적용됐는지 모르겠다\n- 다시 걸어봐야겠다\n- 효과를 확인해야겠다\n- 아까 최면이 성공했는지 확실하지 않다`;
 }
 
 function buildPersonalSuggestionSecrecySection() {
@@ -7065,6 +7154,9 @@ export {
   validateNpcEmotion,
   isSetupComplete,
   isApprovalInput,
+  normalizePlayerProfile,
+  toPlayerSave,
+  mergePlayerProfile,
   mergeRecommendation,
   normalizeRecommendation,
   normalizeRecommendationCandidate,

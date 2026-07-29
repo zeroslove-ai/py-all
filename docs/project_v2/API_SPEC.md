@@ -1,3 +1,5 @@
+> LEGACY DOCUMENT — main/archive/pre-csa-only 전용. feature/csa-only 구현 기준으로 사용하지 않는다.
+
 # 게임빌더 v2 Worker API 명세
 
 **기준일**: 2026-07-22  

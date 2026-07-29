@@ -1,3 +1,5 @@
+> LEGACY DOCUMENT — main/archive/pre-csa-only 전용. feature/csa-only 구현 기준으로 사용하지 않는다.
+
 # `/api/extract` 프롬프트 계약 v2
 
 **기준일**: 2026-07-22  

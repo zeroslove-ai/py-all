@@ -1121,7 +1121,9 @@ function buildAppStatePayload(master, save, turnCount = 0) {
   const manual = buildAppManualPayload(master, save, turnCount);
   const characters = isPlainObject(master?.characters) ? master.characters : {};
   const currentIds = getCurrentPresentNpcIds(save, characters);
-  const currentWorld = isPlainObject(save?.world_state) ? save.world_state : {};
+  const currentWorld = inferHospitalWorldStateFromLocationLabel(
+    isPlainObject(save?.world_state) ? save.world_state : {}
+  );
   const locations = isPlainObject(save?.npc_locations) ? save.npc_locations : {};
   const npcs = Object.entries(characters).map(([character_id, character]) => {
     const emotion = isPlainObject(save?.npc_emotion?.[character_id]) ? save.npc_emotion[character_id] : {};
@@ -1488,7 +1490,7 @@ async function performExtractionPass(env, { narrativeText, playerInput, compatCt
   const effectiveWorldState = computeEffectiveWorldState(compatCtx?.save?.world_state, extract.world_state_patch);
   extract = normalizeRegisteredNpcExtract(extract, compatCtx?.master?.characters, compatCtx?.save?.last_character_id, effectiveWorldState);
   extract = sanitizeCsaDeactivationMemoryExtract(extract, structuredPlan);
-  extract = sanitizePersonalSuggestionMetaExtract(extract);
+  extract = sanitizeLegacyMentalEffectHistory(extract);
   timing.extract_parse_ms = Date.now() - t4;
 
   const t5 = Date.now();
@@ -1872,7 +1874,7 @@ async function runExtractPipeline(env, { game_id, narrative_text, player_input, 
   }
 
   extract = sanitizeCsaDeactivationMemoryExtract(extract, structuredPlan);
-  extract = sanitizePersonalSuggestionMetaExtract(extract);
+  extract = sanitizeLegacyMentalEffectHistory(extract);
 
   // H1: the NPC narrative contract is fail-open — an unregistered minor
   // NPC, a registered NPC appearing outside their usual ward, or a
@@ -2307,7 +2309,7 @@ async function runCommitPipeline(env, { game_id, turn_number, content: rawConten
   const effectiveWorldStateForCommit = computeEffectiveWorldState(ctx?.save?.world_state, extract.world_state_patch);
   let safeExtract = normalizeRegisteredNpcExtract({ ...extract, is_sexual: extract.is_sexual === true }, ctx?.master?.characters, ctx?.save?.last_character_id, effectiveWorldStateForCommit);
   safeExtract = sanitizeCsaDeactivationMemoryExtract(safeExtract, structuredPlan);
-  safeExtract = sanitizePersonalSuggestionMetaExtract(safeExtract);
+  safeExtract = sanitizeLegacyMentalEffectHistory(safeExtract);
   if (structuredPlan?.canonical_action?.type === 'find_npc') {
     safeExtract.character_id = structuredPlan.plan.character_id;
     safeExtract.npcs_present = [structuredPlan.plan.character_id];
@@ -4464,21 +4466,12 @@ function removePersonalSuggestionMetaSentences(value, fallback) {
   return kept || fallback;
 }
 
-function sanitizePersonalSuggestionMetaExtract(extract = {}) {
+function sanitizeLegacyMentalEffectHistory(extract = {}) {
   const sanitized = { ...extract };
   sanitized.turn_summary = removePersonalSuggestionMetaSentences(
     sanitized.turn_summary,
-    PERSONAL_SUGGESTION_META_SUMMARY_FALLBACK
+    '이전 기록의 시스템 메타 표현을 제거했다.'
   ).slice(0, 200);
-  if (isPlainObject(sanitized.npc_emotion)) {
-    sanitized.npc_emotion = { ...sanitized.npc_emotion };
-    for (const field of ['surface', 'inner', 'physical_reaction']) {
-      sanitized.npc_emotion[field] = removePersonalSuggestionMetaSentences(
-        sanitized.npc_emotion[field],
-        PERSONAL_SUGGESTION_META_EMOTION_FALLBACKS[field]
-      );
-    }
-  }
   sanitized.relationship_memory_patch = normalizeRelationshipMemoryItems(
     (Array.isArray(sanitized.relationship_memory_patch) ? sanitized.relationship_memory_patch : []).filter(item => {
       const text = typeof item === 'string' ? item : item?.text;
@@ -4584,6 +4577,7 @@ const CSA_SCOPE_LABELS = {
 // The LLM proposes a scope_type only; the Worker resolves scope_id from the
 // server-owned world_state so activation scope can never be forged by the model.
 function resolveCsaScopeId(scopeType, worldState = {}) {
+  worldState = inferHospitalWorldStateFromLocationLabel(worldState);
   if (scopeType === 'world') return 'world';
   if (scopeType === 'location') {
     const building = typeof worldState?.building === 'string' ? worldState.building.trim() : '';
@@ -4707,7 +4701,9 @@ function getActiveCsaEntries(save = {}) {
 }
 
 function getApplicableCsaEntries(save, activeCsa = getActiveCsaEntries(save)) {
-  const world = isPlainObject(save?.world_state) ? save.world_state : (isPlainObject(save?.player_location) ? save.player_location : {});
+  const world = inferHospitalWorldStateFromLocationLabel(
+    isPlainObject(save?.world_state) ? save.world_state : (isPlainObject(save?.player_location) ? save.player_location : {})
+  );
   return activeCsa.filter(csa => isCsaApplicable(csa, world));
 }
 
@@ -4793,6 +4789,28 @@ const WORLD_STATE_FLOOR_IDS = {
 };
 const WORLD_STATE_WARD_IDS = { '3병동': 'hospital_3ward', hospital_3ward: 'hospital_3ward', '6병동': 'hospital_6ward', hospital_6ward: 'hospital_6ward' };
 
+function inferHospitalWorldStateFromLocationLabel(worldState = {}) {
+  const label = normalizeLocationLabel(worldState?.location_label);
+  if (!label) return worldState;
+  const inferred = { ...worldState };
+  if (/3병동/.test(label)) {
+    inferred.building ||= 'seoul_central_hospital';
+    inferred.floor ||= 'hospital_floor_3';
+    inferred.ward ||= 'hospital_3ward';
+  } else if (/6병동/.test(label)) {
+    inferred.building ||= 'seoul_central_hospital';
+    inferred.floor ||= 'hospital_floor_6';
+    inferred.ward ||= 'hospital_6ward';
+  } else if (/5층|내과\s*(?:외래|과장실)|검사실/.test(label)) {
+    inferred.building ||= 'seoul_central_hospital';
+    inferred.floor ||= 'hospital_floor_5';
+  } else if (/1층|로비|접수|원무/.test(label)) {
+    inferred.building ||= 'seoul_central_hospital';
+    inferred.floor ||= 'hospital_floor_1';
+  }
+  return inferred;
+}
+
 function normalizeWorldStateId(map, value) {
   if (typeof value !== 'string' || !value.trim()) return null;
   return map[value.trim()] || null;
@@ -4822,10 +4840,10 @@ function buildWorldStatePatch(rawPatch) {
 // eligibility check at Extract time so both see the same "current place"
 // even when this turn itself contains the move.
 function computeEffectiveWorldState(previousWorldState, rawWorldStatePatch) {
-  return {
+  return inferHospitalWorldStateFromLocationLabel({
     ...(isPlainObject(previousWorldState) ? previousWorldState : {}),
     ...(buildWorldStatePatch(rawWorldStatePatch) || {})
-  };
+  });
 }
 
 // ─────────────────────────────────────────────
@@ -5442,7 +5460,7 @@ function applySuggestionResolutionsToPlan(previousSave, master, structuredPlan, 
 function buildStructuredActionError(result, currentTurn = null) {
   const stale = result?.error_code === 'APP_STALE_STATE';
   return {
-    error: stale ? '상식개변 어플을 연 뒤 게임 상태가 변경되었습니다.' : '최면 어플의 변경사항을 적용하지 못했습니다.',
+    error: stale ? '상식개변 어플을 연 뒤 게임 상태가 변경되었습니다.' : '상식개변 어플의 변경사항을 적용하지 못했습니다.',
     error_code: stale ? 'APP_STALE_STATE' : 'APP_ACTION_INVALID',
     current_turn_count: stale && Number.isInteger(currentTurn) ? currentTurn : undefined,
     issues: Array.isArray(result?.issues) ? result.issues : []
@@ -5454,24 +5472,14 @@ function buildStructuredActionStorySection(structuredPlan, effectiveSave = {}, a
   const action = structuredPlan.canonical_action;
   if (action.type === 'find_npc') {
     const target = structuredPlan.plan;
-    return `\n\n[CONFIRMED NPC FIND ACTION — HARD CONSTRAINT]\n최면 어플 위치 추적 결과 대상은 ${target.character_name}, 위치는 ${target.target_location_label}이다. 플레이어가 이번 턴 안에 그 장소로 이동해 대상과 마주친다. 대상·목적지를 바꾸거나 찾지 못했다고 처리하지 마라.`;
+    return `\n\n[CONFIRMED NPC FIND ACTION — HARD CONSTRAINT]\n상식개변 어플의 위치 확인 결과 대상은 ${target.character_name}, 위치는 ${target.target_location_label}이다. 플레이어가 이번 턴 안에 그 장소로 이동해 대상과 마주친다. 대상·목적지를 바꾸거나 찾지 못했다고 처리하지 마라.`;
   }
-  const targetNames = new Map((structuredPlan.plan?.suggestion_targets || []).map(target => [target.client_id, target.character_name]));
-  const semanticResults = new Map((action.semantic_validation?.results || []).map(result => [result.client_id, result]));
-  const lines = action.operations.map(operation => {
-    if (operation.domain === 'suggestion') {
-      const resolution = semanticResults.get(operation.client_id)?.resolution;
-      if (resolution) return `- 개인 암시 ${operation.operation}: ${targetNames.get(operation.client_id) || '현재 대상 NPC'} · ${APP_STRENGTH_LABELS[resolution.effective_strength]} · 성공률 ${resolution.chance_pct}% · ${resolution.outcome === 'success' ? '적용 성공' : '적용 실패'} · ${operation.content || ''}`;
-      return `- 개인 암시 ${operation.operation}: ${targetNames.get(operation.client_id) || '현재 대상 NPC'}`;
-    }
-    return `- 상식개변 ${operation.operation}: ${operation.scope_type || '기존 범위'}`;
-  }).join('\n');
-  const csaChanged = action.operations.some(operation => operation.domain === 'csa');
+  const lines = action.operations
+    .filter(operation => operation.domain === 'csa')
+    .map(operation => `- 상식개변 ${operation.operation}: ${operation.scope_type || '기존 범위'}`)
+    .join('\n');
   const level = Math.max(1, Number(effectiveSave?.player_progress?.level) || 1);
-  const csaResult = csaChanged
-    ? `\n\n[CSA CURRENT RESULT — ESTABLISHED FACT]\n현재 활성 상식개변: ${activeCsa.length}/${getCsaLimits(level).max_active}. 활성 목록과 현재 위치 적용 여부는 이 수치와 같은 active:true 항목만 사용한다.`
-    : '';
-  return `\n\n[CONFIRMED HYPNOSIS APP TRANSACTION — HARD CONSTRAINT]\n아래 조작은 Worker 검증을 통과했다. 대상·개수·내용·강도와 성공 여부를 바꾸지 말고 조작 과정과 장면 직후 흐름만 자연스럽게 서술한다. 개인 암시 적용 실패는 효과가 생기지 않으며, 실패한 내용대로 NPC를 행동시키지 마라. 현재 장면에 없는 NPC의 원격 수정·해제에는 즉각적인 신체 반응이나 대사를 창작하지 마라.\n${lines}` + csaResult + buildSuggestionDeactivationStorySection(structuredPlan) + buildCsaDeactivationStorySection(structuredPlan);
+  return `\n\n[CONFIRMED COMMON-SENSE APP TRANSACTION — HARD CONSTRAINT]\n아래 상식개변 조작은 Worker 검증을 통과했다. 내용·강도·범위·활성 상태를 바꾸거나 다시 판정하지 말고, 조작 이후의 장면 흐름만 자연스럽게 서술한다. 현재 장면에 없는 장소의 수정·해제에는 즉각적인 신체 반응이나 대사를 창작하지 마라.\n${lines}\n\n[CSA CURRENT RESULT — ESTABLISHED FACT]\n현재 활성 상식개변: ${activeCsa.length}/${getCsaLimits(level).max_active}. 활성 목록과 현재 위치 적용 여부는 이 수치와 같은 active:true 항목만 사용한다.` + buildCsaDeactivationStorySection(structuredPlan);
 }
 
 function buildSuggestionDeactivationStorySection(structuredPlan) {
@@ -5493,12 +5501,9 @@ function buildCsaDeactivationStorySection(structuredPlan) {
 function buildStructuredActionExtractSection(structuredPlan) {
   if (!structuredPlan?.ok) return '';
   if (structuredPlan.canonical_action.type === 'find_npc') return '\n\n이번 턴의 최종 대상과 목적지는 Worker가 확정했다. character_id는 지정 대상이고 npcs_present에는 지정 대상을 포함한다.';
-  let section = '\n\n이번 턴의 최면 어플 상태 변경은 Worker가 이미 확정했다. 저장 상태를 새로 추론하지 말고 서사에서 실제 발생한 NPC 감정·수치·장면·대사·이미지 정보만 추출한다. 최면깊이의 앱 신규 등록 증가는 Worker가 결정한다.';
+  let section = '\n\n이번 턴의 상식개변 상태 변경은 Worker가 이미 확정했다. 저장 상태를 새로 추론하지 말고 서사에서 실제 발생한 NPC 감정·수치·장면·대사·이미지 정보만 추출한다.';
   if (hasStructuredCsaDeactivation(structuredPlan)) {
     section += '\n이번 턴에는 상식개변 해제가 확정되었다. 해제는 과거 사건·기억·물리 상태를 지우거나 되돌리지 않는다. relationship_memory_patch와 turn_summary에 기억상실·시간 공백·자동 복장 복구를 영구 사실로 기록하지 말고, npc_scene_state_patch에는 실제 완료된 물리 변화만 넣는다.';
-  }
-  if (hasStructuredSuggestionDeactivation(structuredPlan)) {
-    section += '\n이번 턴에는 개인 암시 해제가 확정되었다. 사건·행동·물리 상태의 기억은 유지한다. relationship_memory_patch와 turn_summary에 기억상실, 자동 후회, “원래 전부 내 진심이었다”, 영구 취향이나 일반 복종을 기록하지 않는다. npc_scene_state_patch에는 실제 완료된 물리 변화만 넣는다.';
   }
   return section;
 }

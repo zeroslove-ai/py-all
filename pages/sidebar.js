@@ -1,10 +1,7 @@
 const sidebar = {
   stats: [
     { key: '호감도', label: '호감' },
-    { key: '신뢰도', label: '신뢰' },
-    { key: '최면깊이', label: '최면' },
-    { key: '순응도', label: '순응' },
-    { key: '최면저항력', label: '저항' }
+    { key: '신뢰도', label: '신뢰' }
   ],
   previousStats: {},
 
@@ -26,7 +23,7 @@ const sidebar = {
     panel.appendChild(relationship);
     const actions = document.createElement('section');
     actions.className = 'side-panel-footer';
-    actions.innerHTML = '<div class="side-action-row"><button id="app-info-side-button" class="side-action-btn" type="button">📱 최면 어플</button><button id="resume-game-button" class="side-action-btn" type="button">▶ 플레이 재개</button></div>'
+    actions.innerHTML = '<div class="side-action-row"><button id="app-info-side-button" class="side-action-btn" type="button">📱 상식개변 어플</button><button id="resume-game-button" class="side-action-btn" type="button">▶ 플레이 재개</button></div>'
       + '<div class="side-action-row"><button id="reset-side-button" class="side-action-btn" type="button">🔄 리셋</button><button id="feedback-side-button" class="side-action-btn" type="button">✏️ 피드백</button></div>';
     actions.querySelector('#app-info-side-button').addEventListener('click', () => window.hypnosisApp?.open('home'));
     actions.querySelector('#resume-game-button').addEventListener('click', () => window.resumeGame?.());

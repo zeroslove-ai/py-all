@@ -944,9 +944,9 @@
           ui.failCurrentNarrative();
           const code = error.details?.error_code || error.status || 'UNKNOWN';
           ui.showPendingTurnActions(
-            `최면 어플 변경사항을 적용하지 못했습니다. 변경사항은 저장되지 않았습니다. [${code}]`,
+            `상식개변 어플 변경사항을 적용하지 못했습니다. 변경사항은 저장되지 않았습니다. [${code}]`,
             [
-              { label: '최면 어플 다시 열기', onClick: () => window.hypnosisApp?.open('suggestions') },
+              { label: '상식개변 어플 다시 열기', onClick: () => window.hypnosisApp?.open('csa') },
               { label: '이번 시도 버리기', onClick: () => discardFailedTurn() }
             ]
           );
@@ -1010,9 +1010,9 @@
           await finalizeRenderedNarrative(pending);
           ui.markLastNarrativeUncommitted();
           ui.showPendingTurnActions(
-            `최면 어플 변경사항을 적용하지 못했습니다. 변경사항은 저장되지 않았습니다. [${code}]`,
+            `상식개변 어플 변경사항을 적용하지 못했습니다. 변경사항은 저장되지 않았습니다. [${code}]`,
             [
-              { label: '최면 어플 다시 열기', onClick: () => window.hypnosisApp?.open('suggestions') },
+              { label: '상식개변 어플 다시 열기', onClick: () => window.hypnosisApp?.open('csa') },
               { label: '이번 시도 버리기', onClick: () => discardFailedTurn() }
             ]
           );
@@ -1121,9 +1121,9 @@
           await finalizeRenderedNarrative(pending);
           ui.markLastNarrativeUncommitted();
           ui.showPendingTurnActions(
-            `최면 어플 변경사항을 적용하지 못했습니다. 변경사항은 저장되지 않았습니다. [${code}]`,
+            `상식개변 어플 변경사항을 적용하지 못했습니다. 변경사항은 저장되지 않았습니다. [${code}]`,
             [
-              { label: '최면 어플 다시 열기', onClick: () => window.hypnosisApp?.open('suggestions') },
+              { label: '상식개변 어플 다시 열기', onClick: () => window.hypnosisApp?.open('csa') },
               { label: '이번 시도 버리기', onClick: () => discardFailedTurn() }
             ]
           );
@@ -1205,14 +1205,12 @@
     function renderAppManualModal(manual, opener) {
       const overlay = createManualElement('div', 'app-manual-overlay');
       const modal = createManualElement('div', 'app-manual-modal'); modal.setAttribute('role', 'dialog'); modal.setAttribute('aria-modal', 'true'); modal.setAttribute('aria-labelledby', 'app-manual-title');
-      const header = createManualElement('header', 'app-manual-header'); const heading = document.createElement('div'); const title = createManualElement('h2', '', manual.title || '최면 어플 사용자 매뉴얼'); title.id = 'app-manual-title'; heading.append(title, createManualElement('p', '', manual.subtitle || '')); const close = createManualElement('button', 'app-manual-close', '닫기'); close.type = 'button'; close.setAttribute('aria-label', '매뉴얼 닫기'); header.append(heading, close);
+      const header = createManualElement('header', 'app-manual-header'); const heading = document.createElement('div'); const title = createManualElement('h2', '', manual.title || '상식개변 어플 사용자 매뉴얼'); title.id = 'app-manual-title'; heading.append(title, createManualElement('p', '', manual.subtitle || '')); const close = createManualElement('button', 'app-manual-close', '닫기'); close.type = 'button'; close.setAttribute('aria-label', '매뉴얼 닫기'); header.append(heading, close);
       const body = createManualElement('div', 'app-manual-body');
       body.appendChild(manualSection('현재 어플 상태', true, section => section.appendChild(renderManualStatus(manual))));
       body.appendChild(manualSection('현재 상태 진단', true, section => (manual.diagnostics || []).forEach(item => section.appendChild(createManualElement('div', `app-manual-diagnostic ${item.type || 'info'}`, item.text)))));
-      body.appendChild(manualSection('빠른 사용법', true, section => appendManualList(section, manual.quick_start, true)));
-      body.appendChild(manualSection('개인 암시', false, section => { section.append(createManualElement('p', '', manual.suggestions?.description || ''), createManualElement('h3', '', '규칙')); appendManualList(section, manual.suggestions?.rules); renderManualTiers(section, manual.suggestions?.tiers, true); }));
-      body.appendChild(manualSection('상식개변', false, section => { section.appendChild(createManualElement('p', '', manual.common_sense?.description || '')); appendManualList(section, manual.common_sense?.rules); section.appendChild(createManualElement('p', '', `현재 범위: ${manual.common_sense?.current_scope?.label || '-'}`)); appendManualList(section, (manual.common_sense?.scope_unlocks || []).map(item => `${item.level_range} · ${item.scope_label} · 활성 ${item.max_active}개${item.available ? ' · 사용 가능' : ''}`)); renderManualTiers(section, manual.common_sense?.tiers); }));
-      body.appendChild(manualSection('최면깊이', false, section => { section.appendChild(createManualElement('p', '', manual.hypnosis_depth?.description || '')); appendManualList(section, manual.hypnosis_depth?.rules); }));
+      body.appendChild(manualSection('빠른 사용법', true, section => appendManualList(section, manual.quick_start, true))); appendManualList(section, manual.suggestions?.rules); renderManualTiers(section, manual.suggestions?.tiers, true); }));
+      body.appendChild(manualSection('상식개변', false, section => { section.appendChild(createManualElement('p', '', manual.common_sense?.description || '')); appendManualList(section, manual.common_sense?.rules); section.appendChild(createManualElement('p', '', `현재 범위: ${manual.common_sense?.current_scope?.label || '-'}`)); appendManualList(section, (manual.common_sense?.scope_unlocks || []).map(item => `${item.level_range} · ${item.scope_label} · 활성 ${item.max_active}개${item.available ? ' · 사용 가능' : ''}`)); renderManualTiers(section, manual.common_sense?.tiers); })); appendManualList(section, manual.hypnosis_depth?.rules); }));
       body.appendChild(manualSection('NPC 수치 설명', false, section => (manual.stats || []).forEach(stat => { const item = createManualElement('div', 'app-manual-active-item'); item.append(createManualElement('strong', '', `${stat.label} (${stat.range})`), createManualElement('div', '', stat.description), createManualElement('small', '', stat.change_rule)); section.appendChild(item); })));
       body.appendChild(manualSection('레벨·해금 기능', false, section => (manual.unlocks || []).forEach(unlock => { const title = createManualElement('p', '', `Lv.${unlock.level}`); section.appendChild(title); appendManualList(section, unlock.items); })));
       body.appendChild(manualSection('현재 활성 효과', true, section => { const effects = manual.active_effects || {}; if (!(effects.suggestions || []).length && !(effects.common_sense || []).length) { section.appendChild(createManualElement('p', '', '현재 활성 효과가 없습니다.')); return; } const groups = new Map(); (effects.suggestions || []).forEach(item => groups.set(item.character_name, [...(groups.get(item.character_name) || []), item])); groups.forEach((items, name) => { section.appendChild(createManualElement('h3', '', name)); items.forEach(item => section.appendChild(createManualElement('div', 'app-manual-active-item', `[${item.strength}] ${item.content}`))); }); (effects.common_sense || []).forEach(item => section.appendChild(createManualElement('div', 'app-manual-active-item', `[${item.scope_label} · ${item.strength}]\n${item.content}`))); }));

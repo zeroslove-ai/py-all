@@ -1,0 +1,89 @@
+name: Diagnose CSA Only Conversion
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - .github/workflows/diagnose-csa-only-conversion.yml
+
+permissions:
+  contents: write
+
+jobs:
+  convert:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: feature/csa-only
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Apply conversion and record result
+        id: conversion
+        shell: bash
+        run: |
+          set +e
+          python .github/scripts/convert_csa_only.py > /tmp/csa-convert.log 2>&1
+          convert_status=$?
+          if [[ $convert_status -eq 0 ]]; then
+            node --check worker/game-proxy-v2.js >> /tmp/csa-convert.log 2>&1
+            worker_status=$?
+            node --check pages/sidebar.js >> /tmp/csa-convert.log 2>&1
+            sidebar_status=$?
+            node --check pages/hypnosis-app.js >> /tmp/csa-convert.log 2>&1
+            app_status=$?
+            git diff --check >> /tmp/csa-convert.log 2>&1
+            diff_status=$?
+          else
+            worker_status=99
+            sidebar_status=99
+            app_status=99
+            diff_status=99
+          fi
+          {
+            echo "convert_status=$convert_status"
+            echo "worker_check=$worker_status"
+            echo "sidebar_check=$sidebar_status"
+            echo "app_check=$app_status"
+            echo "diff_check=$diff_status"
+            echo
+            echo "--- log ---"
+            cat /tmp/csa-convert.log
+          } > .github/csa-only-conversion-result.txt
+          if [[ $convert_status -eq 0 && $worker_status -eq 0 && $sidebar_status -eq 0 && $app_status -eq 0 && $diff_status -eq 0 ]]; then
+            rm -f .github/scripts/convert_csa_only.py
+            rm -f .github/scripts/csa_only_trigger.txt
+            rm -f .github/workflows/convert-csa-only.yml
+            echo "success=true" >> "$GITHUB_OUTPUT"
+          else
+            git reset --hard HEAD
+            cp /tmp/csa-convert.log /tmp/csa-convert-only.log
+            {
+              echo "convert_status=$convert_status"
+              echo "worker_check=$worker_status"
+              echo "sidebar_check=$sidebar_status"
+              echo "app_check=$app_status"
+              echo "diff_check=$diff_status"
+              echo
+              echo "--- log ---"
+              cat /tmp/csa-convert-only.log
+            } > .github/csa-only-conversion-result.txt
+            echo "success=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Commit branch result
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          if [[ "${{ steps.conversion.outputs.success }}" == "true" ]]; then
+            git commit -m "refactor: convert game to csa-only mode"
+          else
+            git commit -m "chore: record csa-only conversion failure"
+          fi
+          git push origin HEAD:feature/csa-only

@@ -1,0 +1,77 @@
+name: Run CSA Only Cleanup
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - .github/workflows/run-csa-only-cleanup.yml
+
+permissions:
+  contents: write
+
+jobs:
+  cleanup:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: feature/csa-only
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Apply cleanup and record result
+        id: cleanup
+        shell: bash
+        run: |
+          set +e
+          python .github/scripts/cleanup_csa_only_runtime.py > /tmp/csa-cleanup.log 2>&1
+          cleanup_status=$?
+          if [[ $cleanup_status -eq 0 ]]; then
+            node --check worker/game-proxy-v2.js >> /tmp/csa-cleanup.log 2>&1
+            worker_status=$?
+            node --check pages/sidebar.js >> /tmp/csa-cleanup.log 2>&1
+            sidebar_status=$?
+            node --check pages/hypnosis-app.js >> /tmp/csa-cleanup.log 2>&1
+            app_status=$?
+            git diff --check >> /tmp/csa-cleanup.log 2>&1
+            diff_status=$?
+          else
+            worker_status=99
+            sidebar_status=99
+            app_status=99
+            diff_status=99
+          fi
+          if [[ $cleanup_status -eq 0 && $worker_status -eq 0 && $sidebar_status -eq 0 && $app_status -eq 0 && $diff_status -eq 0 ]]; then
+            rm -f .github/scripts/cleanup_csa_only_runtime.py
+            rm -f .github/csa-only-cleanup-result.txt
+            echo "success=true" >> "$GITHUB_OUTPUT"
+          else
+            git reset --hard HEAD
+            {
+              echo "cleanup_status=$cleanup_status"
+              echo "worker_check=$worker_status"
+              echo "sidebar_check=$sidebar_status"
+              echo "app_check=$app_status"
+              echo "diff_check=$diff_status"
+              echo
+              echo "--- log ---"
+              cat /tmp/csa-cleanup.log
+            } > .github/csa-only-cleanup-result.txt
+            echo "success=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Commit branch result
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          if [[ "${{ steps.cleanup.outputs.success }}" == "true" ]]; then
+            git commit -m "refactor: remove hypnosis runtime from csa-only branch"
+          else
+            git commit -m "chore: record csa-only cleanup failure"
+          fi
+          git push origin HEAD:feature/csa-only

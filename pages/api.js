@@ -60,7 +60,7 @@ const api = {
   // ─── 3. 상태 추출 ───
   // extract·request_id·timing을 모두 담은 전체 응답을 반환한다. 호출부에서
   // result.extract로 실제 값을, result.timing으로 [extract-timing] 로그를 남긴다.
-  async extract(gameId, narrativeText, turnCount, playerInput = '', structuredAction = null) {
+  async extract(gameId, narrativeText, turnCount, playerInput = '', playerAction = null, structuredAction = null) {
     const res = await fetch(`${API_BASE}/api/extract`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -69,6 +69,7 @@ const api = {
         narrative_text: narrativeText,
         player_input: playerInput,
         turn_count: turnCount,
+        player_action: playerAction,
         structured_action: structuredAction
       })
     });

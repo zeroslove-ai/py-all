@@ -934,7 +934,7 @@
         // wait for this instead).
         const { networkDone, renderDone } = stream.story(
           state.gameId, pending.input, state.turnCount, chunk => ui.appendNarrative(chunk),
-          getFeedback(), pending.regenerationFeedback || null, pending.structuredAction || null
+          getFeedback(), pending.regenerationFeedback || null, pending.playerAction, pending.structuredAction || null
         );
         pending.renderDone = renderDone;
         const result = await networkDone;
@@ -996,7 +996,7 @@
       try {
         // Started as soon as the network text is ready — runs concurrently
         // with the still-typing display queue, not after it.
-        const result = await api.extract(state.gameId, pending.narrative, pending.nextTurn, pending.input, pending.structuredAction || null);
+        const result = await api.extract(state.gameId, pending.narrative, pending.nextTurn, pending.input, pending.playerAction, pending.structuredAction || null);
         console.info('[extract-timing]', result.timing);
         pending.extract = result.extract;
         pending.extract.extract_degraded = result.extract_degraded === true;

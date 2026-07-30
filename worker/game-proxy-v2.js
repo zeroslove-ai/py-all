@@ -1327,7 +1327,7 @@ async function handleStory(req, env) {
   // rollback+regenerate flow (never a normal turn) — it injects the
   // highest-priority regeneration-only block; `feedback` (the array) keeps
   // its existing, unrelated "apply to next response" meaning.
-  const { game_id, player_input, feedback = [], regeneration_feedback = null, structured_action = null } = await readJson(req);
+  const { game_id, player_input, feedback = [], regeneration_feedback = null, player_action = null, structured_action = null } = await readJson(req);
   if (!game_id) return jsonResponse({ error: 'game_id required', request_id: requestId }, 400);
 
   const contextStart = Date.now();
@@ -1393,7 +1393,8 @@ async function handleStory(req, env) {
       currentTurn,
       feedback,
       regeneration_feedback,
-      structuredPlan
+      structuredPlan,
+      player_action
     );
     if (boldChoiceAttempt) {
       prompt.messages[0].content += `\n\n[BOLD CHOICE RESOLUTION — ESTABLISHED FACT]\n예상 성공률 ${boldChoiceAttempt.success_rate}%, 판정 ${boldChoiceAttempt.success ? '성공' : '실패'} (roll ${boldChoiceAttempt.roll}). 시도는 반드시 서사에 반영하되, ${boldChoiceAttempt.success ? '목표 행동을 자연스럽게 완료할 수 있다.' : '목표 행동을 그대로 성공시키지 말고 거절·부분 성공·갈등·새 정보 중 자연스러운 결과로 진행한다.'}`;
@@ -1529,10 +1530,10 @@ async function repairRawJsonOutput(env, rawText) {
 // One full "narrative text -> structured extract" cycle: prompt build,
 // a single DeepSeek call, NPC normalization/location eligibility, and
 // mind-monitor validation with deterministic (non-LLM) fallback only.
-async function performExtractionPass(env, { narrativeText, playerInput, compatCtx, shortlistedImages, nextTurn, requestId, recoveryBudget, maxAttempts = 1, structuredPlan = null }) {
+async function performExtractionPass(env, { narrativeText, playerInput, playerAction = null, compatCtx, shortlistedImages, nextTurn, requestId, recoveryBudget, maxAttempts = 1, structuredPlan = null }) {
   const timing = {};
   const tPrompt = Date.now();
-  const prompt = buildExtractPrompt(narrativeText, playerInput, compatCtx, shortlistedImages, nextTurn, structuredPlan) + buildStructuredActionExtractSection(structuredPlan);
+  const prompt = buildExtractPrompt(narrativeText, playerInput, compatCtx, shortlistedImages, nextTurn, structuredPlan, playerAction) + buildStructuredActionExtractSection(structuredPlan);
   timing.prompt_build_ms = Date.now() - tPrompt;
 
   let result;
@@ -1577,7 +1578,7 @@ async function performExtractionPass(env, { narrativeText, playerInput, compatCt
   const t4 = Date.now();
   let extract = normalizeExtract(result.parsed);
   const setupApproval = !isSetupComplete(compatCtx?.save)
-    ? resolveSetupApproval(playerInput, resolveSetupRecommendations(compatCtx?.save?.player_setup))
+    ? resolveSetupApproval(playerInput, resolveSetupRecommendations(compatCtx?.save?.player_setup), playerAction)
     : null;
   if (!isSetupComplete(compatCtx?.save) && !setupApproval) {
     extract = normalizeExtract({
@@ -1715,11 +1716,11 @@ function buildDegradedExtract(narrativeText, reason = 'EXTRACT_FAILED') {
 
 async function handleExtract(req, env) {
   const requestId = crypto.randomUUID();
-  const { game_id, narrative_text, player_input, structured_action = null } = await readJson(req);
+  const { game_id, narrative_text, player_input, player_action = null, structured_action = null } = await readJson(req);
   if (!game_id || !narrative_text) {
     return jsonResponse({ error: 'game_id and narrative_text required', request_id: requestId }, 400);
   }
-  const result = await runExtractPipeline(env, { game_id, narrative_text, player_input, structured_action, requestId });
+  const result = await runExtractPipeline(env, { game_id, narrative_text, player_input, player_action, structured_action, requestId });
   return jsonResponse(result.body, result.status);
 }
 
@@ -1727,7 +1728,7 @@ async function handleExtract(req, env) {
 // the exact same Extract pipeline (image shortlist, degraded fallback, CSA
 // integrity observation, choice normalization) in-process, without a second
 // HTTP round-trip or a duplicated copy of this logic.
-async function runExtractPipeline(env, { game_id, narrative_text, player_input, structured_action = null, requestId }) {
+async function runExtractPipeline(env, { game_id, narrative_text, player_input, player_action = null, structured_action = null, requestId }) {
   const timing = {};
   const totalStart = Date.now();
 
@@ -1804,7 +1805,7 @@ async function runExtractPipeline(env, { game_id, narrative_text, player_input, 
   const degradedAllowed = !isStructuredAppTransaction;
 
   const firstPass = await performExtractionPass(env, {
-    narrativeText: narrative_text, playerInput: player_input, compatCtx: effectiveCtx, shortlistedImages, nextTurn, requestId,
+    narrativeText: narrative_text, playerInput: player_input, playerAction: player_action, compatCtx: effectiveCtx, shortlistedImages, nextTurn, requestId,
     recoveryBudget, maxAttempts: 1, structuredPlan
   });
   Object.assign(timing, firstPass.timing);
@@ -1888,12 +1889,15 @@ async function runExtractPipeline(env, { game_id, narrative_text, player_input, 
   let { extract, jsonRepaired, mindMonitorRepaired, validation, rawText, effectiveWorldState } = firstPass;
   const previousSetupRecommendations = resolveSetupRecommendations(compatCtx.save?.player_setup);
   const setupApproval = !isSetupComplete(compatCtx.save)
-    ? resolveSetupApproval(player_input, previousSetupRecommendations)
+    ? resolveSetupApproval(player_input, previousSetupRecommendations, player_action)
     : null;
   if (!isSetupComplete(compatCtx.save) && !setupApproval) {
     const narrativeChoices = extractChoicesFromNarrative(narrative_text);
+    // Same completeness gate buildSavePatch enforces at persist time — an
+    // incomplete new set is never shown/passed forward in place of an
+    // already-good saved set.
     const extractedCandidates = normalizeSetupCandidates(extract.player_recommendations);
-    const nextRecommendations = extractedCandidates.length ? extractedCandidates : previousSetupRecommendations;
+    const nextRecommendations = isCompleteSetupCandidateSet(extractedCandidates) ? extractedCandidates : previousSetupRecommendations;
     const setupChoices = narrativeChoices.length ? narrativeChoices.slice(0, 4) : nextRecommendations.map(c => c.choice_label);
 
     extract = normalizeExtract({
@@ -2556,7 +2560,7 @@ async function runCommitPipeline(env, { game_id, turn_number, content: rawConten
       console.warn(JSON.stringify({ event: 'recent100_summary_fail_open', endpoint: '/api/commit-turn', request_id: requestId, error: error.message }));
     }
   }
-  const patch = buildSavePatch(safeExtract, engine_patch, summaryPlan, ctx?.save || {}, turn_number, player_input, structuredPlan, ctx?.master || {}, content, game_id);
+  const patch = buildSavePatch(safeExtract, engine_patch, summaryPlan, ctx?.save || {}, turn_number, player_input, structuredPlan, ctx?.master || {}, content, game_id, rawPlayerAction);
   // Reserved key (same convention as _turn_record) — commit_turn's SQL
   // strips this before merging into game_save.data and instead persists it
   // into this turn's own game_memories.pre_turn_save_snapshot column. Lets
@@ -3008,18 +3012,73 @@ function parseSetupCandidateSelection(input, recommendations) {
   return { index: index - 1, candidate, raw_input: raw, hold_setup: SETUP_HOLD_PATTERN.test(text) };
 }
 
-// A number match with no hold-back phrase is a selection + immediate opening
-// — no separate "confirm" step required. A bare approval phrase (no number)
-// only resolves when there's exactly one candidate to approve (covers the
-// legacy single-recommendation read path).
-function resolveSetupApproval(playerInput, recommendations) {
+// Single common selection resolver used by Story mode determination, Extract
+// setup determination, and Save confirmation alike — so a button click and a
+// typed number always resolve to the same candidate everywhere. Priority:
+// 1) an explicit choice-button click (`player_action.source==='choice_button'`
+//    with an in-range `choice_index`) — the most authoritative signal, a
+//    button always names one exact saved candidate and is never a
+//    hold/modification;
+// 2) `player_action.choice_text` matching a saved candidate's `choice_label`
+//    or "name · job" (covers a button whose index got lost in transit but
+//    whose label text is still the authoritative saved string);
+// 3) the free-text numeric parser (parseSetupCandidateSelection), which is
+//    also what a typed "4번으로 선택하되 배경만 의사로 바꿔줘" resolves through.
+function resolveSetupSelection(playerInput, recommendations, playerAction = null) {
   const list = Array.isArray(recommendations) ? recommendations : [];
-  const selection = parseSetupCandidateSelection(playerInput, list);
+  if (!list.length) return null;
+
+  if (isPlainObject(playerAction) && playerAction.source === 'choice_button'
+    && Number.isInteger(playerAction.choice_index) && playerAction.choice_index >= 0 && playerAction.choice_index < list.length) {
+    const candidate = list[playerAction.choice_index];
+    if (candidate) return { index: playerAction.choice_index, candidate, raw_input: playerInput, hold_setup: false };
+  }
+
+  const choiceText = isPlainObject(playerAction) && typeof playerAction.choice_text === 'string' ? playerAction.choice_text.trim() : '';
+  if (choiceText) {
+    const index = list.findIndex(candidate => candidate.choice_label === choiceText || `${candidate.name} · ${candidate.job}` === choiceText);
+    if (index >= 0) return { index, candidate: list[index], raw_input: playerInput, hold_setup: false };
+  }
+
+  return parseSetupCandidateSelection(playerInput, list);
+}
+
+// A number match (or button click) with no hold-back phrase is a selection +
+// immediate opening — no separate "confirm" step required. A bare approval
+// phrase (no number/button) only resolves when there's exactly one candidate
+// to approve (covers the legacy single-recommendation read path).
+function resolveSetupApproval(playerInput, recommendations, playerAction = null) {
+  const list = Array.isArray(recommendations) ? recommendations : [];
+  const selection = resolveSetupSelection(playerInput, list, playerAction);
   if (selection && !selection.hold_setup) return selection;
   if (!selection && list.length === 1 && isApprovalInput(playerInput)) {
     return { index: 0, candidate: list[0], raw_input: playerInput, hold_setup: false };
   }
   return null;
+}
+
+// Minimum field set a saved candidate must have before it's allowed to
+// replace a previously-saved (and presumably already-complete) set, or
+// before the player-info panel/game can rely on it after approval. major/
+// rank are intentionally excluded — only required when natural for that
+// candidate's job, never enforced structurally.
+const SETUP_CANDIDATE_REQUIRED_STRING_FIELDS = ['name', 'gender', 'job', 'style', 'personality', 'speech_style', 'background', 'starting_location', 'choice_label'];
+const SETUP_CANDIDATE_REQUIRED_NUMBER_FIELDS = ['age', 'height_cm', 'weight_kg', 'penis_length_cm'];
+
+function isCompleteSetupCandidate(candidate) {
+  if (!isPlainObject(candidate)) return false;
+  for (const field of SETUP_CANDIDATE_REQUIRED_NUMBER_FIELDS) {
+    if (!Number.isFinite(candidate[field])) return false;
+  }
+  for (const field of SETUP_CANDIDATE_REQUIRED_STRING_FIELDS) {
+    if (typeof candidate[field] !== 'string' || !candidate[field].trim()) return false;
+  }
+  const feature = candidate.short_feature || candidate.play_hook;
+  return typeof feature === 'string' && Boolean(feature.trim());
+}
+
+function isCompleteSetupCandidateSet(list) {
+  return Array.isArray(list) && list.length === 4 && list.every(isCompleteSetupCandidate);
 }
 
 // Existing games predate player_setup. An existing player_setup (any
@@ -3091,8 +3150,15 @@ function buildConfirmedPlayerSetupSection(profile = {}) {
   return `\n\n[CONFIRMED PLAYER SETUP — ESTABLISHED FACT]\n\n${lines.join('\n')}\n\n규칙:\n- 이 설정을 다시 추천하거나 질문하지 않는다.\n- 위에 표시된 값만 확정 사실이며, 없는 값을 임의로 새로 만들지 않는다.\n- 표시된 값을 임의로 바꾸지 않는다.\n- 선택한 캐릭터로 병원 오프닝을 즉시 시작한다.`;
 }
 
+// H-fix: no "가능한 범위/일부 항목이 빠져도" hedging here — every candidate
+// must carry the full field set (isCompleteSetupCandidate on the Worker side
+// enforces the same list before a new set is ever allowed to replace a saved
+// one), so the generation prompt has to actually ask for all of it, for all
+// 4 candidates, every time. This is still not a runtime hard gate: an
+// incomplete result just fails to replace the saved set (see buildSavePatch)
+// rather than 422ing the turn.
 function buildPlayerSetupGenerationSection() {
-  return `\n\n[PLAYER SETUP — FOUR CANDIDATES, LLM-DRIVEN]\n이 단계는 플레이어 캐릭터를 정하는 짧은 준비 단계다. 병원 장면이나 등록 NPC 조우는 아직 시작하지 않는다.\n- 상식개변 앱을 2~4문장으로 짧게 소개한 뒤, 성인 남성 플레이어 후보 4명을 한 번에 완성해서 제안한다.\n- 네 후보는 서로 겹치지 않게 구성한다: 병원 직원 / 입원 또는 외래 환자 / 병원과 연관된 외부인 / 자유 배경.\n- 각 후보마다 이름, 나이, 성별(남성), 직업, 전공 또는 직급, 키, 몸무게, 성기 크기, 외형, 성격, 말투, 배경, 시작 장소, 플레이 특징을 가능한 범위에서 정한다. 일부 항목이 빠져도 게임을 멈추거나 사과하지 않는다.\n- [3. 선택지]에는 실제 후보 이름과 직업을 사용해 "번호. 이름 · 직업" 형태로 네 줄을 적는다. 카드 형식은 자연스럽게 작성해도 된다 — Worker가 문자열을 검증하지 않는다.\n- 사용자가 번호(1~4번, ①~④, "후보 N", "첫/두/세/네 번째")로 후보를 고르면 그 후보로 확정하고, 같은 입력에 수정 요청이 있으면 그 수정을 반영해 병원 오프닝을 즉시 시작한다.\n- 사용자가 "아직 시작하지 말고", "다시 보여줘"처럼 명시적으로 보류를 요청하지 않는 한, 번호 선택은 바로 오프닝으로 이어진다.`;
+  return `\n\n[PLAYER SETUP — FOUR COMPLETE CANDIDATES, LLM-DRIVEN, ALL FIELDS REQUIRED]\n이 단계는 플레이어 캐릭터를 정하는 짧은 준비 단계다. 병원 장면이나 등록 NPC 조우는 아직 시작하지 않는다.\n- 상식개변 앱을 2~4문장으로 짧게 소개한 뒤, 성인 남성 플레이어 후보 4명을 한 번에 완성해서 제안한다.\n- 네 후보는 서로 겹치지 않게 구성한다: 1번 병원 직원 / 2번 입원 또는 외래 환자 / 3번 병원과 연관된 외부인 / 4번 자유 배경.\n- 네 후보 전원 각각 아래 필드를 반드시 실제 값으로 채운다. 하나라도 비워두거나 "정하지 않음", "추후 결정" 같은 placeholder를 쓰지 않는다: 이름, 나이(19세 이상 정수), 성별(항상 남성), 직업, 키(cm), 몸무게(kg), 성기 크기(cm), 외형, 성격, 말투, 배경, 시작 장소, 플레이 특징. 전공 또는 직급은 그 후보의 직업상 자연스러운 경우에만 채운다.\n- 각 후보를 다음 형식으로 짧고 정보 중심으로 출력한다(배경은 최대 2문장, 특징은 한 문장):\n[후보 N · 역할]\n이름 · 나이 · 남성\n직업: 직업 / 전공·직급(있으면)\n신체: 키cm / 몸무게kg / 성기 크기cm\n외형: ...\n성격·말투: ... / ...\n배경: 최대 2문장\n특징: 한 문장\n- [3. 선택지]에는 실제 후보 이름과 직업을 사용해 "번호. 이름 · 직업" 형태로 네 줄을 적는다. 카드 형식은 자연스럽게 작성해도 된다 — Worker가 정확한 문자열을 검증하지는 않지만, 위 필드는 실제 값으로 반드시 존재해야 한다.\n- 사용자가 번호(1~4번, ①~④, "후보 N", "첫/두/세/네 번째")로 후보를 고르면 그 후보로 확정하고, 같은 입력에 수정 요청이 있으면 그 수정을 반영해 병원 오프닝을 즉시 시작한다.\n- 사용자가 "아직 시작하지 말고", "다시 보여줘"처럼 명시적으로 보류를 요청하지 않는 한, 번호 선택은 바로 오프닝으로 이어진다.`;
 }
 
 // Same no-placeholder rule as buildConfirmedPlayerSetupSection — a card only
@@ -3103,7 +3169,7 @@ function buildPlayerSetupRedisplaySection(recommendations = [], playerInput = ''
     const lines = buildPlayerProfileDetailLines(candidate);
     return [`[후보 ${index + 1}]`, `ID: ${candidate.id}`, ...lines].join('\n');
   }).join('\n\n');
-  return `\n\n[PLAYER SETUP — CURRENT CANDIDATES]\n\n현재 저장된 후보:\n${cards || '(저장된 후보 없음)'}\n\n이번 사용자 입력:\n${String(playerInput || '').slice(0, 1500)}\n\n규칙:\n- 사용자가 번호(1~4번, ①~④, "후보 N", "첫/두/세/네 번째")로 후보를 골랐다면 그 후보를 base로 확정한다.\n- 같은 입력에 수정 요청이 함께 있으면(예: "4번으로 하되 배경만 의사로") 그 수정을 반영한 최종 프로필을 만든다.\n- 번호 선택과 수정이 확인되면 병원 오프닝과 첫 NPC 조우를 같은 응답에서 바로 시작한다. 설정을 다시 묻지 않는다.\n- 사용자가 "아직 시작하지 말고", "다시 보여줘"처럼 명시적으로 보류를 요청했을 때만 후보 표시를 유지하고 오프닝을 시작하지 않는다.\n- 사용자가 번호 없이 새 조건만 말했다면 그 조건을 반영해 네 후보 전체를 다시 만든다.`;
+  return `\n\n[PLAYER SETUP — CURRENT CANDIDATES]\n\n현재 저장된 후보:\n${cards || '(저장된 후보 없음)'}\n\n이번 사용자 입력:\n${String(playerInput || '').slice(0, 1500)}\n\n규칙:\n- 사용자가 번호(1~4번, ①~④, "후보 N", "첫/두/세/네 번째")로 후보를 골랐다면 그 후보를 base로 확정한다.\n- 같은 입력에 수정 요청이 함께 있으면(예: "4번으로 하되 배경만 의사로") 그 수정을 반영한 최종 프로필을 만든다. 수정되지 않은 다른 필드(신체·외형·성격·말투·배경·시작 장소·특징)는 base 후보의 값을 그대로 유지한다.\n- 번호 선택과 수정이 확인되면 병원 오프닝과 첫 NPC 조우를 같은 응답에서 바로 시작한다. 설정을 다시 묻지 않는다.\n- 사용자가 "아직 시작하지 말고", "다시 보여줘"처럼 명시적으로 보류를 요청했을 때만 후보 표시를 유지하고 오프닝을 시작하지 않는다.\n- 사용자가 번호 없이 새 조건만 말했다면 그 조건을 반영해 네 후보 전체를 다시 만든다 — 이때도 네 후보 전원이 이름·나이·성별·직업·키·몸무게·성기 크기·외형·성격·말투·배경·시작 장소·특징을 모두 실제 값으로 채워야 한다.`;
 }
 
 // Applies broadly (opening + normal turns), not just player_setup: bans the
@@ -3600,9 +3666,9 @@ function buildPlayerSetupOnlyStoryPrompt(playerInput = '') {
     messages: [
       {
         role: 'system',
-        content: `Create only the initial player setup for a hospital common-sense-change app. Briefly introduce the app, then propose four complete adult male player character candidates in one response. Make the four candidates distinct: a hospital worker, a patient, someone connected to the hospital from outside, and a free/wildcard background. Do not start hospital gameplay, create NPC scenes, relationships, sexual actions, or CSA effects. Do not ask a sequence of questions.
+        content: `Create only the initial player setup for a hospital common-sense-change app. Briefly introduce the app, then propose four complete adult male player character candidates in one response, each one fully filled in — never a name/job-only stub. Make the four candidates distinct: a hospital worker, a patient, someone connected to the hospital from outside, and a free/wildcard background. Do not start hospital gameplay, create NPC scenes, relationships, sexual actions, or CSA effects. Do not ask a sequence of questions.
 
-Use [1. 서사 및 행동] and [2. 플레이어 상황판]. [3. 선택지] should list the four candidates as "번호. 이름 · 직업" lines, but the format is not strictly validated — free-text and numeric selection (1, ①, "1번", "후보 1", "첫 번째") are always accepted afterward. Include natural values for each candidate when useful: name, age, gender (always 남성), job, major/rank, body details, appearance, personality, speech style, background, starting location, a short play feature. Missing optional fields are acceptable and are never an error. Respect a concrete custom player request in the input by reflecting it into one of the candidates, but do not confirm it or begin play.
+Use [1. 서사 및 행동] and [2. 플레이어 상황판]. [3. 선택지] should list the four candidates as "번호. 이름 · 직업" lines, but the exact string is not strictly validated — free-text and numeric selection (1, ①, "1번", "후보 1", "첫 번째") are always accepted afterward. Every one of the four candidates must have real, specific values for: name, age (19+), gender (always 남성), job, height_cm, weight_kg, penis_length_cm, appearance (style), personality, speech style, background, starting location, and a short play feature. major/rank only when natural for that candidate's job. Never leave any of these blank, zero, or a placeholder like "미정"/"TBD" — an incomplete candidate here means the whole set gets silently discarded server-side instead of being usable. Respect a concrete custom player request in the input by reflecting it into one of the candidates (still keeping all four fully filled in), but do not confirm it or begin play.
 
 Player input: ${input}`
       },
@@ -3612,10 +3678,10 @@ Player input: ${input}`
 }
 
 function buildPlayerSetupOnlyExtractPrompt(narrativeText = '') {
-  return `Extract only the player setup candidates from the narrative. Return JSON only. Do not infer NPC, CSA, sexual, relationship, stat, world, image, or runtime fields.\n\nNarrative:\n${narrativeText}\n\nRules:\n- Copy up to four candidates from the narrative into player_recommendations, in the order they appear.\n- Prefer values actually present in the narrative or player input.\n- Omit a key entirely when its value is not actually known; a missing field is not a failure and never invalidates a candidate.\n- Fewer than four candidates is acceptable; never invent placeholder candidates to reach four.\n- Copy the narrative's [3. 선택지] lines into choices as-is when present.\n\nSchema:\n{"character_id":"narrator","npcs_present":[],"dialogue_lines":[],"player_recommendations":[{"id":"candidate_1","name":"","age":0,"gender":"남성","job":"","major":"","rank":"","height_cm":0,"weight_kg":0,"penis_length_cm":0,"style":"","personality":"","speech_style":"","background":"","starting_location":"","short_feature":"","play_hook":"","choice_label":""}],"choices":[],"turn_summary":""}`;
+  return `Extract only the player setup candidates from the narrative. Return JSON only. Do not infer NPC, CSA, sexual, relationship, stat, world, image, or runtime fields.\n\nNarrative:\n${narrativeText}\n\nRules:\n- Copy all four candidates from the narrative into player_recommendations, in the order they appear (candidate_1..candidate_4).\n- Copy the actual values already written in the narrative for every field — name, age, gender, job, height_cm, weight_kg, penis_length_cm, style, personality, speech_style, background, starting_location, short_feature/play_hook, choice_label. Do not invent a value the narrative doesn't state, but also do not drop a value the narrative does state.\n- A candidate missing a required field is still returned as-is (never fabricate a number or string to fill a gap) — the Worker decides server-side whether an incomplete set is usable, this prompt only reports what the narrative actually shows.\n- Copy the narrative's [3. 선택지] lines into choices as-is when present.\n\nSchema:\n{"character_id":"narrator","npcs_present":[],"dialogue_lines":[],"player_recommendations":[{"id":"candidate_1","name":"","age":0,"gender":"남성","job":"","major":"","rank":"","height_cm":0,"weight_kg":0,"penis_length_cm":0,"style":"","personality":"","speech_style":"","background":"","starting_location":"","short_feature":"","play_hook":"","choice_label":""}],"choices":[],"turn_summary":""}`;
 }
 
-function buildStoryPrompt(ctx, playerInput, currentTurn, feedback = [], regenerationFeedback = null, structuredPlan = null) {
+function buildStoryPrompt(ctx, playerInput, currentTurn, feedback = [], regenerationFeedback = null, structuredPlan = null, playerAction = null) {
   ctx = withSetupCompatibility(ctx);
   const master = ctx?.master || {};
   const rawSave = ctx?.__structured_effective_save === true
@@ -3630,7 +3696,7 @@ function buildStoryPrompt(ctx, playerInput, currentTurn, feedback = [], regenera
   const appUsageRequested = isAppUsageInfoRequest(playerInput);
   const savedRecommendations = resolveSetupRecommendations(save.player_setup);
   const hasRecommendation = savedRecommendations.length > 0;
-  const setupApproval = !setupComplete ? resolveSetupApproval(playerInput, savedRecommendations) : null;
+  const setupApproval = !setupComplete ? resolveSetupApproval(playerInput, savedRecommendations, playerAction) : null;
   const approvalPending = Boolean(setupApproval);
   const needsOpening = setupComplete && save.opening_started !== true;
   const needsRulebook = isFirstTurn || needsOpening || nextTurn % 10 === 0;
@@ -3784,7 +3850,7 @@ ${recentMemorySlice.map((m, index) => clipHeadTail(sanitizeRecentNarrativeForPro
     ? `
 
 [REMINDER — PLAYER SETUP PHASE]
-지금 이 응답 안에서 성인 남성 플레이어 후보 4명을 즉시 제안하거나, 저장된 후보를 기준으로 사용자의 번호 선택·수정 요청을 반영해 다시 제안한다. 항목별 질문으로 멈추지 않는다. [3. 선택지]는 "번호. 이름 · 직업" 네 줄이 기본이며 자유 입력도 항상 허용한다.
+지금 이 응답 안에서 성인 남성 플레이어 후보 4명을 즉시 제안하거나, 저장된 후보를 기준으로 사용자의 번호 선택·수정 요청을 반영해 다시 제안한다. 항목별 질문으로 멈추지 않는다. [3. 선택지]는 "번호. 이름 · 직업" 네 줄이 기본이며 자유 입력도 항상 허용한다. 네 후보 전원 이름·나이·성별·직업·키·몸무게·성기 크기·외형·성격·말투·배경·시작 장소·특징을 실제 값으로 모두 채운다 — 하나라도 빠지면 그 후보 세트 전체가 서버에 저장되지 못한다.
 `
     : '';
   // Repeated at the very end (same recency-favoring position as
@@ -3852,13 +3918,13 @@ function buildMindEffectExtractFirewallSection({ hasApplicableCsa = false, hasCs
   return hasApplicableCsa || hasCsaTransaction ? MIND_EFFECT_EXTRACT_FIREWALL : '';
 }
 
-function buildExtractPrompt(narrativeText, playerInput, ctx, images, turnCount, structuredPlan = null) {
+function buildExtractPrompt(narrativeText, playerInput, ctx, images, turnCount, structuredPlan = null, playerAction = null) {
   const master = ctx?.master || {};
   const rawSave = ctx?.__structured_effective_save === true
     ? (isPlainObject(ctx?.save) ? ctx.save : {})
     : buildStructuredEffectiveSave(ctx?.save, structuredPlan);
   const save = buildCsaOnlyEffectiveSave(rawSave, master);
-  if (!isSetupComplete(save) && !resolveSetupApproval(playerInput, resolveSetupRecommendations(save.player_setup))) {
+  if (!isSetupComplete(save) && !resolveSetupApproval(playerInput, resolveSetupRecommendations(save.player_setup), playerAction)) {
     return buildPlayerSetupOnlyExtractPrompt(narrativeText);
   }
   const applicableCsa = getApplicableCsaEntries(save);
@@ -4315,7 +4381,7 @@ function clampPlayerInputEchoedStatChanges({ patch, previousSave, characterId })
   return patch;
 }
 
-function buildSavePatch(extract, enginePatch = {}, summaryPlan = null, previousSave = {}, turnNumber = 0, playerInput = '', structuredPlan = null, master = {}, narrativeText = '', gameId = '') {
+function buildSavePatch(extract, enginePatch = {}, summaryPlan = null, previousSave = {}, turnNumber = 0, playerInput = '', structuredPlan = null, master = {}, narrativeText = '', gameId = '', playerAction = null) {
   const characterId = typeof extract.character_id === 'string'
     ? extract.character_id
     : null;
@@ -4527,7 +4593,7 @@ function buildSavePatch(extract, enginePatch = {}, summaryPlan = null, previousS
   const setupComplete = isSetupComplete(previousSave);
   if (!setupComplete) {
     const previousRecommendations = resolveSetupRecommendations(previousSave?.player_setup);
-    const approval = resolveSetupApproval(playerInput, previousRecommendations);
+    const approval = resolveSetupApproval(playerInput, previousRecommendations, playerAction);
 
     if (approval) {
       // Approval always confirms the candidate already saved from a prior
@@ -4549,8 +4615,17 @@ function buildSavePatch(extract, enginePatch = {}, summaryPlan = null, previousS
       };
       patch.opening_started = true;
     } else {
+      // A new candidate set only ever replaces the saved one when all 4 are
+      // actually complete (isCompleteSetupCandidateSet) — an incomplete new
+      // set (Primary Extract omitted/truncated a field) never overwrites
+      // good previously-saved candidates. If there's nothing complete on
+      // either side, player_setup is left untouched this turn so the next
+      // setup response regenerates all 4 from scratch rather than persisting
+      // a name/job-only stub.
       const extractedCandidates = normalizeSetupCandidates(extract.player_recommendations);
-      const nextRecommendations = extractedCandidates.length ? extractedCandidates : previousRecommendations;
+      const nextRecommendations = isCompleteSetupCandidateSet(extractedCandidates)
+        ? extractedCandidates
+        : previousRecommendations;
       if (nextRecommendations.length) {
         patch.player_setup = {
           status: 'recommended',

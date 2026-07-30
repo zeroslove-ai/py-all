@@ -56,7 +56,7 @@ const stream = {
   // concurrently with the still-typing display; callers touching the DOM
   // (finalizing the narrative element, revealing choices) must await
   // renderDone so they never cut the animation short.
-  story(gameId, playerInput, turnCount, onChunk, feedback = [], regenerationFeedback = null, structuredAction = null) {
+  story(gameId, playerInput, turnCount, onChunk, feedback = [], regenerationFeedback = null, playerAction = null, structuredAction = null) {
     const overallStart = Date.now();
     let resolveNetworkDone, rejectNetworkDone;
     let resolveRenderDone, rejectRenderDone;
@@ -76,6 +76,7 @@ const stream = {
             turn_count: turnCount,
             feedback,
             regeneration_feedback: regenerationFeedback,
+            player_action: playerAction,
             structured_action: structuredAction
           })
         });

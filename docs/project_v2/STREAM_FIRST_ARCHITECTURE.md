@@ -20,4 +20,5 @@
 - 첫 만남 수치 누락 때문에 Story 폐기
 - 미완료 행동 때문에 완료 상태 검증 422
 - 자연어 키워드 조합만으로 APP_UI_REQUIRED 반환
-- 근거(evidence) 없는 npc_scene_state 변경 때문에 턴 422/500 실패 — 해당 캐릭터 필드만 버리고 이전 상태 유지
+- 근거(evidence) 없는 npc_scene_state 변경 때문에 턴 422/500 실패 — 필드 단위로 이전 저장값과 비교해 실제로 바뀐 필드만, 그것도 필드 각각 독립적으로 검증하고, 거부된 필드만 버리고 정상 형제 필드는 유지
+- NPC CSA 메타 인식(상식개변/앱/시스템 인식) 필터링 때문에 턴 422/500 실패 — npc_emotion은 위반 필드만 결정론적 fallback으로 교체, dialogue_lines/relationship_memory_patch/turn_summary는 위반 항목·문장만 제거

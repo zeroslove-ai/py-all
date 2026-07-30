@@ -1628,7 +1628,14 @@ async function performExtractionPass(env, { narrativeText, playerInput, playerAc
   const previousNpcEmotion = mindMonitorCharacterId && mindMonitorCharacterId !== 'narrator'
     ? compatCtx?.save?.npc_emotion?.[mindMonitorCharacterId]
     : null;
-  let validation = validateNpcEmotion(extract.npc_emotion, npcRejected ? 'narrator' : extract.character_id);
+  // NPC epistemic firewall gate — determined from the post-plan effective
+  // save (compatCtx.save is effectiveCtx.save when called from
+  // runExtractPipeline, already reflecting a same-turn app_transaction),
+  // same condition buildStoryPrompt uses for its own firewall/physical-
+  // transition sections.
+  const forbidCsaMetaAwareness = getApplicableCsaEntries(compatCtx?.save || {}).length > 0
+    || structuredPlan?.canonical_action?.type === 'app_transaction';
+  let validation = validateNpcEmotion(extract.npc_emotion, npcRejected ? 'narrator' : extract.character_id, forbidCsaMetaAwareness);
   validation = applyMindMonitorRepeatCheck(validation, extract.npc_emotion, previousNpcEmotion);
   timing.mind_validation_ms = Date.now() - t5;
   // 턴 기록용 마인드 모니터 출처 — _turn_record에만 쓰이고 game_save.data에는
@@ -1637,7 +1644,10 @@ async function performExtractionPass(env, { narrativeText, playerInput, playerAc
 
   // P1: no auxiliary mind-monitor repair LLM call. An invalid field goes
   // straight to the deterministic degraded fallback below — a valid sibling
-  // field is never discarded just because another field failed.
+  // field is never discarded just because another field failed. This is
+  // also where a field flagged for CSA meta-awareness gets replaced: the
+  // fallback pool never mentions the mechanism, so it always clears the
+  // violation as a side effect.
   const mindMonitorRepaired = false;
   if (!validation.ok) {
     // 이전 턴 npc_emotion을 그대로 복사하지 않는다 — 실패한 필드만 간결한
@@ -1655,6 +1665,21 @@ async function performExtractionPass(env, { narrativeText, playerInput, playerAc
     console.error('Mind monitor validation failed after repair:', { request_id: requestId, characterId: extract.character_id, errors: validation.errors });
   }
   extract.dialogue_lines = filterMainNpcDialogue(extract, compatCtx?.master?.characters || {});
+  if (forbidCsaMetaAwareness) {
+    extract.dialogue_lines = filterCsaMetaAwareDialogue(extract.dialogue_lines, requestId, extract.character_id);
+  }
+  // Structured-memory contamination guard (README item E) — deterministic
+  // and applied unconditionally, but only ever a no-op on clean text: drop
+  // only the offending relationship-memory entry or turn_summary sentence,
+  // never the whole field, and never touch a clean/empty turn_summary
+  // (applyCsaMetaFallbackToTurnSummary is only invoked when a violation is
+  // actually present, since it also caps length and fills a canned fallback
+  // for an empty string — behavior this path must not impose on ordinary
+  // turns).
+  extract.relationship_memory_patch = sanitizeCsaMetaAwarenessFromRelationshipMemory(extract.relationship_memory_patch);
+  if (detectCsaMetaAwareness(extract.turn_summary).length) {
+    extract.turn_summary = applyCsaMetaFallbackToTurnSummary(extract.turn_summary);
+  }
 
   return { ok: true, extract, jsonRepaired, mindMonitorRepaired, validation, rawText: result.rawText, effectiveWorldState, timing };
 }
@@ -2073,17 +2098,21 @@ async function runExtractPipeline(env, { game_id, narrative_text, player_input, 
   const sceneStateEvidenceResult = retainEvidencedNpcSceneStatePatch(
     extract.npc_scene_state_patch,
     extract.npc_scene_state_evidence,
-    finalNarrativeText
+    finalNarrativeText,
+    compatCtx?.save?.npc_scene_state,
+    compatCtx?.master?.characters
   );
   extract.npc_scene_state_patch = sceneStateEvidenceResult.retained;
-  if (sceneStateEvidenceResult.rejected.length) {
+  for (const rejection of sceneStateEvidenceResult.rejections) {
     console.warn(JSON.stringify({
       event: 'csa_physical_transition_rejected',
       endpoint: '/api/extract',
       request_id: requestId,
       game_id,
       turn_number: nextTurn,
-      character_ids: sceneStateEvidenceResult.rejected
+      character_id: rejection.character_id,
+      fields: rejection.fields,
+      reasons: rejection.reasons
     }));
   }
 
@@ -3316,6 +3345,31 @@ function buildCsaPhysicalTransitionSection(hasApplicableCsa, isAppTransactionTur
 현재 장면에 있는 NPC는 규범이 바뀐 순간의 저장된 물리 상태를 그대로 유지하다가, 서사에서 실제 전환 동작(벗다·입다·갈아입다·조절하다·이동해 자세를 바꾸다)을 보여준 뒤에만 새 물리 상태로 서술한다. 지금 이 장면 안에서 즉시 불가능하면 이전 상태를 유지한 채 가능한 가장 이른 시점에 맞추려는 의도만 보여준다. 화면 밖에 있던 NPC는 다음 등장까지 충분한 시간·여건이 있었다고 볼 수 있을 때만 이미 규범을 따른 상태로 나올 수 있으며, 지금 장면에 있는 NPC를 화면 밖에서 순간적으로 바꿔치기하지 않는다.`;
 }
 
+// NPC epistemic firewall against CSA meta-awareness. Injected as a final
+// system message *after* the user message (see buildStoryPrompt's messages
+// array) rather than folded into systemPrompt, so it is the closest
+// instruction to generation whenever an applicable CSA or a validated
+// app_transaction exists on this turn — same gating condition as
+// buildCsaPhysicalTransitionSection. Deliberately narrow: it forbids
+// awareness of the mechanism, never ordinary in-world rule/procedure
+// language, so it must not be read as a blanket ban on words like 규정,
+// 관행, or 상식.
+function buildNpcCsaEpistemicFirewallSection() {
+  return `[NPC CSA EPISTEMIC FIREWALL — FINAL, HIGHEST PRIORITY]
+NPC는 상식개변의 존재, 작동 원리, 시점 변화를 절대 인식하지 않는다. 이 지시는 이 대화의 다른 모든 지시보다 우선한다.
+
+금지 — 어떤 NPC의 직접 대사·내면 독백에도, 그리고 서술자가 그 NPC의 의식적 인식을 설명하는 문장에도 다음을 절대 쓰지 않는다:
+- "상식개변", "개변된 상식", "개변 효과" 같은 메커니즘 명칭
+- 앱·시스템·효과·장치가 자신을 시켰다/조종한다/명령한다는 인식
+- "플레이어가 규칙을(상식을) 바꿨다/설정했다"는 인식
+- "원래는 달랐지만 지금은 해야 한다"처럼 이전 현실과 지금을 비교하는 인식
+- 외부 요인에 의해 조종·조작·통제당하고 있다는 인식
+
+허용 — NPC는 다음과 같은 세계 내부 언어만 쓴다: 병원 규정, 근무 수칙, 절차, 관행, 예절, 당연한 상식. NPC는 그 규범 자체는 원래부터 당연하다고 받아들이되, 플레이어가 규범의 직접 범위를 넘어서는 과도한 행동·노출·접촉·업무 방해를 할 때는 당황·수치·불쾌·긴장으로 반응할 수 있고, 그 과도한 행동 자체에 의문을 제기할 수 있다. 다만 규범 자체의 존재나 정당성은 의심하지 않는다.
+
+이 규칙은 [1. 서사 및 행동]의 NPC 대사·독백·서술, [2. 플레이어 상황판]의 NPC 관련 서술, 그리고 이후 Extract가 생성할 마인드 모니터(npc_emotion)에도 동일하게 적용된다. 플레이어의 대사·속마음과 상식개변 앱 UI 텍스트에는 이 규칙을 적용하지 않는다.`;
+}
+
 function buildCsaPersistentSceneSection() {
   return `
 
@@ -3871,10 +3925,9 @@ ${recentMemorySlice.map((m, index) => clipHeadTail(sanitizeRecentNarrativeForPro
   const csaPersistentSceneSection = csaSection ? buildCsaPersistentSceneSection() : '';
   const csaPublicSceneSection = csaSection ? buildCsaPublicSceneSection() : '';
   const csaDirectExecutionPrioritySection = csaSection ? buildCsaDirectExecutionPrioritySection() : '';
-  const csaPhysicalTransitionSection = buildCsaPhysicalTransitionSection(
-    Boolean(csaSection),
-    structuredPlan?.ok && structuredPlan.canonical_action?.type === 'app_transaction'
-  );
+  const isAppTransactionTurn = structuredPlan?.ok && structuredPlan.canonical_action?.type === 'app_transaction';
+  const csaPhysicalTransitionSection = buildCsaPhysicalTransitionSection(Boolean(csaSection), isAppTransactionTurn);
+  const needsNpcCsaEpistemicFirewall = Boolean(csaSection) || isAppTransactionTurn;
   const csaWeakSynergySection = getApplicableCsaEntries(save, activeCsa).length > 1 ? buildCsaWeakSynergySection() : '';
   const relationshipInterpretationSection = buildRelationshipInterpretationSection();
   const sexualPolicySection = buildSexualPolicyPromptSection(buildPreStorySexualPolicy({
@@ -3951,11 +4004,12 @@ ${recentMemorySlice.map((m, index) => clipHeadTail(sanitizeRecentNarrativeForPro
       { role: 'system', content: systemPrompt },
       {
         role: 'user',
-        content: structuredPlan?.ok && structuredPlan.canonical_action?.type === 'app_transaction'
+        content: isAppTransactionTurn
           ? '위 Worker 확정 상식개변 결과가 이미 적용된 현재 장면을 진행한다.'
           : (setupComplete && !structuredPlan ? '위 플레이어 시도 기록을 바탕으로 다음 게임 턴을 작성한다.' : (playerInput || '/플레이'))
       },
-      ...(setupComplete && !structuredPlan ? [{ role: 'system', content: buildFinalAttemptInterpretationGuard() }] : [])
+      ...(setupComplete && !structuredPlan ? [{ role: 'system', content: buildFinalAttemptInterpretationGuard() }] : []),
+      ...(needsNpcCsaEpistemicFirewall ? [{ role: 'system', content: buildNpcCsaEpistemicFirewallSection() }] : [])
     ]
   };
 }
@@ -4078,6 +4132,7 @@ npc_emotion.state는 surface와 inner를 종합해 normal/questioning/conflicted
 "상태다", "느끼고 있다", "생각한다" 같은 분석문만으로 surface 또는 inner를 채우지 마라.
 character_id가 narrator가 아닌 등록 NPC이고 그 NPC가 방금 서사에 실제로 등장한 정상 턴이면 npc_emotion(표면의식/잠재의식/신체적·행동적 반응)을 반드시 모두 생성한다. player_setup 후보 화면처럼 등록 NPC가 실제로 등장하지 않는 턴에만 비워둔다.
 직전 저장된 npc_emotion 문장을 그대로 복사하거나 단어만 바꿔치기하지 마라. 이번 턴 서사에서 새로 일어난 인식·감정·신체 변화만 기록하고, 변화가 작더라도 직전 문장을 그대로 반복하지 마라. 일시적인 신체 반응이나 순간의 동요를 사랑, 영구 복종, 완전한 욕망으로 자동 확정하지 말고, 갈등·혼란·자기합리화가 남아 있다면 그대로 유지해라.
+npc_emotion.surface/inner/physical_reaction과 dialogue_lines, turn_summary는 NPC가 상식개변의 존재·작동 원리·시점 변화를 인식한다는 내용을 절대 담지 않는다 — "상식개변", 앱/시스템/효과가 시켰다는 인식, "플레이어가 규칙을 바꿨다"는 인식, "원래는 달랐지만 지금은"이라는 이전 현실 비교, 외부에 조종당한다는 인식은 모두 금지다. NPC는 병원 규정·근무 수칙·절차·관행·예절 같은 세계 내부 언어로만 그 규범을 서술하며, 규범 자체는 당연하게 받아들이되 플레이어의 규범 밖 과도한 행동에는 당황·수치·불쾌·긴장으로 반응할 수 있다.
 
 [NPC STAT DELTA CONTRACT]
 npc_stat_changes에는 호감도와 상식개변 수용도만 반환한다. 호감도는 플레이어 개인에 대한 실제 독립적 감정·관계 변화만 근거로 -5~+5 안에서 판단한다. 상식개변 수행·업무적 협조·접촉을 거부하지 않음·홍조·흥분·신음·성행위 자체·플레이어 결과 선언·높은 수용도만을 근거로 한 호감 상승은 delta 0이다. 상식개변 수용도는 현재 장면에 실제 적용된 활성 상식개변의 직접 의미가 행동·판단에 반영된 경우에만 반환하며, 일반 부탁·복종·연애·성적 요구·범위 밖 명령에는 사용하지 않는다. 상식개변 생성·수정·해제 자체, 단순 반복, 플레이어 선언만으로는 올리지 않는다. reason은 서사 근거 한 문장이다.
@@ -4092,7 +4147,7 @@ relationship_memory_patch는 최종 Story에서 실제로 완료된 중요한 �
 
 [NPC PHYSICAL SCENE STATE PATCH]
 npc_scene_state_patch는 최종 Story에서 등록 NPC가 실제로 옷을 입거나 벗고, 열고 잠그고, 올리거나 내리고, 갈아입거나 자세를 바꾼 완료 사건만 반영한다. 플레이어 입력만의 선언, 실패·시도·계획, 상식개변의 생성·해제만으로는 반환하지 않는다. 상식개변이 활성화·교체·해제됐다는 사실만으로 옷·자세가 저절로 바뀌었다고 반환하지 마라 — 규범은 즉시 바뀌어도 물질은 자동으로 바뀌지 않으며, NPC가 실제로 몸을 움직여 완료한 행동이 서사에 있을 때만 반환한다. 기존 상태를 유지할 키는 생략하고, 등록 NPC·허용 enum만 사용한다.
-npc_scene_state_patch에 값을 넣는 캐릭터마다 npc_scene_state_evidence에 그 완료 행동을 그대로 보여주는 최종 Story 원문 중 정확히 복사한 짧은 문구(따옴표 재구성·요약·의역 금지)를 함께 반환한다. "규칙이 적용되자 속옷이 사라졌다", "유니폼이 저절로 타이트해졌다", "규정이 그녀를 붙잡았다"처럼 실제 신체 동작이 아니라 규범·시스템·앱이 물질을 대신 바꿨다는 근거는 유효하지 않다. 유효한 근거를 댈 수 없으면 그 캐릭터는 npc_scene_state_patch에서 아예 빼라.
+npc_scene_state_patch에서 실제로 이전 저장값과 달라지는 필드마다(clothing.uniform_top, clothing.uniform_bottom, clothing.underwear_top, clothing.underwear_bottom, posture, current_action) npc_scene_state_evidence의 같은 캐릭터 항목에 그 필드 이름을 키로, 그 완료 행동을 그대로 보여주는 최종 Story 원문 중 정확히 복사한 짧은 문구(따옴표 재구성·요약·의역 금지)를 값으로 넣는다. 한 캐릭터가 여러 필드를 동시에 바꾼다면 필드마다 각각의 근거를 따로 넣어라 — 한 필드의 근거 문구를 다른 필드에도 재사용하지 마라. "규칙이 적용되자 속옷이 사라졌다", "유니폼이 저절로 타이트해졌다", "규정이 그녀를 붙잡았다"처럼 실제 신체 동작이 아니라 규범·시스템·앱이 물질을 대신 바꿨다는 근거, 그리고 "벗어야겠다"/"갈아입을 생각을 했다"처럼 아직 완료되지 않은 계획·의도만 보여주는 근거는 모두 유효하지 않다. 특정 필드에 유효한 근거를 댈 수 없으면 그 필드만 npc_scene_state_patch에서 빼고 나머지 필드는 그대로 반환한다.
 player_scene_state_patch도 최종 Story에서 플레이어 자세·위치·방향 변화가 실제 완료된 경우만 반환한다. 단순 시도·선택지·계획만으로 갱신하지 않으며, 불명확하면 기존 상태를 유지하도록 생략한다.
 
 [WORLD STATE PATCH CONTRACT]
@@ -4155,7 +4210,7 @@ ${JSON.stringify(imageCatalog)}
   "arousal_event": null,
   "npc_intimacy_state_patch": null,
   "npc_scene_state_patch": {"heroine1": {"clothing": {"uniform_top": "worn|removed|open|unknown", "uniform_bottom": "worn|removed|open|unknown", "underwear_top": "worn|removed|unknown", "underwear_bottom": "worn|removed|unknown"}, "posture": "standing|sitting|kneeling|lying|unknown", "current_action": "실제 현재 행동, 없으면 생략"}},
-  "npc_scene_state_evidence": {"heroine1": "npc_scene_state_patch에 넣은 캐릭터마다 그 완료 행동을 보여주는 최종 Story 원문 그대로의 짧은 인용. patch에 없는 캐릭터는 넣지 않는다"},
+  "npc_scene_state_evidence": {"heroine1": {"clothing.uniform_top": "그 필드가 바뀌었을 때만, 최종 Story 원문 그대로의 짧은 인용", "clothing.uniform_bottom": "", "clothing.underwear_top": "", "clothing.underwear_bottom": "", "posture": "", "current_action": ""}},
   "player_scene_state_patch": {"posture": "standing|sitting|kneeling|lying_supine|lying_prone|side_lying|straddling|bent_forward|leaning|walking|crouching|carrying|unknown", "position_label": "최종 Story에서 실제 완료된 플레이어의 현재 자세/방향, 없으면 생략"},
   "player_inner_thought": "[2. 플레이어 상황판]에 실제로 적은 '[플레이어 이름] 속마음: ...' 줄에서 '속마음:' 뒤의 본문만 그대로 옮긴다. 따옴표 없이, 없으면 빈 문자열",
   "turn_summary": "이번 턴에서 변한 핵심 사실 1~3문장",
@@ -4391,7 +4446,12 @@ function validateMindMonologue(value, label) {
   return errors;
 }
 
-function validateNpcEmotion(emotion = {}, characterId = null) {
+// forbidCsaMetaAwareness defaults to false so every pre-existing 2-arg call
+// site (and its exact-shape test assertions) is unaffected — the meta-
+// awareness check only ever adds errors, never removes the base checks,
+// and only when the caller explicitly opts in (an applicable CSA or a
+// validated app_transaction is active this turn).
+function validateNpcEmotion(emotion = {}, characterId = null, forbidCsaMetaAwareness = false) {
   const emptyFieldErrors = { surface: [], inner: [], physical_reaction: [] };
   if (!characterId || characterId === 'narrator') return { ok: true, errors: [], fieldErrors: emptyFieldErrors };
   const physical = typeof emotion?.physical_reaction === 'string' ? emotion.physical_reaction.trim() : '';
@@ -4401,6 +4461,13 @@ function validateNpcEmotion(emotion = {}, characterId = null) {
     inner: validateMindMonologue(emotion?.inner, 'inner'),
     physical_reaction: sentenceCount < 2 ? [`physical_reaction: ${sentenceCount} sentences (minimum 2)`] : []
   };
+  if (forbidCsaMetaAwareness) {
+    for (const field of ['surface', 'inner', 'physical_reaction']) {
+      if (detectCsaMetaAwareness(emotion?.[field]).length) {
+        fieldErrors[field] = [...fieldErrors[field], `${field}: CSA mechanism meta-awareness detected`];
+      }
+    }
+  }
   const errors = [...fieldErrors.surface, ...fieldErrors.inner, ...fieldErrors.physical_reaction];
   return { ok: errors.length === 0, errors, fieldErrors };
 }
@@ -5421,6 +5488,34 @@ function filterMainNpcDialogue(extract, characters) {
   }).map(line => ({ speaker: mainName, text: line.text.trim(), direction: typeof line.direction === 'string' && line.direction.trim() ? line.direction.trim() : 'neutral' }));
 }
 
+// README item D: structured/TTS protection layer for the NPC epistemic
+// firewall. filterMainNpcDialogue already restricts this array to the main
+// NPC's own lines only (player and other-speaker lines are already gone by
+// this point), so dropping a meta-aware line here can never remove player
+// dialogue or app UI text. Never fails the turn; this may cause TTS to
+// simply omit the line, which is the intended outcome.
+function filterCsaMetaAwareDialogue(lines, requestId = null, characterId = null) {
+  const list = Array.isArray(lines) ? lines : [];
+  const kept = list.filter(line => !detectCsaMetaAwareness(line?.text).length);
+  if (kept.length !== list.length) {
+    console.warn(JSON.stringify({
+      event: 'csa_meta_dialogue_filtered',
+      request_id: requestId,
+      character_id: characterId,
+      count: list.length - kept.length
+    }));
+  }
+  return kept;
+}
+
+// README item E: relationship-memory entries are short atomic facts (not
+// paragraphs), so an entry that claims CSA-mechanism awareness is dropped
+// whole rather than sentence-trimmed — the rest of the array is untouched.
+function sanitizeCsaMetaAwarenessFromRelationshipMemory(patch) {
+  if (!Array.isArray(patch)) return patch;
+  return patch.filter(entry => !(isPlainObject(entry) && detectCsaMetaAwareness(entry.text).length));
+}
+
 function escapeRegExp(value = '') {
   return String(value).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
@@ -5715,17 +5810,39 @@ function normalizeNpcSceneStatePatch(value) {
   return result;
 }
 
-// Transient (never persisted to game_save) evidence quotes keyed by
-// character_id — used only in-request by
-// retainEvidencedNpcSceneStatePatch to verify each npc_scene_state_patch
-// entry against the final Story text before it reaches buildSavePatch.
+// The six persistable npc_scene_state field paths, in the shape the
+// per-field evidence map and retainEvidencedNpcSceneStatePatch both key on.
+const NPC_SCENE_STATE_EVIDENCE_FIELDS = [
+  'clothing.uniform_top', 'clothing.uniform_bottom', 'clothing.underwear_top', 'clothing.underwear_bottom',
+  'posture', 'current_action'
+];
+
+// Transient (never persisted to game_save) evidence keyed by character_id
+// — used only in-request by retainEvidencedNpcSceneStatePatch to verify
+// each changed npc_scene_state_patch field against the final Story text
+// before it reaches buildSavePatch. Accepts either the current per-field
+// map ({fieldPath: quote}) or a legacy single shared string — the legacy
+// shape is only ever honored downstream when the character patch has
+// exactly one actually-changed field, since a shared string can't
+// disambiguate which of several changes it proves.
 function normalizeNpcSceneStateEvidence(value) {
   if (!isPlainObject(value)) return {};
   const result = {};
   for (const [characterId, rawEvidence] of Object.entries(value)) {
     if (typeof characterId !== 'string' || !characterId) continue;
-    const evidence = typeof rawEvidence === 'string' ? rawEvidence.trim().slice(0, 200) : '';
-    if (evidence) result[characterId] = evidence;
+    if (typeof rawEvidence === 'string') {
+      const evidence = rawEvidence.trim().slice(0, 200);
+      if (evidence) result[characterId] = evidence;
+      continue;
+    }
+    if (isPlainObject(rawEvidence)) {
+      const fields = {};
+      for (const fieldPath of NPC_SCENE_STATE_EVIDENCE_FIELDS) {
+        const fieldValue = typeof rawEvidence[fieldPath] === 'string' ? rawEvidence[fieldPath].trim().slice(0, 200) : '';
+        if (fieldValue) fields[fieldPath] = fieldValue;
+      }
+      if (Object.keys(fields).length) result[characterId] = fields;
+    }
   }
   return result;
 }
@@ -5743,24 +5860,117 @@ function isMagicalPhysicalTransitionEvidence(evidence = '') {
   return CSA_MAGICAL_PHYSICAL_TRANSITION_PATTERN.test(String(evidence || ''));
 }
 
-// Fail-open evidence gate for npc_scene_state_patch, mirroring
-// retainValidatedCsaRuntimeUpdates: only entries backed by an exact,
-// non-magical substring of the final Story text survive. A rejected
-// character's scene-state change is dropped entirely (buildSavePatch then
-// simply keeps that character's previously saved state) — the turn itself
-// never fails.
-function retainEvidencedNpcSceneStatePatch(sceneStatePatch = {}, evidenceMap = {}, narrativeText = '') {
+// Intention/plan/consideration phrasing that never proves a completed
+// physical action, even when it's an exact, non-magical substring of the
+// Story text — "속옷을 벗어야겠다" describes a plan, not a finished change.
+// Stem-agnostic (targets common sentence-final suffixes) so it generalizes
+// past the handful of examples the hotfix spec lists.
+const CSA_PLANNING_ONLY_EVIDENCE_PATTERN = /(?:어야겠다|려고\s*했다|(?:을까|ㄹ까)\s*고민했다|생각을?\s*했다|준비를?\s*했다|하기로\s*했다|고\s*싶었다|하려던\s*참이었다|예정이다|계획이다)/;
+
+function isPlanningOnlyEvidence(evidence = '') {
+  return CSA_PLANNING_ONLY_EVIDENCE_PATTERN.test(String(evidence || ''));
+}
+
+// Lightweight actor-identity check: the evidence quote (or the narrative
+// text immediately before it) must name the character or refer to them
+// with an unambiguous third-person pronoun, so one NPC's quote can't
+// silently authorize a scene-state change keyed under a different NPC.
+// Deliberately lenient (fail-open when the character's name is unknown) —
+// this is a supplementary confidence check, not the primary gate.
+const KOREAN_THIRD_PERSON_PRONOUN_PATTERN = /(?:그녀가|그녀를|그녀의|그녀는|그녀에게|그가|그를|그의|그는|그에게)/;
+
+function evidenceIdentifiesCharacter(evidence, narrativeText, characterName) {
+  if (!characterName) return true;
+  const normalizedNarrative = normalizeEvidenceText(narrativeText);
+  const normalizedEvidence = normalizeEvidenceText(evidence);
+  if (!normalizedEvidence) return false;
+  const idx = normalizedNarrative.indexOf(normalizedEvidence);
+  if (idx === -1) return false;
+  const window = normalizedNarrative.slice(Math.max(0, idx - 60), idx + normalizedEvidence.length);
+  return window.includes(normalizeEvidenceText(characterName)) || KOREAN_THIRD_PERSON_PRONOUN_PATTERN.test(window);
+}
+
+function evaluateSceneStateFieldEvidence(evidence, narrativeText, characterName) {
+  if (typeof evidence !== 'string' || !evidence.trim()) return { ok: false, reason: 'missing_evidence' };
+  if (!evidenceExists(evidence, narrativeText)) return { ok: false, reason: 'missing_exact_evidence' };
+  if (isMagicalPhysicalTransitionEvidence(evidence)) return { ok: false, reason: 'magical_transition_wording' };
+  if (isPlanningOnlyEvidence(evidence)) return { ok: false, reason: 'planning_only' };
+  if (!evidenceIdentifiesCharacter(evidence, narrativeText, characterName)) return { ok: false, reason: 'character_identity_unclear' };
+  return { ok: true, reason: null };
+}
+
+// Fail-open, per-field evidence gate for npc_scene_state_patch. Unlike the
+// earlier character-level gate, this compares each of the six persistable
+// fields against the character's *previous* saved state so only actually
+// changed fields need evidence at all, and validates each changed field
+// independently — one field's evidence can never authorize a sibling
+// field's change, and a rejected field never discards a valid sibling
+// field or the rest of the character's state. A character with zero
+// surviving fields is omitted from the retained patch entirely; the turn
+// itself never fails over a rejected field.
+function retainEvidencedNpcSceneStatePatch(sceneStatePatch = {}, evidenceMap = {}, narrativeText = '', previousSceneState = {}, characters = {}) {
   const retained = {};
-  const rejected = [];
-  for (const [characterId, patch] of Object.entries(isPlainObject(sceneStatePatch) ? sceneStatePatch : {})) {
-    const evidence = isPlainObject(evidenceMap) ? evidenceMap[characterId] : null;
-    const valid = typeof evidence === 'string' && evidence.trim()
-      && evidenceExists(evidence, narrativeText)
-      && !isMagicalPhysicalTransitionEvidence(evidence);
-    if (valid) retained[characterId] = patch;
-    else rejected.push(characterId);
+  const rejections = [];
+  const patch = isPlainObject(sceneStatePatch) ? sceneStatePatch : {};
+  const previousAll = isPlainObject(previousSceneState) ? previousSceneState : {};
+  const evidenceAll = isPlainObject(evidenceMap) ? evidenceMap : {};
+
+  for (const [characterId, proposed] of Object.entries(patch)) {
+    if (!isPlainObject(proposed)) continue;
+    const previous = isPlainObject(previousAll[characterId]) ? previousAll[characterId] : {};
+    const previousClothing = isPlainObject(previous.clothing) ? previous.clothing : {};
+    const proposedClothing = isPlainObject(proposed.clothing) ? proposed.clothing : {};
+
+    const changedFields = [];
+    for (const key of ['uniform_top', 'uniform_bottom', 'underwear_top', 'underwear_bottom']) {
+      if (Object.prototype.hasOwnProperty.call(proposedClothing, key) && proposedClothing[key] !== previousClothing[key]) {
+        changedFields.push(`clothing.${key}`);
+      }
+    }
+    for (const key of ['posture', 'current_action']) {
+      if (Object.prototype.hasOwnProperty.call(proposed, key) && proposed[key] !== previous[key]) {
+        changedFields.push(key);
+      }
+    }
+    if (!changedFields.length) continue;
+
+    const rawEvidence = evidenceAll[characterId];
+    const perFieldEvidence = isPlainObject(rawEvidence) ? rawEvidence : null;
+    const legacyEvidence = typeof rawEvidence === 'string' && rawEvidence.trim() ? rawEvidence.trim() : null;
+    const characterName = characters?.[characterId]?.name || characters?.[characterId]?.['이름'] || '';
+
+    const validFields = new Set();
+    const rejectedFields = [];
+    const reasons = [];
+    for (const fieldPath of changedFields) {
+      const evidence = perFieldEvidence
+        ? perFieldEvidence[fieldPath]
+        : (legacyEvidence && changedFields.length === 1 ? legacyEvidence : null);
+      const check = evaluateSceneStateFieldEvidence(evidence, narrativeText, characterName);
+      if (check.ok) {
+        validFields.add(fieldPath);
+      } else {
+        rejectedFields.push(fieldPath);
+        reasons.push(check.reason);
+      }
+    }
+
+    if (rejectedFields.length) rejections.push({ character_id: characterId, fields: rejectedFields, reasons });
+    if (!validFields.size) continue;
+
+    const nextState = {};
+    const nextClothing = {};
+    for (const key of ['uniform_top', 'uniform_bottom', 'underwear_top', 'underwear_bottom']) {
+      if (validFields.has(`clothing.${key}`)) nextClothing[key] = proposedClothing[key];
+    }
+    if (Object.keys(nextClothing).length) nextState.clothing = nextClothing;
+    for (const key of ['posture', 'current_action']) {
+      if (validFields.has(key)) nextState[key] = proposed[key];
+    }
+    retained[characterId] = nextState;
   }
-  return { retained, rejected };
+
+  return { retained, rejections };
 }
 
 const PLAYER_SCENE_POSTURES = new Set(['standing', 'sitting', 'kneeling', 'lying_supine', 'lying_prone', 'side_lying', 'straddling', 'bent_forward', 'leaning', 'walking', 'crouching', 'carrying', 'unknown']);
@@ -9710,9 +9920,23 @@ function resolveBoldChoiceAttempt(save = {}, master = {}, playerInput = '', game
 const CSA_META_AWARENESS_PATTERNS = [
   /상식\s*개변/,
   /개변된\s*상식/,
+  /개변\s*효과/,
   /플레이어가\s*(?:바꾼|설정한)\s*(?:상식|규칙)/,
+  // NPC-hotfix addition: covers predicate form ("플레이어가 규칙을 바꿨다")
+  // in addition to the pre-existing attributive form above.
+  /플레이어가[^.!?]{0,10}(?:상식|규칙|세상|병원\s*규정)[^.!?]{0,6}(?:바꿨|바꾸었|바꾸어|바꾼|설정했|만들었|고쳤)/,
   /(?:최면\s*)?어플(?:이|에서|로)\s*(?:시키|명령|강제|조종)/,
+  // NPC-hotfix addition: the live term is "앱" (not "어플"), and conjugated
+  // past-tense forms ("시켰다") don't contain the "시키" stem the original
+  // pattern above relies on — this widens both without touching it.
+  /(?:최면\s*)?(?:어플|앱)(?:이|가|에서|로)[^.!?]{0,12}(?:시키|시켰|시킨|명령|강제|조종|조작)/,
   /시스템(?:이|에서)\s*(?:시키|명령|강제)/,
+  /(?:시스템|효과|메커니즘|장치)(?:이|가|에서)[^.!?]{0,12}(?:시키|시켰|시킨|명령|강제|조종|조작|통제)/,
+  // "외부 효과에 의해 조종되고 있다" style passive framing.
+  /(?:외부\s*)?(?:효과|장치|메커니즘|시스템)(?:에\s*의해)?[^.!?]{0,10}(?:조종|조작|지배|통제)(?:당하|되)/,
+  // "원래는 달랐지만 지금은 해야 한다" — an explicit prior-reality-differed
+  // claim, narrower than the generic pattern below and stem-agnostic.
+  /원래는?\s*달랐(?:지만|는데|으나)/,
   /(?:이|그)\s*(?:규칙|명령|설정)\s*때문에\s*(?:억지로|강제로|어쩔\s*수\s*없이)/,
   /원래(?:는|라면)[^.!?]{0,60}(?:안\s*했|하지\s*않|이상|싫|거부)[^.!?]{0,60}(?:하지만|그런데)[^.!?]{0,60}(?:해야|따라야|하게\s*된다)/
 ];
@@ -10681,5 +10905,15 @@ export {
   allocateImagePoolSlots,
   selectCharacterImageCandidates,
   selectTopImageCandidates,
-  selectValidatedShortlistImageId
+  selectValidatedShortlistImageId,
+  buildCsaPhysicalTransitionSection,
+  buildNpcCsaEpistemicFirewallSection,
+  filterCsaMetaAwareDialogue,
+  sanitizeCsaMetaAwarenessFromRelationshipMemory,
+  normalizeNpcSceneStateEvidence,
+  isMagicalPhysicalTransitionEvidence,
+  isPlanningOnlyEvidence,
+  evidenceIdentifiesCharacter,
+  evaluateSceneStateFieldEvidence,
+  retainEvidencedNpcSceneStatePatch
 };

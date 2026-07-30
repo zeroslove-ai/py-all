@@ -10,6 +10,10 @@ HANDOFF_REF = "origin/handoff/stream-first-p0-20260730"
 HANDOFF_DIR = "handoff/stream-first-p0"
 ROOT = Path(subprocess.check_output(["git", "rev-parse", "--show-toplevel"], text=True).strip())
 CACHE = ROOT / ".git" / "stream-first-p0-handoff"
+ALLOWED_UNTRACKED = {
+    "?? .wrangler/",
+    "?? worker/.wrangler/",
+}
 
 
 def git(*args: str, text: bool = True) -> str | bytes:
@@ -20,13 +24,18 @@ def fail(message: str) -> None:
     raise SystemExit(f"HANDOFF_ABORTED: {message}")
 
 
+def unexpected_worktree_entries() -> list[str]:
+    lines = [line.rstrip() for line in git("status", "--porcelain", "--untracked-files=normal").splitlines() if line.strip()]
+    return [line for line in lines if line not in ALLOWED_UNTRACKED]
+
+
 head = git("rev-parse", "HEAD").strip()
 if head != BASE_SHA:
     fail(f"HEAD mismatch: current={head} required={BASE_SHA}")
 
-status = git("status", "--porcelain")
-if status.strip():
-    fail("worktree is not clean")
+unexpected = unexpected_worktree_entries()
+if unexpected:
+    fail("unexpected worktree entries: " + " | ".join(unexpected))
 
 branch = git("branch", "--show-current").strip()
 if branch != "feature/csa-only" and not branch.startswith("apply/stream-first-p0"):

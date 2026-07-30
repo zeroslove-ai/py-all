@@ -7,9 +7,22 @@
 - Production branch: `feature/csa-only`
 - Required production HEAD before applying: `5c18e161622e4ceb27d502b48933d411004a14bd`
 
-This delivery branch is not a production branch. Do not merge or deploy it. The handoff runner reads the delivery files directly from the Git object database and applies them only to a clean local branch created from `origin/feature/csa-only`.
+This delivery branch is not a production branch. Do not merge or deploy it. The handoff runner reads the delivery files directly from the Git object database and applies them only to a fresh local branch created from `origin/feature/csa-only`.
 
 Supabase `opening_scenario` was already updated directly for the operating, external tester, and E2E games. Do not run any SQL or mutate Supabase.
+
+## Known local Wrangler cache exception
+
+The following two untracked directories already existed before this task and are generated local deployment caches:
+
+```text
+?? .wrangler/
+?? worker/.wrangler/
+```
+
+They are explicitly allowed. Do not delete, move, stage, commit, or report them as a dirty-worktree failure.
+
+Any tracked modification, staged change, or any other untracked path remains a hard stop. The runner hides only these two exact directories from the nested patch check.
 
 ## Windows-safe exact apply procedure
 
@@ -18,10 +31,17 @@ The existing local branch may be unrelated or stale. Preserve it. Do not reset, 
 Run from the repository root in PowerShell or cmd:
 
 ```powershell
-git status --porcelain
+git status --porcelain --untracked-files=normal
 ```
 
-The output must be empty. If it is not empty, stop and report it.
+The output may be empty or may contain only:
+
+```text
+?? .wrangler/
+?? worker/.wrangler/
+```
+
+If any other line appears, stop and report it.
 
 Then:
 
@@ -44,6 +64,8 @@ git switch -c apply/stream-first-p0-20260730
 git fetch origin handoff/stream-first-p0-20260730
 ```
 
+If `apply/stream-first-p0-20260730` already exists from a stopped attempt, do not reuse or delete it without checking. Report its SHA first. If it does not exist, continue normally.
+
 Load the cross-platform runner directly from the delivery branch without `tar`, ZIP upload, checkout, or merge:
 
 ```powershell
@@ -61,6 +83,7 @@ py -3 .git/stream-first-p0-run.py
 Expected final output:
 
 ```text
+PATCH_APPLIED
 VERIFY_OK
 HANDOFF_APPLIED_AND_VERIFIED
 ```
@@ -77,7 +100,9 @@ docs/project_v2/STREAM_FIRST_ARCHITECTURE.md
 docs/project_v2/HARD_GATE_ALLOWLIST.md
 ```
 
-Files written under `.git/stream-first-p0-handoff` and `.git/stream-first-p0-run.py` are not part of the worktree and must not be committed.
+Files written under `.git/stream-first-p0-handoff`, `.git/stream-first-p0-run.py`, and `.git/stream-first-p0-local-excludes` are local runner files and must not be committed.
+
+The existing `.wrangler/` and `worker/.wrangler/` directories must remain untracked and untouched.
 
 ## Commit and push
 
@@ -105,7 +130,7 @@ Do not force-push. If the ordinary push is rejected, stop and report the new rem
 
 ## Deploy
 
-After push, deploy only the API Worker:
+After push, deploy only the API Worker.
 
 PowerShell:
 
@@ -126,6 +151,7 @@ npx wrangler deploy --cwd worker --keep-vars --tag $HEAD_SHA.Substring(0,12) --m
 - Do not mutate Supabase.
 - Do not resolve patch mismatches manually.
 - Do not reset, rebase, or delete the existing `integrate/setup-csa-gateway-hotfix` branch.
+- Do not delete, move, stage, or commit `.wrangler/` or `worker/.wrangler/`.
 
 ## Completion report
 

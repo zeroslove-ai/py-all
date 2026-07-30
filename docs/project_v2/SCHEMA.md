@@ -139,6 +139,8 @@ CSA-only runtime additions inside `game_save.data` (no database column or migrat
 
 These changes only refine Worker validation and runtime interpretation of existing JSONB fields; they add no schema, RPC, or migration.
 
+Custom CSA continues to use existing `source_type` and `content` fields. `csa_experienced_ids` is supporting evidence for an active custom CSA event, never standalone authorization. No new database column, RPC, or migration is used.
+
 `turn_count`는 JSONB 안에 중복 저장하지 않는다.
 
 ### `csa_active` 프리셋 필드 (2026-07 추가, 마이그레이션 없음)

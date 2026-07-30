@@ -24,6 +24,9 @@ it is never used to validate, create, update, deactivate, or apply a CSA.
 - An explicit-consent sentence needs action-bound permission, desire, or agreement. A generic positive phrase elsewhere in the same sentence does not authorize the action; explanation, counselling, and questions are not consent.
 - Player-input CSA authorization and completed-event CSA authorization are separate. Medical or staff-performed CSA rules never authorize a reverse-direction player action merely because both actions share a broad category.
 - Completed CSA events require matching actor group, player target group, and confirmed runtime state. Omission repair only repairs a preset whose current trigger is evidenced; it never creates a physical action merely because an always-active rule exists.
+- Explanations, counselling, questions, and sexual terminology discussion are neither sexual action attempts nor CSA request triggers.
+- Explicit consent and romantic interest require dialogue or explicit prose attributed to the current NPC; a player quote in a sentence naming that NPC is not NPC consent or interest.
+- `on_request` is tied to the preset's direct action or meaning tags, not generic request wording. Custom CSA remains supported only when its explicit action and direction pass the same conservative checks.
 - Story continues to return DeepSeek's successful SSE body directly. The synchronous gate helpers make no database, network, or additional model call and do not buffer the stream.
 - CSA acceptance never grants general obedience, romance, consent, authority, or success outside an active CSA's direct meaning.
 - A positive affinity change requires an independent relationship event in the current turn. CSA execution, bodily response, lack of immediate refusal, or sexual activity alone is not sufficient evidence.

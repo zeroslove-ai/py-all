@@ -1276,23 +1276,24 @@ function buildAppStatePayload(master, save, turnCount = 0) {
 
 const STORY_HEADERS_TIMEOUT_MS = 90000;
 
-function resolveCsaAppUiRoute(input, characters = {}) {
-  const text = String(input || '').trim();
-  if (!text) return null;
-  const excluded = /하지\s*않|하지\s*말|말라고|할까|고민|생각해\s*본다|떠올린다|과거|예전에|말했다|물었다|뜻이\s*뭐|무엇인지/.test(text)
-    && !/수정|변경|바꿔|교체|강화|약화/.test(text);
-  const management = /추가|등록|생성|새로|적용|수정|변경|바꿔|교체|강화|약화|삭제|제거|해제|취소|끄기|켜기|활성화|비활성화|목록|확인|관리|편집/;
-  if (!excluded && /상식\s*개변|상식개변|상식\s*변경|개변된\s*상식/.test(text) && management.test(text)) {
-    return { tab: 'csa', character_id: null, notice: '상식개변 앱을 엽니다.' };
-  }
-  if (!excluded && /개인\s*암시|활성\s*암시|최면/.test(text) && management.test(text)) {
-    return { tab: 'csa', character_id: null, notice: 'CSA-only 버전에서는 개인 암시와 최면을 지원하지 않습니다. 상식개변만 사용할 수 있습니다.' };
-  }
-  if (/(?:상식개변|어플|앱).*(?:사용법|매뉴얼|설명|정보)|(?:사용법|매뉴얼|설명|정보).*(?:상식개변|어플|앱)/.test(text)) {
-    return { tab: 'manual', character_id: null, notice: '상식개변 앱 매뉴얼을 엽니다.' };
-  }
-  if (/(?:상식개변\s*)?(?:어플|앱)\s*열어|앱\s*상태\s*보여/.test(text)) {
+function normalizeExplicitAppCommand(input = '') {
+  return String(input || '')
+    .trim()
+    .replace(/\s+/g, ' ')
+    .replace(/[.!?。！？]+$/g, '')
+    .trim()
+    .toLowerCase();
+}
+
+function resolveCsaAppUiRoute(input) {
+  const command = normalizeExplicitAppCommand(input);
+  if (!command) return null;
+
+  if (['/app', '/앱', '상식개변 앱 열기', '상식개변 어플 열기'].includes(command)) {
     return { tab: 'home', character_id: null, notice: '상식개변 앱을 엽니다.' };
+  }
+  if (['/app help', '/앱 도움말', '상식개변 앱 사용법', '상식개변 앱 매뉴얼'].includes(command)) {
+    return { tab: 'manual', character_id: null, notice: '상식개변 앱 매뉴얼을 엽니다.' };
   }
   return null;
 }
@@ -1800,31 +1801,9 @@ function buildDegradedTurnSummary(narrativeText) {
   return text.slice(0, 200);
 }
 
-// A degraded turn must never silently no-op an app-mutating player request
-// A degraded turn must never silently skip a genuine first direct encounter
-// with a newly-registered NPC — that first-encounter stat write only ever
-// happens once per NPC, so losing it to a degraded fallback would be
-// unrecoverable later.
-function hasPotentialUnrecordedFirstEncounter(compatCtx, narrativeText, playerInput) {
-  const save = compatCtx?.save || {};
-  const characters = compatCtx?.master?.characters || {};
-
-  const ids = detectRegisteredCharacterIds(narrativeText, playerInput, characters, null);
-
-  return ids.some(characterId =>
-    !hasStructuredEncounter(save, characterId) && !hasLegacyEncounterEvidence(save, characterId)
-  );
-}
-
-function canUseDegradedExtract(compatCtx, narrativeText, playerInput) {
-  const save = compatCtx?.save || {};
-
-  if (!isSetupComplete(save)) return false;
-
-  if (hasPotentialUnrecordedFirstEncounter(compatCtx, narrativeText, playerInput)) return false;
-
-  return true;
-}
+// A degraded turn preserves the streamed narrative and advances the turn while
+// omitting optional state changes. Only a validated structured app transaction
+// remains fail-closed because it intentionally mutates persistent app state.
 
 // Everything that would otherwise create or change persistent state is
 // neutralized — a degraded turn only ever saves the narrative memory, its
@@ -1841,7 +1820,6 @@ function buildDegradedExtract(narrativeText, reason = 'EXTRACT_FAILED') {
     csa_omission: [],
     player_patch: {},
     player_recommendation: null,
-    player_recommendations: [],
     world_state_patch: null,
     sexual_events: [],
     choices: buildChoicesFromNarrativeOrFallback(narrativeText),
@@ -1933,14 +1911,12 @@ async function runExtractPipeline(env, { game_id, narrative_text, player_input, 
     image_shortlist_by_character: shortlistByCharacter
   }));
 
-  // H2: caps this turn to at most one auxiliary LLM recovery call, and lets
-  // a turn that can't possibly mutate persistent app state degrade to a
-  // narrative-only save instead of hard-failing when Extract's own final
-  // JSON generation fails outright.
+  // Streaming-first: once Story has streamed, Extract failure is non-fatal
+  // unless this is a validated structured app transaction. Optional state is
+  // omitted and the narrative is committed with a deterministic degraded extract.
   const recoveryBudget = createRecoveryBudget();
-  const degradedAllowed = structuredPlan?.canonical_action?.type === 'app_transaction'
-    ? isSetupComplete(compatCtx.save)
-    : (structuredPlan ? false : canUseDegradedExtract(compatCtx, narrative_text, player_input));
+  const isStructuredAppTransaction = structuredPlan?.canonical_action?.type === 'app_transaction';
+  const degradedAllowed = !isStructuredAppTransaction;
 
   const firstPass = await performExtractionPass(env, {
     narrativeText: narrative_text, playerInput: player_input, compatCtx: effectiveCtx, shortlistedImages, nextTurn, requestId,
@@ -1948,92 +1924,47 @@ async function runExtractPipeline(env, { game_id, narrative_text, player_input, 
   });
   Object.assign(timing, firstPass.timing);
   if (!firstPass.ok) {
-    // A player-setup turn (generation or modification, not yet approved)
-    // must never hard-fail on an Extract JSON/upstream error — the Story
-    // narrative already streamed and should stay playable. This is checked
-    // before the isSetupComplete/degradedAllowed branches below, which are
-    // both geared toward normal (post-setup) turns.
-    const setupTurn = !isSetupComplete(compatCtx.save)
-      && !(hasSavedPlayerRecommendation(compatCtx.save) && isApprovalInput(player_input));
-    if (setupTurn) {
-      const degradedReason = firstPass.response?.error_code || 'EXTRACT_FAILED';
-      const setupChoices = extractChoicesFromNarrative(narrative_text);
-      const degradedSetupExtract = normalizeExtract({
-        ...buildDegradedExtract(narrative_text, degradedReason),
-        character_id: 'narrator',
-        npcs_present: [],
-        dialogue_lines: [],
-        player_recommendation: null,
-        choices: setupChoices.length ? setupChoices.slice(0, 4) : buildDefaultPlayerSetupChoices(),
-        csa_runtime_updates: [],
-        sexual_events: [],
-        relationship_events: [],
-        sexual_resolution: { action: 'none', route: 'none', completed: false }
-      });
-      timing.total_ms = Date.now() - totalStart;
-      console.warn(JSON.stringify({
-        event: 'extract_degraded_fail_open',
-        endpoint: '/api/extract',
-        request_id: requestId,
-        game_id,
-        turn_number: nextTurn,
-        reason: degradedReason,
-        setup_turn: true
-      }));
-      return {
-        body: {
-          extract: degradedSetupExtract,
-          extract_degraded: true,
-          extract_degraded_reason: degradedReason,
-          narrative_replacement: null,
-          request_id: requestId,
-          raw: '',
-          mind_monitor_retried: false,
-          mind_monitor_errors: [],
-          choices_repaired: false,
-          choices_fallback_used: setupChoices.length === 0,
-          first_encounter_repaired: false,
-          json_repaired: false,
-          content_addition: null,
-          validation_warnings: [],
-          choice_validation_warnings: [],
-          csa_meta_awareness_detected: false,
-          csa_meta_awareness_repaired: false,
-          csa_meta_awareness_fields: [],
-          recovery_used: recoveryBudget.used,
-          recovery_kind: recoveryBudget.kind,
-          timing
-        },
-        status: 200
-      };
-    }
-
-    if (isSetupComplete(compatCtx.save)) {
-      return {
-        body: {
-          error: 'Structured turn validation unavailable.',
-          error_code: 'STRUCTURED_RESOLUTION_UNAVAILABLE',
-          request_id: requestId
-        },
-        status: 422
-      };
-    }
     if (!degradedAllowed) {
       return { body: firstPass.response, status: firstPass.status };
     }
 
     const degradedReason = firstPass.response?.error_code || 'EXTRACT_FAILED';
-    const degradedExtract = buildDegradedExtract(narrative_text, degradedReason);
+    const narrativeChoices = extractChoicesFromNarrative(narrative_text);
+    let degradedExtract = buildDegradedExtract(narrative_text, degradedReason);
+
+    if (!isSetupComplete(compatCtx.save)) {
+      degradedExtract = normalizeExtract({
+        ...degradedExtract,
+        character_id: 'narrator',
+        npcs_present: [],
+        dialogue_lines: [],
+        player_recommendation: null,
+        choices: narrativeChoices.slice(0, 4),
+        csa_runtime_updates: [],
+        sexual_events: [],
+        relationship_events: [],
+        sexual_resolution: { action: 'none', route: 'none', completed: false }
+      });
+    } else if (structuredPlan?.canonical_action?.type === 'find_npc' && structuredPlan.plan) {
+      const target = structuredPlan.plan;
+      degradedExtract = normalizeExtract({
+        ...degradedExtract,
+        character_id: target.character_id,
+        npcs_present: [target.character_id],
+        world_state_patch: { ...target.target_world_state }
+      });
+    }
 
     timing.total_ms = Date.now() - totalStart;
-
     console.warn(JSON.stringify({
       event: 'extract_degraded_fail_open',
       endpoint: '/api/extract',
       request_id: requestId,
       game_id,
       turn_number: nextTurn,
-      reason: degradedReason
+      reason: degradedReason,
+      setup_turn: !isSetupComplete(compatCtx.save),
+      structured_action_type: structuredPlan?.canonical_action?.type || null
     }));
 
     return {
@@ -2047,7 +1978,7 @@ async function runExtractPipeline(env, { game_id, narrative_text, player_input, 
         mind_monitor_retried: false,
         mind_monitor_errors: [],
         choices_repaired: false,
-        choices_fallback_used: extractChoicesFromNarrative(narrative_text).length !== 4,
+        choices_fallback_used: narrativeChoices.length === 0,
         first_encounter_repaired: false,
         json_repaired: false,
         content_addition: null,
@@ -2277,8 +2208,10 @@ async function runExtractPipeline(env, { game_id, narrative_text, player_input, 
   // player_setup candidate cards aren't NPC scenes.
   // A meaningful structured resolution is always validated, even when it
   // has no sexual_events row (for example a completed kiss or touch).
-  if (isSetupComplete(compatCtx.save)
-    && (extract.sexual_resolution?.action !== 'none' || extract.sexual_resolution?.completed === true)) {
+  const hasPersistedSexualCompletion = extract.sexual_resolution?.completed === true
+    || (Array.isArray(extract.sexual_events)
+      && extract.sexual_events.some(event => sexualActionForEventType(event?.type) !== 'none'));
+  if (isSetupComplete(compatCtx.save) && hasPersistedSexualCompletion) {
     const validateTurn = () => validateStructuredSexualTurn({
       extract,
       save: effectiveCtx.save,
@@ -3042,9 +2975,22 @@ function isSetupComplete(save = {}) {
 
 function isApprovalInput(input = '') {
   const raw = String(input || '').trim();
-  const normalized = raw.replace(/^\s*(?:①|1[.)]?)\s*/, '').trim();
-  const phrases = ['추천 설정으로 시작', '추천 설정으로 시작한다', '이 설정으로 시작', '이 설정으로 시작한다', '시작'];
-  return ['①', '1', ...phrases].includes(raw) || phrases.includes(normalized);
+  if (['①', '1'].includes(raw)) return true;
+  const normalized = raw
+    .replace(/^\s*(?:①|1[.)]?)\s*/, '')
+    .replace(/\s+/g, ' ')
+    .replace(/[.!?。！？]+$/g, '')
+    .trim();
+  const phrases = new Set([
+    '추천 설정으로 시작', '추천 설정으로 시작한다',
+    '이 설정으로 시작', '이 설정으로 시작한다',
+    '이걸로 시작', '이걸로 시작한다',
+    '이대로 시작', '이대로 시작한다',
+    '이 캐릭터로 시작', '이 캐릭터로 시작한다',
+    '이 프로필로 시작', '이 프로필로 시작한다',
+    '시작', '시작해', '시작하자', '게임 시작'
+  ]);
+  return phrases.has(normalized);
 }
 
 function normalizePlayerProfile(value = {}) {
@@ -3067,13 +3013,13 @@ function normalizePlayerProfile(value = {}) {
   ]) {
     if (typeof value[key] === 'string' && value[key].trim()) result[key] = value[key].trim();
   }
-  const age = isIntegerInRange(value.age, [MIN_ADULT_AGE, MAX_ADULT_AGE]);
+  const age = normalizePositiveInteger(value.age, { min: MIN_ADULT_AGE });
   if (age !== null) result.age = age;
-  const heightCm = isIntegerInRange(value.height_cm, PLAYER_HEIGHT_RANGE_CM);
+  const heightCm = normalizePositiveInteger(value.height_cm);
   if (heightCm !== null) result.height_cm = heightCm;
-  const weightKg = isIntegerInRange(value.weight_kg, PLAYER_WEIGHT_RANGE_KG);
+  const weightKg = normalizePositiveInteger(value.weight_kg);
   if (weightKg !== null) result.weight_kg = weightKg;
-  const penisLengthCm = isIntegerInRange(value.penis_length_cm, PLAYER_PENIS_LENGTH_RANGE_CM);
+  const penisLengthCm = normalizePositiveInteger(value.penis_length_cm);
   if (penisLengthCm !== null) result.penis_length_cm = penisLengthCm;
   return result;
 }
@@ -3179,26 +3125,18 @@ function withSetupCompatibility(ctx = {}) {
 // ─────────────────────────────────────────────
 
 const MIN_ADULT_AGE = 19;
-const MAX_ADULT_AGE = 80;
-// Sanity bounds only — reject the obviously-broken/absurd, not a narrow
-// "typical" band. A profile outside these is treated as malformed data.
-const PLAYER_HEIGHT_RANGE_CM = [140, 210];
-const PLAYER_WEIGHT_RANGE_KG = [40, 150];
-const PLAYER_PENIS_LENGTH_RANGE_CM = [8, 30];
 
-function isIntegerInRange(value, [min, max]) {
-  const n = Math.round(Number(value));
-  return Number.isFinite(n) && n === Math.round(n) && n >= min && n <= max ? n : null;
+function normalizePositiveInteger(value, { min = 1 } = {}) {
+  const number = Number(value);
+  if (!Number.isFinite(number)) return null;
+  const rounded = Math.round(number);
+  return rounded >= min ? rounded : null;
 }
 
-const PLAYER_SETUP_CHOICES = Object.freeze([
-  '추천 설정으로 시작한다',
-  '일부 설정을 변경한다',
-  '원하는 캐릭터를 직접 설명한다'
-]);
-
+// Player setup never depends on choices. The free-text input remains usable
+// even when the LLM omits [3. 선택지] entirely.
 function buildDefaultPlayerSetupChoices() {
-  return [...PLAYER_SETUP_CHOICES];
+  return [];
 }
 
 // Resolves the profile to show as CONFIRMED PLAYER SETUP once the player has
@@ -3243,7 +3181,7 @@ function buildConfirmedPlayerSetupSection(profile = {}) {
 }
 
 function buildPlayerSetupGenerationSection() {
-  return `\n\n[PLAYER SETUP — SINGLE RECOMMENDATION, LLM-DRIVEN]\n이 단계는 플레이어 캐릭터를 한 번 정하는 짧은 준비 단계다. 병원 장면이나 등록 NPC 조우는 아직 시작하지 않는다.\n1. 상식개변 앱이 휴대폰에 나타났다는 프롤로그와 핵심 기능을 2~4문장으로 짧게 소개한다.\n2. 바로 이어서 병원 세계관에 자연스럽게 들어갈 수 있는 성인 남성 플레이어 캐릭터 한 명을 완성형으로 추천한다.\n3. 사용자에게 항목을 하나씩 질문하지 않는다.\n4. 아래 정보는 가능한 한 모두 실제 값으로 정한다: 이름, 나이, 성별(남성), 직업, 전공 또는 직급, 키, 몸무게, 성기 크기, 외형, 성격, 말투, 배경, 시작 장소, 플레이 특징.\n5. 카드의 문장과 순서는 자연스럽게 작성해도 된다. Worker가 카드 문자열을 검증하지 않는다.\n6. [3. 선택지]에는 아래 세 줄을 정확히, 이 순서 그대로 제공한다.\n추천 설정으로 시작한다\n일부 설정을 변경한다\n원하는 캐릭터를 직접 설명한다\n7. 사용자가 이미 이번 입력에서 직접 조건을 말했다면 그 조건을 우선해 추천한다.\n8. 병원 첫 장면과 NPC 조우는 설정 승인 뒤에만 시작한다.`;
+  return `\n\n[PLAYER SETUP — SINGLE RECOMMENDATION, LLM-DRIVEN]\n이 단계는 플레이어 캐릭터 한 명을 정하는 짧은 준비 단계다. 병원 장면이나 등록 NPC 조우는 아직 시작하지 않는다.\n- 상식개변 앱을 2~4문장으로 짧게 소개한 뒤 병원 세계관에 자연스럽게 들어갈 성인 남성 플레이어 한 명을 완성해서 제안한다.\n- 이름, 나이, 성별, 직업, 전공/직급, 신체 정보, 외형, 성격, 말투, 배경, 시작 장소, 플레이 특징은 자연스럽게 정한다. 일부 항목이 빠져도 게임을 멈추거나 사과하지 않는다.\n- 사용자가 조건을 말하면 그 조건을 우선해 전체 프로필을 다시 제안한다. 항목을 하나씩 질문하거나 결정을 다음 턴으로 미루지 않는다.\n- [3. 선택지]는 생략할 수 있다. 편의를 위해 넣는다면 짧은 승인 또는 수정 선택지만 제공하며, 자유 입력은 항상 허용한다.\n- 사용자가 설정을 명확히 승인하기 전에는 병원 첫 장면과 NPC 조우를 시작하지 않는다.`;
 }
 
 // Same no-placeholder rule as buildConfirmedPlayerSetupSection — the card
@@ -3251,7 +3189,7 @@ function buildPlayerSetupGenerationSection() {
 function buildPlayerSetupRedisplaySection(recommendation = {}, playerInput = '') {
   const profile = normalizePlayerProfile(recommendation);
   const details = buildPlayerProfileDetailLines(profile).join('\n');
-  return `\n\n[PLAYER SETUP — CURRENT RECOMMENDATION]\n\n현재 저장된 추천:\n${details || '(아직 저장된 세부 추천이 없음)'}\n\n이번 사용자 입력:\n${String(playerInput || '').slice(0, 1500)}\n\n규칙:\n- 사용자가 변경할 내용을 말했다면 현재 추천을 기준으로 그 요청을 반영해 전체 프로필을 다시 제시한다.\n- 사용자가 원하는 캐릭터를 직접 설명했다면 명시한 값을 우선하고 빠진 값만 자연스럽게 보완한다.\n- 사용자가 아직 구체적인 변경 내용을 말하지 않았다면 무엇을 바꿀지 짧게 물어볼 수 있다.\n- 추천이 다시 제시되는 응답의 [3. 선택지]에는 아래 세 줄을 정확히 제공한다.\n추천 설정으로 시작한다\n일부 설정을 변경한다\n원하는 캐릭터를 직접 설명한다\n- 설정 승인 전에는 병원 장면과 NPC 조우를 시작하지 않는다.`;
+  return `\n\n[PLAYER SETUP — CURRENT RECOMMENDATION]\n\n현재 저장된 추천:\n${details || '(아직 저장된 세부 추천이 없음)'}\n\n이번 사용자 입력:\n${String(playerInput || '').slice(0, 1500)}\n\n규칙:\n- 사용자가 변경할 내용을 말했다면 현재 추천을 기준으로 요청을 반영한 전체 프로필을 다시 제시한다.\n- 사용자가 원하는 캐릭터를 직접 설명했다면 명시한 값을 우선하고 빠진 값만 자연스럽게 보완한다.\n- 구체적인 변경이 없더라도 질문으로 멈추지 말고 현재 추천을 자연스럽게 다시 제시한다.\n- [3. 선택지]는 생략할 수 있으며 자유 입력은 항상 허용한다.\n- 설정 승인 전에는 병원 장면과 NPC 조우를 시작하지 않는다.`;
 }
 
 // Applies broadly (opening + normal turns), not just player_setup: bans the
@@ -3748,17 +3686,13 @@ function buildPlayerSetupOnlyStoryPrompt(playerInput = '') {
     messages: [
       {
         role: 'system',
-        content: `Create only the initial player setup for a hospital common-sense-change app. Write a two to four sentence app introduction, then one complete adult male player character recommendation. Do not start hospital gameplay, create NPC scenes, relationships, sexual actions, or CSA effects. Do not ask questions.
+        content: `Create only the initial player setup for a hospital common-sense-change app. Briefly introduce the app, then propose one complete adult male player character. Respect concrete user conditions. Do not start hospital gameplay, create NPC scenes, relationships, sexual actions, or CSA effects. Do not ask a sequence of questions and do not postpone the recommendation.
 
-Output exactly: [1. 서사 및 행동] (app intro + the recommended character), [2. 플레이어 상황판], [3. 선택지]. The recommendation should cover, when a real value is known: name, age, gender (always 남성), job, major/rank if relevant, height_cm, weight_kg, penis_length_cm, appearance, personality, speech style, background, starting location, a short play feature. Use real, varied adult values; never placeholders or "설정 중". [3. 선택지] must be exactly these three lines, in this order:
-추천 설정으로 시작한다
-일부 설정을 변경한다
-원하는 캐릭터를 직접 설명한다
-Respect a concrete custom player request in the input by reflecting it into the recommendation, but do not confirm it or begin play.
+Use [1. 서사 및 행동] and [2. 플레이어 상황판]. [3. 선택지] is optional; free-text input is always valid. Include natural values when useful: name, age, gender, job, major/rank, body details, appearance, personality, speech style, background, starting location, and a short play feature. Missing optional fields are acceptable and are never an error.
 
 Player input: ${input}`
       },
-      { role: 'user', content: 'Generate the player setup recommendation now.' }
+      { role: 'user', content: 'Generate or revise the single player recommendation now.' }
     ]
   };
 }
@@ -3932,7 +3866,11 @@ ${recentMemorySlice.map((m, index) => clipHeadTail(sanitizeRecentNarrativeForPro
   // generating the recommendation when this instruction only appeared near
   // the top.
   const playerSetupReminder = mode === 'player_setup'
-    ? `\n\n[REMINDER — PLAYER SETUP PHASE]\n지금 이 응답 안에서 질문 없이 완성형 플레이어 캐릭터 한 명을 만들어 카드 형식으로 즉시 보여준다(이미 저장된 추천이 있으면 그 추천을 기준으로 사용자 요청을 반영해 다시 보여준다). "대기 중"처럼 결정을 미루는 표현이나 사용자에게 방향을 먼저 묻는 질문형 선택지를 만들지 않는다. [3. 선택지]는 반드시 다음 세 줄이어야 한다: "추천 설정으로 시작한다", "일부 설정을 변경한다", "원하는 캐릭터를 직접 설명한다".\n`
+    ? `
+
+[REMINDER — PLAYER SETUP PHASE]
+지금 이 응답 안에서 완성형 플레이어 캐릭터 한 명을 즉시 제안하거나, 저장된 추천을 기준으로 사용자 요청을 반영해 다시 제안한다. 항목별 질문으로 멈추지 않는다. [3. 선택지]는 생략할 수 있고 자유 입력은 항상 허용한다.
+`
     : '';
   // Repeated at the very end (same recency-favoring position as
   // playerSetupReminder) since [3. 선택지] is the last thing generated —
@@ -5361,7 +5299,6 @@ function normalizeExtract(extract) {
   normalized.npc_emotion.state = normalizeNpcMindState(normalized.npc_emotion.state, normalized.npc_emotion);
   if (!normalized.player_patch || typeof normalized.player_patch !== 'object') normalized.player_patch = {};
   if (!isPlainObject(normalized.player_recommendation)) normalized.player_recommendation = null;
-  if (!Array.isArray(normalized.player_recommendations)) normalized.player_recommendations = [];
   normalized.is_sexual = normalized.is_sexual === true;
   normalized.sexual_resolution = normalizeSexualResolution(normalized.sexual_resolution);
   normalized.csa_trigger_evaluations = normalizeCsaTriggerEvaluations(normalized.csa_trigger_evaluations);
@@ -10591,8 +10528,6 @@ export {
   createRecoveryBudget,
   consumeRecoveryBudget,
   buildDegradedTurnSummary,
-  hasPotentialUnrecordedFirstEncounter,
-  canUseDegradedExtract,
   buildDegradedExtract,
   resolveCsaScopeId,
   resolveIsSexual,

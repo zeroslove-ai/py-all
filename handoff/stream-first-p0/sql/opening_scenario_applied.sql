@@ -1,0 +1,3 @@
+-- ALREADY APPLIED by ChatGPT on 2026-07-30. Codex must not execute this file.
+-- game_master.data.opening_scenario only.
+-- Result MD5 for all three games: 4ec2347fd50f867da3b15a7f9a76117a

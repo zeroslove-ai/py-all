@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -10,6 +11,7 @@ HANDOFF_REF = "origin/handoff/stream-first-p0-20260730"
 HANDOFF_DIR = "handoff/stream-first-p0"
 ROOT = Path(subprocess.check_output(["git", "rev-parse", "--show-toplevel"], text=True).strip())
 CACHE = ROOT / ".git" / "stream-first-p0-handoff"
+EXCLUDE_FILE = ROOT / ".git" / "stream-first-p0-local-excludes"
 ALLOWED_UNTRACKED = {
     "?? .wrangler/",
     "?? worker/.wrangler/",
@@ -46,6 +48,17 @@ for name in ["apply_patch.py", "verify.py", "README.md"]:
     data = git("show", f"{HANDOFF_REF}:{HANDOFF_DIR}/{name}", text=False)
     (CACHE / name).write_bytes(data)
 
-subprocess.run([sys.executable, str(CACHE / "apply_patch.py")], cwd=ROOT, check=True)
-subprocess.run([sys.executable, str(CACHE / "verify.py")], cwd=ROOT, check=True)
+# The local Wrangler cache directories are known generated artifacts. Hide only
+# those exact paths from the nested patch process without deleting, moving, or
+# committing them. Other untracked or modified files remain visible and fatal.
+EXCLUDE_FILE.write_text("/.wrangler/\n/worker/.wrangler/\n", encoding="utf-8")
+child_env = os.environ.copy()
+child_env.update({
+    "GIT_CONFIG_COUNT": "1",
+    "GIT_CONFIG_KEY_0": "core.excludesFile",
+    "GIT_CONFIG_VALUE_0": str(EXCLUDE_FILE),
+})
+
+subprocess.run([sys.executable, str(CACHE / "apply_patch.py")], cwd=ROOT, env=child_env, check=True)
+subprocess.run([sys.executable, str(CACHE / "verify.py")], cwd=ROOT, env=child_env, check=True)
 print("HANDOFF_APPLIED_AND_VERIFIED")

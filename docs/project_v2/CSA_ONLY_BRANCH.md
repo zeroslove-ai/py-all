@@ -113,6 +113,14 @@ action instead of narrating it once and forgetting it.
 - CSA 메타 인식(NPC가 상식개변/앱/시스템이 자신을 조작한다고 인식하는 서사)은 감지·로그(`csa_meta_awareness_observed`)만 하며, P1부터는 LLM repair나 narrative 재작성을 하지 않는다 — 이미 스트리밍된 Story는 그대로 유지된다.
 - 과감 선택지 메타(`last_choice_meta`)가 현재 턴/현재 계약과 맞지 않는 stale 값(다른 턴 `choice_id`, `severity` 누락, `sexual_action:"none"`인데 `kind:"bold"`인 경우 등)이면 `isCurrentChoiceMetaValid`가 이를 거부하고, `/api/context`의 공개 view(`buildCsaOnlyPublicContext`)와 실제 판정(`resolveBoldChoiceAttempt`) 모두 저장된 값 대신 현재 choices/save로 다시 계산한 in-memory 메타를 쓴다 — DB에는 쓰지 않는 표시/판정 전용 재분류다. `severity:"blocked"`는 `kind:"bold"`와 분리된 별도 `kind:"blocked"`이며, bold 확률 굴림 대상이 아니다.
 
+## CSA instant-norm / physical continuity
+
+상식과 판단은 즉시 바뀌지만 물질과 현재 물리 상태는 자동으로 바뀌지 않는다. `buildCsaPhysicalTransitionSection()`이 적용 가능한 CSA가 있거나 이번 턴이 구조화 `app_transaction`일 때 Story 프롬프트 끝부분(recency-favored 위치)에 주입되어, 속옷·의복이 저절로 사라지거나 유니폼이 스스로 조여지거나 규칙/앱이 NPC 몸을 물리적으로 붙잡는 서술을 금지한다 — NPC는 새 규범을 즉시 당연하게 받아들이지만, 복장·자세는 실제 완료된 신체 동작을 통해서만 바뀐다. `buildCsaDirectExecutionPrioritySection`의 100% 직접 실행 보장은 그대로 유지되며, 그 실행이 순간이동이 아니라 실제 동작으로 일어난다는 제약만 추가된다.
+
+`app_transaction` Story 섹션(`buildStructuredActionStorySection`)은 조작이 "이미 적용된 확정 사실"임을 명시하고, `update`는 기존 규범이 이 순간 완전히 소멸하고 새 규범만 유효함을 별도로 강조한다(두 버전을 동시 대안으로 제시하거나 재확인을 구하지 않음). 같은 섹션이 `app_transaction` 턴의 `[3. 선택지]`를 적용 이후 실제 행동 4개로 제한하고 확인/취소/재선택/서서히 적용/앱 재오픈 선택지를 금지한다. `app_transaction` 턴의 user 메시지도 원본 플레이어 입력 대신 "위 Worker 확정 상식개변 결과가 이미 적용된 현재 장면을 진행한다"는 중립 지시로 대체된다(`buildStoryPrompt`).
+
+Extract는 `npc_scene_state_patch`에 넣는 캐릭터마다 `npc_scene_state_evidence`(최종 Story 원문 그대로의 짧은 인용, DB에 저장되지 않는 transient 필드)를 함께 반환해야 한다. `runExtractPipeline`의 `retainEvidencedNpcSceneStatePatch()`가 `evidenceExists()`로 그 인용이 실제 Story 부분 문자열인지, 그리고 "규칙이 적용되자 속옷이 사라졌다" 같은 규범/시스템이 몸을 대신 바꿨다는 표현(`CSA_MAGICAL_PHYSICAL_TRANSITION_PATTERN`)이 아닌지 확인한다 — 근거가 없거나 무효하면 그 캐릭터의 scene-state 변경만 조용히 버리고(이전 저장 상태 유지) `csa_physical_transition_rejected`를 경고 로그로 남기며, 턴 전체를 422/500으로 실패시키지 않는다.
+
 ## Player setup — four LLM-driven candidates, no hard gate
 
 `player_setup.recommendations[]`는 최대 4개의 LLM 생성 후보(각각 안정 ID `candidate_1`~`candidate_4`)를 기본 저장 형태로 쓴다. LLM이 병원 직원/환자/병원 연관 외부인/자유 배경으로 겹치지 않는 성인 남성 후보 4명을 한 번에 완성해서 제안하고, `[3. 선택지]`는 실제 후보 이름·직업을 담은 "번호. 이름 · 직업" 네 줄이 기본이다. Worker는 카드 문장·필드 순서·선택지 문구 exact match를 여전히 검증하지 않지만(`PLAYER_SETUP_CANDIDATES_INVALID`는 없음, 422 없음), `isCompleteSetupCandidateSet()`(4개 전원이 `isCompleteSetupCandidate`: name/age/gender/job/height_cm/weight_kg/penis_length_cm/style/personality/speech_style/background/starting_location/short_feature|play_hook/choice_label 전부 보유)을 통과한 새 세트만 저장된 `player_setup.recommendations`를 교체한다 — 불완전한 새 세트는 조용히 버려지고 기존 정상 세트가 있으면 그대로 유지, 없으면 `player_setup` 자체를 이번 턴에 쓰지 않아 다음 setup 응답이 4후보를 처음부터 다시 생성하게 한다(`buildSavePatch`).

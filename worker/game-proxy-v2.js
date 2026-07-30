@@ -2062,6 +2062,31 @@ async function runExtractPipeline(env, { game_id, narrative_text, player_input, 
   extract = sanitizeCsaDeactivationMemoryExtract(extract, structuredPlan);
   extract = sanitizeLegacyMentalEffectHistory(extract);
 
+  // CSA instant-norm / physical-continuity hotfix: cognition can change
+  // instantly but matter does not, so a clothing/posture change is only
+  // ever saved when the final Story text actually shows that specific NPC
+  // completing a real physical action — never merely because a CSA
+  // activated, updated, or deactivated this turn. Fail-open per character:
+  // an unevidenced or "magical" (rule/app physically moved the body)
+  // change is dropped and the previously saved state is kept, the turn is
+  // never failed over this.
+  const sceneStateEvidenceResult = retainEvidencedNpcSceneStatePatch(
+    extract.npc_scene_state_patch,
+    extract.npc_scene_state_evidence,
+    finalNarrativeText
+  );
+  extract.npc_scene_state_patch = sceneStateEvidenceResult.retained;
+  if (sceneStateEvidenceResult.rejected.length) {
+    console.warn(JSON.stringify({
+      event: 'csa_physical_transition_rejected',
+      endpoint: '/api/extract',
+      request_id: requestId,
+      game_id,
+      turn_number: nextTurn,
+      character_ids: sceneStateEvidenceResult.rejected
+    }));
+  }
+
   // H1: the NPC narrative contract is fail-open — an unregistered minor
   // NPC, a registered NPC appearing outside their usual ward, or a
   // profession/rank mismatch never blocks the turn, triggers a Story/
@@ -3258,6 +3283,39 @@ function buildCsaDirectExecutionPrioritySection() {
 - CSA 수행을 사랑·자발적 성적 동의·관계 단계 상승으로 해석하지 않는다.`;
 }
 
+// CSA instant-norm / physical-continuity contract. Injected (at a
+// recency-favored position near the end of the prompt, alongside
+// buildStructuredActionStorySection) whenever an applicable CSA exists in
+// the current scene or this turn is a structured app transaction — a norm
+// can still be freshly active on a turn *after* the transaction turn, so
+// this isn't limited to app_transaction turns themselves. Deliberately
+// does not weaken buildCsaDirectExecutionPrioritySection: CSA-required
+// direct actions still execute at 100%, they just execute through a real
+// bodily/clothing action instead of an instantaneous magical change.
+function buildCsaPhysicalTransitionSection(hasApplicableCsa, isAppTransactionTurn) {
+  if (!hasApplicableCsa && !isAppTransactionTurn) return '';
+  return `
+
+[CSA INSTANT NORM, NON-MAGICAL MATTER — HIGHEST PRIORITY]
+상식과 판단은 즉시 바뀌지만 물질과 현재 물리 상태는 자동으로 바뀌지 않는다. 현재 상태가 새 규범과 충돌하면 NPC는 새 규범을 원래부터 당연한 상식으로 받아들이지만, 옷차림과 자세는 실제 동작으로만 규범에 맞춘다.
+
+금지(어떤 상식개변 activate/update/deactivate 직후에도 절대 쓰지 않는다):
+- 속옷·의복이 갑자기 사라짐
+- 유니폼이 저절로 줄어들거나, 조여지거나, 헐거워지거나, 열리거나, 닫히거나, 디자인이 바뀜
+- 단추·지퍼·벨트가 스스로 움직이거나 채워지거나 풀림
+- 규칙·시스템·앱·법칙이 보이지 않는 손처럼 NPC의 몸을 붙잡거나 고정하거나 옮기거나 끌어당김
+- 이미 확정된 조작을 서서히 적용하거나, 다시 선택하게 하거나, "지금 적용할까요?"처럼 재확인을 구함
+- 지금 저장된 물리 상태와 모순되게 "사실 예전부터 규범을 따르고 있었다"고 소급 서술
+
+허용:
+- 규범을 아직 못 지키고 있다는 자각에서 오는 부끄러움·다급함·자기합리화
+- 지금 당장 옷을 갈아입거나 자세를 바꾸기 어려운 현실적 사정(프라이버시, 시간, 하던 일)에서 오는 어색함
+- 노출·접촉·시선에 대한 신체 반응
+- CSA 직접 실행 대상 행동은 이 규칙과 무관하게 100% 실행되지만, 순간이동이 아니라 실제 동작(다가가다, 앉다, 벗다, 조절하다)으로 실행된다
+
+현재 장면에 있는 NPC는 규범이 바뀐 순간의 저장된 물리 상태를 그대로 유지하다가, 서사에서 실제 전환 동작(벗다·입다·갈아입다·조절하다·이동해 자세를 바꾸다)을 보여준 뒤에만 새 물리 상태로 서술한다. 지금 이 장면 안에서 즉시 불가능하면 이전 상태를 유지한 채 가능한 가장 이른 시점에 맞추려는 의도만 보여준다. 화면 밖에 있던 NPC는 다음 등장까지 충분한 시간·여건이 있었다고 볼 수 있을 때만 이미 규범을 따른 상태로 나올 수 있으며, 지금 장면에 있는 NPC를 화면 밖에서 순간적으로 바꿔치기하지 않는다.`;
+}
+
 function buildCsaPersistentSceneSection() {
   return `
 
@@ -3813,6 +3871,10 @@ ${recentMemorySlice.map((m, index) => clipHeadTail(sanitizeRecentNarrativeForPro
   const csaPersistentSceneSection = csaSection ? buildCsaPersistentSceneSection() : '';
   const csaPublicSceneSection = csaSection ? buildCsaPublicSceneSection() : '';
   const csaDirectExecutionPrioritySection = csaSection ? buildCsaDirectExecutionPrioritySection() : '';
+  const csaPhysicalTransitionSection = buildCsaPhysicalTransitionSection(
+    Boolean(csaSection),
+    structuredPlan?.ok && structuredPlan.canonical_action?.type === 'app_transaction'
+  );
   const csaWeakSynergySection = getApplicableCsaEntries(save, activeCsa).length > 1 ? buildCsaWeakSynergySection() : '';
   const relationshipInterpretationSection = buildRelationshipInterpretationSection();
   const sexualPolicySection = buildSexualPolicyPromptSection(buildPreStorySexualPolicy({
@@ -3880,14 +3942,19 @@ ${recentMemorySlice.map((m, index) => clipHeadTail(sanitizeRecentNarrativeForPro
   // everything above it, including [최근 기억]'s now-stale account of the
   // turn that was just rolled back.
   const regenerationFeedbackSection = buildRegenerationFeedbackSection(regenerationFeedback);
-  const systemPrompt = (coreRules + playerGate + modeSection + rulebookSection + openingScenarioSection + appUsageSection + eligibleNpcRosterSection + buildCsaRuntimeSection() + buildGeneralActionJudgmentSection() + relationshipInterpretationSection + csaAcceptanceScopeSection + buildCsaDeactivationNarrativeRule() + currentSceneSection + hospitalLocationMemorySection + npcProfileSection + relationshipMemorySection + sexualHistorySection + explicitMentionSection + csaSection + csaPersistentSceneSection + csaPublicSceneSection + csaDirectExecutionPrioritySection + sexualPolicySection + csaAftereffectSection + csaWeakSynergySection + mindEffectBoundarySection + physicalSceneStateSection + narrativeLengthSection + narrativeParagraphSection + npcDialogueSection + moanVocalReactionSection + antiRepetitionSection + playerStatusPanel + contextSection + feedbackSection + continuitySection + finalFormatRules + openingFlow + playerSetupReminder + registeredNpcChoiceReminder + choiceLengthReminder + buildAddressAbbreviationSection() + regenerationFeedbackSection + buildStructuredActionStorySection(structuredPlan, save, activeCsa) + playerAttemptSection)
+  const systemPrompt = (coreRules + playerGate + modeSection + rulebookSection + openingScenarioSection + appUsageSection + eligibleNpcRosterSection + buildCsaRuntimeSection() + buildGeneralActionJudgmentSection() + relationshipInterpretationSection + csaAcceptanceScopeSection + buildCsaDeactivationNarrativeRule() + currentSceneSection + hospitalLocationMemorySection + npcProfileSection + relationshipMemorySection + sexualHistorySection + explicitMentionSection + csaSection + csaPersistentSceneSection + csaPublicSceneSection + csaDirectExecutionPrioritySection + sexualPolicySection + csaAftereffectSection + csaWeakSynergySection + mindEffectBoundarySection + physicalSceneStateSection + narrativeLengthSection + narrativeParagraphSection + npcDialogueSection + moanVocalReactionSection + antiRepetitionSection + playerStatusPanel + contextSection + feedbackSection + continuitySection + finalFormatRules + openingFlow + playerSetupReminder + registeredNpcChoiceReminder + choiceLengthReminder + buildAddressAbbreviationSection() + regenerationFeedbackSection + csaPhysicalTransitionSection + buildStructuredActionStorySection(structuredPlan, save, activeCsa) + playerAttemptSection)
     .replaceAll('상식개변 어플', '상식개변 앱');
 
   return {
     mode,
     messages: [
       { role: 'system', content: systemPrompt },
-      { role: 'user', content: setupComplete && !structuredPlan ? '위 플레이어 시도 기록을 바탕으로 다음 게임 턴을 작성한다.' : (playerInput || '/플레이') },
+      {
+        role: 'user',
+        content: structuredPlan?.ok && structuredPlan.canonical_action?.type === 'app_transaction'
+          ? '위 Worker 확정 상식개변 결과가 이미 적용된 현재 장면을 진행한다.'
+          : (setupComplete && !structuredPlan ? '위 플레이어 시도 기록을 바탕으로 다음 게임 턴을 작성한다.' : (playerInput || '/플레이'))
+      },
       ...(setupComplete && !structuredPlan ? [{ role: 'system', content: buildFinalAttemptInterpretationGuard() }] : [])
     ]
   };
@@ -4024,7 +4091,8 @@ relationship_memory_patch는 최종 Story에서 실제로 완료된 중요한 �
 관계 진행은 npc_intimacy_state_patch가 아니라 relationship_events로만 반환한다. romantic_interest_declared, boundary_added, boundary_removed, refusal은 현재 NPC의 구조화된 actor/target/evidence와 함께 반환한다. CSA direct 수행은 관계 단계·현재 동의·경계 제거·로맨스를 만들지 않는다.
 
 [NPC PHYSICAL SCENE STATE PATCH]
-npc_scene_state_patch는 최종 Story에서 등록 NPC가 실제로 옷을 입거나 벗고, 열고 잠그고, 올리거나 내리고, 갈아입거나 자세를 바꾼 완료 사건만 반영한다. 플레이어 입력만의 선언, 실패·시도·계획, 상식개변의 생성·해제만으로는 반환하지 않는다. 기존 상태를 유지할 키는 생략하고, 등록 NPC·허용 enum만 사용한다.
+npc_scene_state_patch는 최종 Story에서 등록 NPC가 실제로 옷을 입거나 벗고, 열고 잠그고, 올리거나 내리고, 갈아입거나 자세를 바꾼 완료 사건만 반영한다. 플레이어 입력만의 선언, 실패·시도·계획, 상식개변의 생성·해제만으로는 반환하지 않는다. 상식개변이 활성화·교체·해제됐다는 사실만으로 옷·자세가 저절로 바뀌었다고 반환하지 마라 — 규범은 즉시 바뀌어도 물질은 자동으로 바뀌지 않으며, NPC가 실제로 몸을 움직여 완료한 행동이 서사에 있을 때만 반환한다. 기존 상태를 유지할 키는 생략하고, 등록 NPC·허용 enum만 사용한다.
+npc_scene_state_patch에 값을 넣는 캐릭터마다 npc_scene_state_evidence에 그 완료 행동을 그대로 보여주는 최종 Story 원문 중 정확히 복사한 짧은 문구(따옴표 재구성·요약·의역 금지)를 함께 반환한다. "규칙이 적용되자 속옷이 사라졌다", "유니폼이 저절로 타이트해졌다", "규정이 그녀를 붙잡았다"처럼 실제 신체 동작이 아니라 규범·시스템·앱이 물질을 대신 바꿨다는 근거는 유효하지 않다. 유효한 근거를 댈 수 없으면 그 캐릭터는 npc_scene_state_patch에서 아예 빼라.
 player_scene_state_patch도 최종 Story에서 플레이어 자세·위치·방향 변화가 실제 완료된 경우만 반환한다. 단순 시도·선택지·계획만으로 갱신하지 않으며, 불명확하면 기존 상태를 유지하도록 생략한다.
 
 [WORLD STATE PATCH CONTRACT]
@@ -4087,6 +4155,7 @@ ${JSON.stringify(imageCatalog)}
   "arousal_event": null,
   "npc_intimacy_state_patch": null,
   "npc_scene_state_patch": {"heroine1": {"clothing": {"uniform_top": "worn|removed|open|unknown", "uniform_bottom": "worn|removed|open|unknown", "underwear_top": "worn|removed|unknown", "underwear_bottom": "worn|removed|unknown"}, "posture": "standing|sitting|kneeling|lying|unknown", "current_action": "실제 현재 행동, 없으면 생략"}},
+  "npc_scene_state_evidence": {"heroine1": "npc_scene_state_patch에 넣은 캐릭터마다 그 완료 행동을 보여주는 최종 Story 원문 그대로의 짧은 인용. patch에 없는 캐릭터는 넣지 않는다"},
   "player_scene_state_patch": {"posture": "standing|sitting|kneeling|lying_supine|lying_prone|side_lying|straddling|bent_forward|leaning|walking|crouching|carrying|unknown", "position_label": "최종 Story에서 실제 완료된 플레이어의 현재 자세/방향, 없으면 생략"},
   "player_inner_thought": "[2. 플레이어 상황판]에 실제로 적은 '[플레이어 이름] 속마음: ...' 줄에서 '속마음:' 뒤의 본문만 그대로 옮긴다. 따옴표 없이, 없으면 빈 문자열",
   "turn_summary": "이번 턴에서 변한 핵심 사실 1~3문장",
@@ -4290,6 +4359,8 @@ function normalizeRegisteredNpcExtract(extract = {}, characters = {}, lastCharac
   }
   const presentIds = new Set(normalized.npcs_present);
   normalized.npc_scene_state_patch = Object.fromEntries(Object.entries(normalized.npc_scene_state_patch || {})
+    .filter(([characterId]) => presentIds.has(characterId)));
+  normalized.npc_scene_state_evidence = Object.fromEntries(Object.entries(normalized.npc_scene_state_evidence || {})
     .filter(([characterId]) => presentIds.has(characterId)));
   return normalized;
 }
@@ -5325,6 +5396,7 @@ function normalizeExtract(extract) {
   normalized.sexual_events = normalizeSexualEvents(normalized.sexual_events);
   normalized.relationship_memory_patch = normalizeRelationshipMemoryPatchExtract(normalized.relationship_memory_patch);
   normalized.npc_scene_state_patch = normalizeNpcSceneStatePatch(normalized.npc_scene_state_patch);
+  normalized.npc_scene_state_evidence = normalizeNpcSceneStateEvidence(normalized.npc_scene_state_evidence);
   normalized.player_scene_state_patch = normalizePlayerSceneStatePatch(normalized.player_scene_state_patch);
   normalized.player_inner_thought = typeof normalized.player_inner_thought === 'string'
     ? normalized.player_inner_thought.replace(/^[“"']+|[”"']+$/g, '').trim().slice(0, 120)
@@ -5641,6 +5713,54 @@ function normalizeNpcSceneStatePatch(value) {
     if (Object.keys(state).length) result[characterId] = state;
   }
   return result;
+}
+
+// Transient (never persisted to game_save) evidence quotes keyed by
+// character_id — used only in-request by
+// retainEvidencedNpcSceneStatePatch to verify each npc_scene_state_patch
+// entry against the final Story text before it reaches buildSavePatch.
+function normalizeNpcSceneStateEvidence(value) {
+  if (!isPlainObject(value)) return {};
+  const result = {};
+  for (const [characterId, rawEvidence] of Object.entries(value)) {
+    if (typeof characterId !== 'string' || !characterId) continue;
+    const evidence = typeof rawEvidence === 'string' ? rawEvidence.trim().slice(0, 200) : '';
+    if (evidence) result[characterId] = evidence;
+  }
+  return result;
+}
+
+// Phrasing that attributes a physical/material change to the rule, app,
+// system, or norm itself rather than to the NPC's own body — the three
+// forbidden examples in the CSA instant-norm hotfix spec ("규칙이
+// 적용되자 속옷이 사라졌다", "유니폼이 저절로 타이트해졌다", "규정이
+// 그녀를 붙잡았다") all match this shape. A quote matching this is never
+// valid evidence for a scene-state change, even if it's a verbatim
+// substring of the Story text.
+const CSA_MAGICAL_PHYSICAL_TRANSITION_PATTERN = /(규칙|규정|상식개변|앱|시스템|법칙)[^.!?。]{0,20}(적용되자|발동되자|의해)?[^.!?。]{0,20}(사라졌|사라지|저절로|자동으로|스스로|붙잡|묶었|묶여|고정했|고정되|끌어당겼|끌려갔)/;
+
+function isMagicalPhysicalTransitionEvidence(evidence = '') {
+  return CSA_MAGICAL_PHYSICAL_TRANSITION_PATTERN.test(String(evidence || ''));
+}
+
+// Fail-open evidence gate for npc_scene_state_patch, mirroring
+// retainValidatedCsaRuntimeUpdates: only entries backed by an exact,
+// non-magical substring of the final Story text survive. A rejected
+// character's scene-state change is dropped entirely (buildSavePatch then
+// simply keeps that character's previously saved state) — the turn itself
+// never fails.
+function retainEvidencedNpcSceneStatePatch(sceneStatePatch = {}, evidenceMap = {}, narrativeText = '') {
+  const retained = {};
+  const rejected = [];
+  for (const [characterId, patch] of Object.entries(isPlainObject(sceneStatePatch) ? sceneStatePatch : {})) {
+    const evidence = isPlainObject(evidenceMap) ? evidenceMap[characterId] : null;
+    const valid = typeof evidence === 'string' && evidence.trim()
+      && evidenceExists(evidence, narrativeText)
+      && !isMagicalPhysicalTransitionEvidence(evidence);
+    if (valid) retained[characterId] = patch;
+    else rejected.push(characterId);
+  }
+  return { retained, rejected };
 }
 
 const PLAYER_SCENE_POSTURES = new Set(['standing', 'sitting', 'kneeling', 'lying_supine', 'lying_prone', 'side_lying', 'straddling', 'bent_forward', 'leaning', 'walking', 'crouching', 'carrying', 'unknown']);
@@ -8069,12 +8189,22 @@ function buildStructuredActionStorySection(structuredPlan, effectiveSave = {}, a
     const target = structuredPlan.plan;
     return `\n\n[CONFIRMED NPC FIND ACTION — HARD CONSTRAINT]\n상식개변 앱의 위치 확인 결과 대상은 ${target.character_name}, 위치는 ${target.target_location_label}이다. 플레이어가 이번 턴 안에 그 장소로 이동해 대상과 마주친다. 대상·목적지를 바꾸거나 찾지 못했다고 처리하지 마라.`;
   }
-  const lines = action.operations
-    .filter(operation => operation.domain === 'csa')
-    .map(operation => `- 상식개변 ${operation.operation}: ${operation.scope_type || '기존 범위'}`)
+  const csaOperations = action.operations.filter(operation => operation.domain === 'csa');
+  const lines = csaOperations
+    .map(operation => {
+      const verb = operation.operation === 'activate' ? '신설(즉시 활성)'
+        : operation.operation === 'update' ? '교체(기존 규범은 이 순간부터 소멸, 새 규범만 즉시 유효)'
+        : operation.operation === 'deactivate' ? '해제(즉시 종료)'
+        : operation.operation;
+      return `- 상식개변 ${verb}: ${operation.scope_type || '기존 범위'}`;
+    })
     .join('\n');
   const level = Math.max(1, Number(effectiveSave?.player_progress?.level) || 1);
-  return `\n\n[CONFIRMED COMMON-SENSE APP TRANSACTION — HARD CONSTRAINT]\n아래 상식개변 조작은 Worker 검증을 통과했다. 내용·강도·범위·활성 상태를 바꾸거나 다시 판정하지 말고, 조작 이후의 장면 흐름만 자연스럽게 서술한다. 현재 장면에 없는 장소의 수정·해제에는 즉각적인 신체 반응이나 대사를 창작하지 마라.\n${lines}\n\n[CSA CURRENT RESULT — ESTABLISHED FACT]\n현재 활성 상식개변: ${activeCsa.length}/${getCsaLimits(level).max_active}. 활성 목록과 현재 위치 적용 여부는 이 수치와 같은 active:true 항목만 사용한다.` + buildCsaDeactivationStorySection(structuredPlan);
+  const hasUpdate = csaOperations.some(operation => operation.operation === 'update');
+  const updateNote = hasUpdate
+    ? '\n\n[UPDATE — OLD NORM ALREADY GONE]\n교체된 상식개변은 기존 버전과 새 버전을 동시에 존재하는 대안으로 제시하지 않는다. 기존 규범의 구속력은 이번 턴부터 완전히 끝났고, 지금 이 장면에는 새 규범만 유효하다. 어느 쪽을 따를지 고민하거나, 사용자에게 묻거나, 두 버전을 비교하지 않는다.'
+    : '';
+  return `\n\n[CONFIRMED COMMON-SENSE APP TRANSACTION — ALREADY APPLIED, ESTABLISHED FACT]\n아래 상식개변 조작은 Worker 검증을 이미 통과했고 이번 Story 턴이 시작되는 시점부터 이미 적용되어 있다. 이것은 제안·초안이나 사용자의 확인을 기다리는 요청이 아니라 확정된 사실이다. 내용·강도·범위·활성 상태를 바꾸거나 다시 판정하거나 재확인을 구하지 말고, 이미 적용된 결과 이후의 장면만 자연스럽게 진행한다. 현재 장면에 없는 장소의 수정·해제에는 즉각적인 신체 반응이나 대사를 창작하지 마라.\n${lines}${updateNote}\n\n[CSA CURRENT RESULT — ESTABLISHED FACT]\n현재 활성 상식개변: ${activeCsa.length}/${getCsaLimits(level).max_active}. 활성 목록과 현재 위치 적용 여부는 이 수치와 같은 active:true 항목만 사용한다.\n\n[POST-TRANSACTION CHOICES — HARD CONSTRAINT]\n[3. 선택지]는 위 조작이 이미 적용된 이후에 실제로 할 수 있는 장면 속 행동 4개만 적는다. 이 변경을 적용할지 확인하거나, 취소하거나, 다른 규칙으로 바꾸거나, 서서히 적용하거나, 앱을 다시 여는 선택지는 절대 만들지 않는다. 그런 관리 조작은 상식개변 앱 UI에서만 한다.` + buildCsaDeactivationStorySection(structuredPlan);
 }
 
 function buildSuggestionDeactivationStorySection(structuredPlan) {
@@ -8097,6 +8227,7 @@ function buildStructuredActionExtractSection(structuredPlan) {
   if (!structuredPlan?.ok) return '';
   if (structuredPlan.canonical_action.type === 'find_npc') return '\n\n이번 턴의 최종 대상과 목적지는 Worker가 확정했다. character_id는 지정 대상이고 npcs_present에는 지정 대상을 포함한다.';
   let section = '\n\n이번 턴의 상식개변 상태 변경은 Worker가 이미 확정했다. 저장 상태를 새로 추론하지 말고 서사에서 실제 발생한 NPC 감정·수치·장면·대사·이미지 정보만 추출한다.';
+  section += '\n상식개변이 이번 턴에 신설·교체·해제되어 규범상 즉시 활성/비활성 상태라는 사실과, 그 NPC의 옷·자세가 실제로 바뀌었다는 사실은 서로 다르다. npc_scene_state_patch는 규범 활성 여부가 아니라 최종 Story에서 그 NPC가 실제로 완료한 물리적 동작(벗다·입다·갈아입다·조절하다·이동하다·앉다)에만 근거해서 채우고, 그런 완료 동작이 없으면 그 캐릭터는 비워둔다. npc_scene_state_evidence에는 그 동작을 보여주는 최종 Story 원문 그대로의 짧은 인용만 넣고, 규범·시스템·앱이 몸을 대신 바꿨다는 문구는 근거로 쓰지 않는다.';
   if (hasStructuredCsaDeactivation(structuredPlan)) {
     section += '\n이번 턴에는 상식개변 해제가 확정되었다. 해제는 과거 사건·기억·물리 상태를 지우거나 되돌리지 않는다. relationship_memory_patch와 turn_summary에 기억상실·시간 공백·자동 복장 복구를 영구 사실로 기록하지 말고, npc_scene_state_patch에는 실제 완료된 물리 변화만 넣는다.';
   }

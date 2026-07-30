@@ -43,10 +43,23 @@ const sidebar = {
     actions.querySelector('#feedback-side-button').addEventListener('click', () => window.showFeedbackModal?.());
     panel.appendChild(actions);
     this.renderStats({});
+    this.setSetupVisibility(false);
   },
 
   updateContext(context) {
     const save = context?.save || {};
+    const setupComplete = save?.player_setup?.status === 'complete';
+    this.setSetupVisibility(setupComplete);
+    if (!setupComplete) {
+      this.activeCharacter = null;
+      this.activeCharacterId = null;
+      document.getElementById('character-img')?.classList.add('hidden');
+      document.getElementById('character-info')?.replaceChildren();
+      document.getElementById('npc-status')?.replaceChildren();
+      document.getElementById('npc-relationship')?.replaceChildren();
+      this.updateMind({});
+      return;
+    }
     const characterId = save.last_character_id;
     if (characterId) this.updateCharacter(characterId, context);
     this.updatePlayerInfo(save);
@@ -117,6 +130,12 @@ const sidebar = {
     const name = typeof playerName === 'string' ? playerName.trim() : '';
     const alreadyPrefixed = /속마음\s*:/.test(value.slice(0, 40));
     root.textContent = alreadyPrefixed || !name ? value : `${name} 속마음: ${value}`;
+  },
+
+  setSetupVisibility(visible) {
+    document.querySelectorAll('.side-panel > .panel-section').forEach(section => {
+      section.hidden = !visible;
+    });
   },
 
   updateCharacter(characterId, context = state.context) {
@@ -293,7 +312,9 @@ const sidebar = {
 
   withUnit(value, unit) {
     if (value === null || value === undefined || String(value).trim() === '') return '';
+    if (typeof value === 'number' && value <= 0) return '';
     const text = String(value).trim();
+    if (/^0(?:\.0+)?$/.test(text)) return '';
     return new RegExp(`${unit}$`, 'i').test(text) ? text : `${text}${unit}`;
   },
 

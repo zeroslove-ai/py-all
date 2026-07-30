@@ -172,7 +172,9 @@ const tts = {
     const characterId = extract?.character_id;
     const character = state.context?.master?.characters?.[characterId];
     if (!characterId || characterId === 'narrator') {
-      this.showStatus('TTS를 재생할 메인 NPC가 없습니다.', true);
+      this.lastPlayable = null;
+      if (this.replay) this.replay.hidden = true;
+      this.showStatus('');
       return;
     }
     if (!character || typeof character.voice_id !== 'string' || !character.voice_id.trim()) {

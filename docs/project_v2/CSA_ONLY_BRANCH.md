@@ -103,3 +103,9 @@ action instead of narrating it once and forgetting it.
   `semantic_contract`를 받고 서명된 canonical action과 함께 저장한다.
   ambiguous contract는 `CUSTOM_CSA_SEXUAL_SCOPE_AMBIGUOUS`로 거절하며,
   legacy custom은 Story 배경 규칙으로만 남고 sexual direct authorization에는 쓰지 않는다.
+
+## Structured CSA integrity before Commit
+
+- 모든 applicable CSA는 Extract의 `csa_trigger_evaluations`에 정확히 한 번 있어야 한다. 누락·중복·알 수 없는 ID는 recovery 대상이며, 복구 뒤에도 남으면 Commit을 차단한다.
+- sexual CSA direct 실행은 간이 `route/completed/id` 비교가 아니라 full semantic contract, actor/target, trigger, runtime, Story evidence 검증을 통과해야 한다.
+- repair는 Story 본문과 함께 structured resolution/runtime/event/relationship field도 갱신한다. setup 완료 상태에서 structured Extract를 만들지 못하면 fail-closed한다.

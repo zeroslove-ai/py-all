@@ -39,6 +39,11 @@ NPC의 직접 대사 consent가 모두 있을 때만 반환한다. 애매한 설
 `boundary_added`, `boundary_removed`, `refusal`만 사용한다. Worker는 이 구조와
 Story evidence를 검증하며 한국어 긍정 정규식으로 consent나 intent를 재해석하지 않는다.
 
+Integrity repair가 요청되면 수정된 narrative와 함께 `sexual_resolution`,
+`csa_trigger_evaluations`, `csa_runtime_updates`, `sexual_events`,
+`relationship_events`도 모두 반환한다. 수정되지 않은 구조화 필드는 기존 값을 그대로
+반환하며, 모든 applicable CSA evaluation을 빠뜨리지 않는다.
+
 ### 플레이어 정보
 
 이번 턴의 `player_input`에 플레이어가 실제로 답한 항목을 우선 `player_patch`에 넣는다. 서사에 같은 값이 다시 서술되지 않아도 저장한다. 원본 입력에 없는 항목만 서사에서 실제로 답한 값으로 보완한다. 답하지 않은 키는 생략하고, 아무 답도 없으면 `{}`를 사용한다.

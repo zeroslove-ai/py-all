@@ -314,6 +314,11 @@ Worker의 `buildSavePatch()`는 추출 결과를 DB 구조에 맞게 바꾼다.
 새 DB column, RPC, migration은 없다. legacy custom CSA에 contract가 없으면
 runtime sexual authorization에는 사용하지 않는다.
 
+`csa_trigger_evaluations`는 현재 적용되는 CSA ID마다 정확히 한 항목이어야 한다.
+setup 완료 상태에서 structured resolution이 unavailable하거나 final integrity가 실패하면
+turn patch/token을 만들지 않는다. 이 역시 기존 JSONB/Extract 계약의 검증 규칙이며
+새 DB column, RPC, migration은 없다.
+
 ## `reset_game_progress` 규칙
 
 - 사용자 확인은 프론트에서 먼저 받는다.

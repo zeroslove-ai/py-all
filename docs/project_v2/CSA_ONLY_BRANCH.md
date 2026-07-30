@@ -113,3 +113,21 @@ action instead of narrating it once and forgetting it.
 - `csa_runtime_updates`는 매 턴 전체 스냅샷이 아니라 델타다: 이전 턴부터 이미 `active`였고 이번 턴에도 변화가 없으면 중복 update를 생략할 수 있다. 그래서 정합성 검사(`auditStructuredCsaExecution`, `validateCsaDirectResolution`)는 이번 턴 delta만 보지 않고, 저장된 `save.csa_runtime_state`에 이번 delta를 적용한 **effective runtime**(`buildEffectiveCsaRuntimeState`)을 기준으로 판단한다 — 저장된 active가 이번 턴 delta로 변경되지 않았으면 계속 active로 취급한다. trigger evaluation이 `ended`인데 effective runtime이 여전히 `active`로 남아 있는 불일치도 `CSA_RUNTIME_NOT_VERIFIED`로 막는다.
 - CSA 정합성 repair(`repairCsaNarrativeIntegrity`)는 실제로 수정한 필드만 담은 `changed_fields`를 함께 반환하며, Worker는 `changed_fields`에 없는 필드를 절대 적용하지 않는다 — repair가 실수로 빈 배열을 반환해도 기존 정상 구조화 필드를 지우지 않는다. `csa_trigger_evaluations`/`csa_runtime_updates`는 전체 교체가 아니라 `csa_id`(runtime은 `csa_id`+`character_id`) 기준 병합이라, repair가 일부 CSA만 다시 판단해도 손대지 않은 나머지 applicable CSA의 평가는 그대로 유지된다. repair 체인에는 이번 턴 `player_input` 원문도 전달돼, 플레이어가 명시적으로 요청한 중단·이동을 repair가 되돌리지 않게 한다.
 - 과감 선택지 메타(`last_choice_meta`)가 현재 턴/현재 계약과 맞지 않는 stale 값(다른 턴 `choice_id`, `severity` 누락, `sexual_action:"none"`인데 `kind:"bold"`인 경우 등)이면 `isCurrentChoiceMetaValid`가 이를 거부하고, `/api/context`의 공개 view(`buildCsaOnlyPublicContext`)와 실제 판정(`resolveBoldChoiceAttempt`) 모두 저장된 값 대신 현재 choices/save로 다시 계산한 in-memory 메타를 쓴다 — DB에는 쓰지 않는 표시/판정 전용 재분류다. `severity:"blocked"`는 `kind:"bold"`와 분리된 별도 `kind:"blocked"`이며, bold 확률 굴림 대상이 아니다.
+
+## Player setup — single LLM-driven recommendation
+
+`player_setup`은 4개 구조화 후보 배열이 아니라 단일 추천(`recommendation`)이다. LLM이 완성형 성인 남성 캐릭터 한 명을 자유 형식으로 추천하고, `[3. 선택지]`는 항상 `PLAYER_SETUP_CHOICES`(추천 설정으로 시작한다 / 일부 설정을 변경한다 / 원하는 캐릭터를 직접 설명한다) 세 줄이다. Worker는 카드 문장·필드 순서·선택지 문구를 검증하지 않으며, `player_recommendation` 필드 일부 누락으로 턴을 422 처리하지 않는다(`PLAYER_SETUP_CANDIDATES_INVALID`는 삭제됨). `isApprovalInput()`으로 승인 여부만 판정하고, 승인 시 Extract가 새로 추측한 값이 아니라 이전 턴에 저장된 `player_setup.recommendation`을 그대로 확정한다. Extract JSON 파싱/업스트림 실패가 나도 setup 턴(승인 전)은 항상 HTTP 200 degraded 응답으로 fail-open한다 — 하드 실패로 게임을 막지 않는다. 옛 4후보 저장(`player_setup.recommendations[]` 배열 + `selected_id`)은 `normalizeLegacyPlayerSetupForRead()`로 읽기 전용 호환만 하며, 새 게임·새 턴은 그 배열을 절대 다시 만들지 않는다.
+
+## Streaming-first engineering priority
+
+게임빌더 v2는 규칙 엔진이 중심인 전통 게임이 아니라 LLM Story 스트리밍 게임이다.
+
+우선순위:
+1. `/api/story` SSE 스트리밍과 사용자가 본 서사 보존
+2. 게임 진행 연속성
+3. Extract 기반 상태 저장
+4. 형식 검증
+
+LLM이 자연스럽게 처리할 수 있는 서사 형식, 플레이어 설정 추천, 선택지 문구, 카드 표현을 Worker의 hard gate로 검증하지 않는다. 이들 품질 문제는 warning 또는 best-effort fallback으로 처리하며 이미 스트리밍된 Story를 폐기하거나 Commit을 차단하지 않는다.
+
+Hard failure는 중복 Commit, turn mismatch, 잘못된 structured transaction, DB 저장 실패, 권한 없는 성적 완료 상태 저장처럼 실제 무결성·권한 문제가 있는 경우에만 사용한다.

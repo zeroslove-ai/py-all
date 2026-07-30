@@ -137,6 +137,8 @@ CSA-only runtime additions inside `game_save.data` (no database column or migrat
 
 `last_choice_meta` may include `sexual_action`, `sexual_is_public`, `sexual_gate`, `blocking_boundaries`, `direct_csa_ids`, and `intimacy_stage` as display metadata. The actual decision is recalculated deterministically at the selected turn. `last_explicit_consent` is this-turn-only and never grants future automatic permission. `romantic_interest` is non-sexual; `kissed` and later stages require the voluntary sexual path's current action-specific consent and completed event. `csa_aftereffect_state` can be created from a confirmed runtime execution record even while that NPC is absent; medium/strong confirmed direct sexual `required_action` executions add `needs_discussion` on deactivation. No database migration is involved.
 
+These changes only refine Worker validation and runtime interpretation of existing JSONB fields; they add no schema, RPC, or migration.
+
 `turn_count`는 JSONB 안에 중복 저장하지 않는다.
 
 ### `csa_active` 프리셋 필드 (2026-07 추가, 마이그레이션 없음)

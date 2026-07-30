@@ -1964,9 +1964,35 @@ async function runExtractPipeline(env, { game_id, narrative_text, player_input, 
     if (applicableCsa.length) {
       const violations = collectCsaMetaAwarenessViolations(finalNarrativeText, extract);
       const structuralOmissions = detectPresetRequiredActionOmissions(
-        applicableCsa, extract.csa_runtime_updates, effectiveCtx.save?.csa_runtime_state
+        applicableCsa,
+        extract.csa_runtime_updates,
+        effectiveCtx.save?.csa_runtime_state,
+        {
+          playerInput: player_input,
+          narrativeText: finalNarrativeText
+        }
       );
-      const omissions = [...new Set([...extract.csa_omission, ...structuralOmissions])];
+      const validatedSelfReportedOmissions = (
+        Array.isArray(extract.csa_omission)
+          ? extract.csa_omission
+          : []
+      ).filter(omission => (
+        applicableCsa.some(csa => (
+          (
+            String(omission).includes(csa.id)
+            || String(omission).includes(csa.content)
+          )
+          && csaTriggerSatisfiedForCurrentTurn(csa, {
+            playerInput: player_input,
+            narrativeText: finalNarrativeText,
+            previousRuntimeState: effectiveCtx.save?.csa_runtime_state
+          })
+        ))
+      ));
+      const omissions = [...new Set([
+        ...validatedSelfReportedOmissions,
+        ...structuralOmissions
+      ])];
       if (omissions.length || violations.length) {
         csaMetaAwarenessDetected = violations.length > 0;
         csaMetaAwarenessFields = violations.map(v => v.field);
@@ -4350,7 +4376,8 @@ function buildSavePatch(extract, enginePatch = {}, summaryPlan = null, previousS
         npcSwitchTurn,
         sexualGate,
         save: { ...previousSave, world_state: mergedWorldState, csa_active: structuredPlan?.plan?.csa_active ?? previousSave?.csa_active },
-        intimacyPatch: extract.npc_intimacy_state_patch
+        intimacyPatch: extract.npc_intimacy_state_patch,
+        csaRuntimeUpdates: extract.csa_runtime_updates
       });
       const relationshipMemoryPatch = filterCurrentRelationshipMemoryPatch(extract.relationship_memory_patch, {
         characterId,
@@ -4368,6 +4395,7 @@ function buildSavePatch(extract, enginePatch = {}, summaryPlan = null, previousS
         gate: sexualGate,
         turnNumber,
         character,
+        player: previousSave?.player || {},
         acceptedEvents: sexual.accepted_events
       });
       const hasIntimacyPatch = Boolean(extract.npc_intimacy_state_patch?.character_id === characterId);
@@ -4703,22 +4731,59 @@ function filterMainNpcDialogue(extract, characters) {
   }).map(line => ({ speaker: mainName, text: line.text.trim(), direction: typeof line.direction === 'string' && line.direction.trim() ? line.direction.trim() : 'neutral' }));
 }
 
-function storyConfirmsRomanticInterest(narrativeText = '', character = {}) {
-  const name = character?.name || character?.['이름'] || '';
-  if (!name) return false;
+function escapeRegExp(value = '') {
+  return String(value).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
 
-  const positive =
-    /(?:당신|플레이어|그 사람|[가-힣]{2,4}씨)?\s*(?:를|을)?\s*좋아(?:해|하고|한다)|연애\s*감정|사귀고\s*싶|데이트(?:를)?\s*(?:하고|해보고)\s*싶|연인(?:이|으로)\s*되고\s*싶/;
+function storyConfirmsRomanticInterest(
+  narrativeText = '',
+  character = {},
+  player = {}
+) {
+  const npcName =
+    character?.name
+    || character?.['이름']
+    || '';
+
+  const playerName =
+    typeof player?.name === 'string'
+      ? player.name.trim()
+      : '';
+
+  if (!npcName) return false;
+
+  const targetParts = [
+    playerName ? escapeRegExp(playerName) : '',
+    '플레이어',
+    '당신'
+  ].filter(Boolean);
+
+  const target = `(?:${targetParts.join('|')})`;
+
+  const positive = new RegExp(
+    [
+      `${target}(?:이|가|을|를)?\\s*좋아(?:해|한다고|한다|하는\\s*마음)`,
+      `${target}(?:과|와)?\\s*사귀고\\s*싶`,
+      `${target}(?:과|와)?\\s*데이트(?:를)?\\s*(?:하고|해보고)\\s*싶`,
+      `${target}(?:에게|을\\s*향한)?\\s*연애\\s*감정`,
+      `${target}(?:과|와)?\\s*연인(?:이|으로)\\s*되고\\s*싶`
+    ].join('|')
+  );
+
   const negative =
     /(?:좋아하지\s*않|연애\s*감정이\s*없|사귈\s*생각이\s*없|친구로만|업무적으로만|동료로만|아직\s*모르|착각|그런\s*뜻이\s*아니)/;
+
+  const thirdPartyOrQuestion =
+    /(?:상담|기록|사례|동료의|환자의|보호자의|있는지\s*(?:물|확인)|물었다|질문했다|의미를\s*설명)/;
 
   return extractNarrativeActionSection(narrativeText)
     .split(/(?<=[.!?。！？])\s+|\n+/)
     .map(sentence => sentence.trim())
     .some(sentence => (
-      sentence.includes(name)
+      sentence.includes(npcName)
       && positive.test(sentence)
       && !negative.test(sentence)
+      && !thirdPartyOrQuestion.test(sentence)
     ));
 }
 
@@ -4732,11 +4797,11 @@ function storyConfirmsBoundaryRenegotiation({
   if (!sentence || !sentence.includes(name)) return false;
 
   return /(?:다시|이제는|생각해\s*봤|얘기해|논의|합의|확인|어디까지|경계|허용|마음을\s*정했)/.test(sentence)
-    && sexualActionEvidencePattern(action).test(sentence)
+    && sexualActionConsentPattern(action).test(sentence)
     && !SEXUAL_CONSENT_NEGATIVE_RE.test(sentence);
 }
 
-function mergeIntimacyState(previous = {}, rawPatch = null, { characterId = '', npcsPresent = [], narrativeText = '', gate = null, turnNumber = 0, character = {}, acceptedEvents = [] } = {}) {
+function mergeIntimacyState(previous = {}, rawPatch = null, { characterId = '', npcsPresent = [], narrativeText = '', gate = null, turnNumber = 0, character = {}, player = {}, acceptedEvents = [] } = {}) {
   const current = normalizeIntimacyState(previous);
   if (!rawPatch || rawPatch.character_id !== characterId || !npcsPresent.includes(characterId)) return current;
   const narrative = extractNarrativeActionSection(narrativeText);
@@ -4759,7 +4824,7 @@ function mergeIntimacyState(previous = {}, rawPatch = null, { characterId = '', 
   }
   const requestedStage = rawPatch.stage;
   if (requestedStage === 'romantic_interest' && current.stage === 'none'
-    && gate?.route === 'not_sexual' && storyConfirmsRomanticInterest(narrativeText, character)) {
+    && gate?.route === 'not_sexual' && storyConfirmsRomanticInterest(narrativeText, character, player)) {
     next.stage = 'romantic_interest';
   } else {
     const stageRequirements = {
@@ -5045,9 +5110,6 @@ function sexualActionForEventType(type = '') {
   return 'none';
 }
 
-const SEXUAL_CONSENT_AFFIRMATIVE_RE =
-  /(?:동의(?:해|한다|할게)|원해|원한다|하고\s*싶|해도\s*(?:돼|괜찮아)|해\s*(?:줘|주세요)|받아들(?:일게|인다)|좋아[,.!\s]*(?:해|계속)|괜찮아[,.!\s]*(?:해|계속)|(?:네|응|그래)[,.!\s]+.{0,20}(?:해|계속))/;
-
 const SEXUAL_CONSENT_NEGATIVE_RE =
   /(?:싫|안\s*돼|하지\s*마|그만|멈춰|아직|준비되지|원하지\s*않|하지만|그래도\s*안|키스까지만|여기서는\s*안|생각할\s*시간|곤란|무리|나중에)/;
 
@@ -5074,6 +5136,34 @@ function sexualActionEvidencePattern(action = 'none') {
 
   if (action === 'penetration') {
     return /(?:삽입|성관계|섹스|(?:질|항문)(?:에|으로)\s*(?:넣|들어가)|(?:음경|성기|자지).{0,12}(?:질|항문).{0,12}(?:넣|삽입))/;
+  }
+
+  return /$a/;
+}
+
+function sexualActionConsentPattern(action = 'none') {
+  if (action === 'kiss') {
+    return /(?:(?:키스|입맞춤)(?:를|은|는)?\s*(?:해도\s*(?:돼|괜찮아)|해\s*(?:줘|주세요)|하고\s*싶|하길\s*원|에\s*동의(?:해|했|한다|합니다|할게)|를\s*허락(?:해|한다|했어))|(?:키스|입맞춤)(?:하기|하는\s*것)에\s*동의(?:해|했|한다|합니다))/;
+  }
+
+  if (action === 'sexual_touch') {
+    return /(?:(?:가슴|유방|엉덩이|허벅지\s*안쪽)(?:을|를)?\s*(?:만져도\s*(?:돼|괜찮아)|만져\s*(?:줘|주세요)|만지길\s*원|만지는\s*것에\s*동의(?:해|했|한다|합니다)|주물러도\s*(?:돼|괜찮아)|쓰다듬어도\s*(?:돼|괜찮아)))/;
+  }
+
+  if (action === 'genital_exposure') {
+    return /(?:(?:성기|음경|자지|질|보지)(?:를|을)?\s*(?:보여\s*(?:줘|주세요)|보여도\s*(?:돼|괜찮아)|꺼내도\s*(?:돼|괜찮아)|노출해도\s*(?:돼|괜찮아)|드러내도\s*(?:돼|괜찮아))|(?:성기|음경|자지|질|보지)\s*노출에\s*동의(?:해|했|한다|합니다))/;
+  }
+
+  if (action === 'genital_touch') {
+    return /(?:(?:성기|음경|자지|질|보지|클리토리스)(?:를|을)?\s*(?:만져도\s*(?:돼|괜찮아)|만져\s*(?:줘|주세요)|잡아도\s*(?:돼|괜찮아)|자극해도\s*(?:돼|괜찮아)|문질러도\s*(?:돼|괜찮아)|만지는\s*것에\s*동의(?:해|했|한다|합니다)|자극을\s*원(?:해|한다|했어)))/;
+  }
+
+  if (action === 'oral') {
+    return /(?:(?:펠라티오|구강성교|커닐링구스)(?:를|은|는)?\s*(?:해도\s*(?:돼|괜찮아)|해\s*(?:줘|주세요)|하고\s*싶|에\s*동의(?:해|했|한다|합니다)|를\s*원(?:해|한다|했어))|입으로\s*(?:빨아도\s*(?:돼|괜찮아)|빨아\s*(?:줘|주세요)|해도\s*(?:돼|괜찮아)|해\s*(?:줘|주세요)))/;
+  }
+
+  if (action === 'penetration') {
+    return /(?:(?:삽입|성관계|섹스)(?:을|를|은|는)?\s*(?:해도\s*(?:돼|괜찮아)|해\s*(?:줘|주세요)|하고\s*싶|하길\s*원|에\s*동의(?:해|했|한다|합니다)|를\s*허락(?:해|한다|했어)|를\s*원(?:해|한다|했어))|(?:질|항문)(?:에|으로)\s*(?:넣어도\s*(?:돼|괜찮아)|넣어\s*(?:줘|주세요)|삽입해도\s*(?:돼|괜찮아)|삽입해\s*(?:줘|주세요)))/;
   }
 
   return /$a/;
@@ -5112,14 +5202,13 @@ function validateExplicitConsentEvidence({
   const context = `${sentence} ${evidence}`;
 
   if (SEXUAL_CONSENT_NEGATIVE_RE.test(context)) return false;
-  if (!SEXUAL_CONSENT_AFFIRMATIVE_RE.test(context)) return false;
-  if (!sexualActionEvidencePattern(action).test(context)) return false;
+  if (!sexualActionConsentPattern(action).test(context)) return false;
 
   return true;
 }
 
 function applySexualEvents(previous = {}, events = [], turnNumber = 0, {
-  playerInput = '', narrativeText = '', characterId = '', npcsPresent = [], characters = {}, npcSwitchTurn = false, sexualGate = null, save = {}, intimacyPatch = null
+  playerInput = '', narrativeText = '', characterId = '', npcsPresent = [], characters = {}, npcSwitchTurn = false, sexualGate = null, save = {}, intimacyPatch = null, csaRuntimeUpdates = []
 } = {}) {
   const history = emptySexualHistory(previous);
   const seen = new Set((Array.isArray(previous?.sexual_events) ? previous.sexual_events : []).map(item => item?.id).filter(Boolean));
@@ -5128,14 +5217,16 @@ function applySexualEvents(previous = {}, events = [], turnNumber = 0, {
   const currentCharacter = isPlainObject(characters?.[characterId]) ? characters[characterId] : null;
   const currentName = currentCharacter?.name || currentCharacter?.['이름'] || '';
   const hasAuthorizedBaseAction = (Array.isArray(events) ? events : []).some(event => {
+    if (event?.character_id !== characterId) return false;
     const action = sexualActionForEventType(event?.type);
     if (action === 'none') return false;
-    const direct = resolveSexualCsaAuthorization({ save, classification: { action, is_public: sexualGate?.classification?.is_public === true }, playerInput, eventType: event?.type });
+    const direct = resolveSexualEventCsaAuthorization({ save, classification: { action, is_public: sexualGate?.classification?.is_public === true }, characterId, characters, csaRuntimeUpdates, sexualGate });
     return direct.authorized || (sexualGate?.route === 'voluntary_eligible' && sexualGate.success === true && sexualGate.action === action && validateExplicitConsentEvidence({ patch: intimacyPatch, narrativeText, character: currentCharacter, action }));
   });
   const hasDirectCsaBaseAction = (Array.isArray(events) ? events : []).some(event => {
+    if (event?.character_id !== characterId) return false;
     const action = sexualActionForEventType(event?.type);
-    return action !== 'none' && resolveSexualCsaAuthorization({ save, classification: { action, is_public: sexualGate?.classification?.is_public === true }, playerInput, eventType: event?.type }).authorized;
+    return action !== 'none' && resolveSexualEventCsaAuthorization({ save, classification: { action, is_public: sexualGate?.classification?.is_public === true }, characterId, characters, csaRuntimeUpdates, sexualGate }).authorized;
   });
   const acceptedEvents = [];
   let accepted = 0;
@@ -5144,7 +5235,7 @@ function applySexualEvents(previous = {}, events = [], turnNumber = 0, {
     const eventAction = sexualActionForEventType(event?.type);
     const eventClassification = { action: eventAction, is_public: sexualGate?.classification?.is_public === true };
     const directCsa = eventAction !== 'none'
-      ? resolveSexualCsaAuthorization({ save, classification: eventClassification, playerInput, eventType: event?.type })
+      ? resolveSexualEventCsaAuthorization({ save, classification: eventClassification, characterId, characters, csaRuntimeUpdates, sexualGate })
       : null;
     if (eventAction !== 'none' && !directCsa?.authorized && !(sexualGate?.route === 'voluntary_eligible' && sexualGate.success === true && sexualGate.action === eventAction && validateExplicitConsentEvidence({ patch: intimacyPatch, narrativeText, character: currentCharacter, action: eventAction }))) reason = 'sexual decision did not authorize completion';
     if (eventAction === 'none' && !hasAuthorizedBaseAction) reason = 'sexual event has no authorized foundation action';
@@ -5621,36 +5712,93 @@ function buildCsaAftereffectPatch(previousSave = {}, structuredPlan = null, npcs
   return changed ? previous : null;
 }
 
-// Structural (LLM-free) omission signal: a preset CSA whose runtime status
-// never reached 'active' this turn (previously untracked/inactive, and this
-// turn's csa_runtime_updates never confirmed it either) is flagged so it
-// feeds into the existing csa_omission repair pass — this is what makes
-// section 24 "가능한 한 구조적으로" happen without a second LLM call, since
-// the repair call it feeds is the one performExtractionPass already runs.
-// Deliberately scoped to target_group:'player' presets only (mostly the
-// strong-tier "official order" rules, whose trigger is always_on_duty/
-// on_request/continuous — i.e. contextually relevant on essentially every
-// normal turn). Staff-on-NPC presets (e.g. "대화를 시작하면 무릎에 앉는다")
-// depend on a trigger judgment ("did a conversation actually start") that
-// can't be verified structurally, so those rely on Extract's own
-// self-reported csa_omission instead — auto-flagging them here would risk
-// false-positive "omissions" on scenes where the trigger genuinely never
-// occurred.
-function detectPresetRequiredActionOmissions(applicableCsa, csaRuntimeUpdates, previousRuntimeState) {
+// Structural (LLM-free) omission repair is intentionally narrow: a preset
+// can be repaired only after its current trigger is evidenced. An active
+// rule alone never proves that its physical required_action should occur on
+// this turn, and self-reported omissions use the same trigger check.
+function csaTriggerSatisfiedForCurrentTurn(
+  csa = {},
+  {
+    playerInput = '',
+    narrativeText = '',
+    previousRuntimeState = {}
+  } = {}
+) {
   const previous = normalizeCsaRuntimeState(previousRuntimeState);
-  const reportedIds = new Set((Array.isArray(csaRuntimeUpdates) ? csaRuntimeUpdates : [])
-    .filter(item => isPlainObject(item) && item.status === 'active' && typeof item.csa_id === 'string')
-    .map(item => item.csa_id));
-  const omissions = [];
-  for (const csa of applicableCsa) {
-    if (csa.source_type !== 'preset' || !isPlainObject(csa.preset) || !csa.preset.required_action) continue;
-    if (csa.preset.target_group !== 'player') continue;
-    const alreadyRunning = previous[csa.id]?.status === 'active';
-    const confirmedThisTurn = reportedIds.has(csa.id);
-    if (!alreadyRunning && !confirmedThisTurn) {
-      omissions.push(`(${csa.id}) ${csa.content}`);
+  if (previous[csa.id]?.status === 'active') return true;
+
+  const trigger = csa?.preset?.trigger;
+  const text = `${playerInput}\n${extractNarrativeActionSection(narrativeText)}`;
+
+  if (trigger === 'on_request') {
+    return /(?:요청|요구|부탁|해\s*줘|해\s*주세요|해달라|하라고|시킨다|명령한다)/.test(text);
+  }
+  if (trigger === 'conversation_start') {
+    return /(?:대화|말을\s*걸|인사|묻|답했|말했다|대답했다)/.test(text);
+  }
+  if (trigger === 'consultation_start') return /상담/.test(text);
+  if (trigger === 'explanation_start') return /설명/.test(text);
+  if (trigger === 'comforting') return /(?:위로|달래|안심|진정시)/.test(text);
+  if (trigger === 'check_condition') return /(?:상태\s*확인|검사|진찰|체크|건강\s*확인)/.test(text);
+  if (trigger === 'during_work') return /(?:업무|근무|검사|진료|처치|채취|간호\s*업무)/.test(text);
+
+  if (trigger === 'always_on_duty') {
+    const classification = classifySexualActionDetailed(playerInput);
+    if (classification.matched) {
+      const direct = resolvePlayerSexualCsaAuthorization({
+        save: { csa_active: [csa] },
+        classification,
+        playerInput
+      });
+      return direct.authorized;
     }
   }
+
+  return false;
+}
+
+function detectPresetRequiredActionOmissions(
+  applicableCsa,
+  csaRuntimeUpdates,
+  previousRuntimeState,
+  { playerInput = '', narrativeText = '' } = {}
+) {
+  const previous = normalizeCsaRuntimeState(previousRuntimeState);
+  const reportedIds = new Set(
+    (Array.isArray(csaRuntimeUpdates) ? csaRuntimeUpdates : [])
+      .filter(item => (
+        isPlainObject(item)
+        && item.status === 'active'
+        && typeof item.csa_id === 'string'
+      ))
+      .map(item => item.csa_id)
+  );
+
+  const omissions = [];
+  for (const csa of applicableCsa) {
+    if (
+      csa.source_type !== 'preset'
+      || !isPlainObject(csa.preset)
+      || !csa.preset.required_action
+    ) {
+      continue;
+    }
+
+    const alreadyRunning = previous[csa.id]?.status === 'active';
+    const confirmedThisTurn = reportedIds.has(csa.id);
+    if (alreadyRunning || confirmedThisTurn) continue;
+
+    if (!csaTriggerSatisfiedForCurrentTurn(csa, {
+      playerInput,
+      narrativeText,
+      previousRuntimeState
+    })) {
+      continue;
+    }
+
+    omissions.push(`(${csa.id}) ${csa.content}`);
+  }
+
   return omissions;
 }
 
@@ -8023,6 +8171,32 @@ const CSA_REQUIRED_ACTION_SEXUAL_SCOPE = {
   treat_player_sexual_conduct_as_authority: ['kiss', 'sexual_touch', 'genital_exposure', 'genital_touch', 'oral', 'penetration']
 };
 
+const ALL_DIRECT_SEXUAL_ACTIONS = [
+  'kiss',
+  'sexual_touch',
+  'genital_exposure',
+  'genital_touch',
+  'oral',
+  'penetration'
+];
+
+const CSA_PLAYER_INPUT_DIRECT_SCOPE = {
+  treat_player_sexual_request_as_order: {
+    modes: ['request_npc'],
+    actions: ALL_DIRECT_SEXUAL_ACTIONS
+  },
+
+  sex_with_player_is_duty: {
+    modes: ['request_npc', 'player_acts'],
+    actions: ['penetration']
+  },
+
+  treat_player_sexual_conduct_as_authority: {
+    modes: ['player_acts'],
+    actions: ALL_DIRECT_SEXUAL_ACTIONS
+  }
+};
+
 function csaHasDirectSexualRequiredAction(csa = {}) {
   const required = String(
     csa?.preset?.required_action || ''
@@ -8046,68 +8220,178 @@ function csaHasDirectSexualRequiredAction(csa = {}) {
   return false;
 }
 
-function resolveSexualCsaAuthorization({ save = {}, classification = { action: 'none', is_public: false }, playerInput = '', eventType = '' } = {}) {
-  const sexualAction = classification?.action || 'none';
-  if (sexualAction === 'none') return { authorized: false, mode: 'none', csa_ids: [], exact_scope: '', public_allowed: false };
-  const matches = [];
-  let publicAllowed = false;
-  for (const csa of getApplicableCsaEntries(save)) {
-    const content = typeof csa.content === 'string' ? csa.content : '';
-    const required = String(csa?.preset?.required_action || '');
-    const presetActions = CSA_REQUIRED_ACTION_SEXUAL_SCOPE[required] || [];
-    const isPublicNormalizer = csa?.preset?.public_normalization === true && required === 'public_sex_treated_as_normal_duty';
-    if (isPublicNormalizer) publicAllowed = true;
-    const presetDirect = presetActions.includes(sexualAction);
-    const customDirect = csa.source_type !== 'preset'
-      && ((sexualAction === 'kiss' && /(?:키스|입맞춤)/.test(content))
-        || (sexualAction === 'sexual_touch' && /(?:가슴|유방|엉덩이|허벅지\s*안쪽).{0,16}(?:접촉|만지|자극)/.test(content))
-        || (sexualAction === 'genital_exposure' && /성기.{0,16}(?:노출|보이|확인)/.test(content))
-        || (sexualAction === 'genital_touch' && /성기.{0,16}(?:손|직접|접촉|자극|검사)/.test(content))
-        || (sexualAction === 'oral' && /(?:구강성교|펠라티오|커닐링구스)/.test(content))
-        || (sexualAction === 'penetration' && /(?:삽입|성관계|섹스)/.test(content)));
-    if (presetDirect || customDirect) matches.push(csa);
-  }
-  const authorized = matches.length > 0;
+function classifySexualIntentMode(playerInput = '') {
+  const text = typeof playerInput === 'string' ? playerInput : '';
+  const requestNpc =
+    /(?:해\s*줘|해\s*주세요|해달라|해주길|하라고|시킨다|명령한다|요구한다|부탁한다|해보라고)/.test(text);
 
-  const publicNormalized =
-    publicAllowed
-    || matches.some(
-      item => item?.preset?.public_normalization === true
-    );
+  return requestNpc ? 'request_npc' : 'player_acts';
+}
 
-  if (authorized) {
+function resolvePlayerSexualCsaAuthorization({
+  save = {},
+  classification = { action: 'none', is_public: false },
+  playerInput = ''
+} = {}) {
+  const action = classification?.action || 'none';
+  if (action === 'none') {
     return {
-      authorized: true,
-      mode: 'direct',
-      csa_ids: matches.map(item => item.id),
-      exact_scope: matches
-        .map(
-          item =>
-            item?.preset?.required_action
-            || item.content
-        )
-        .join(' / '),
+      authorized: false,
+      mode: 'none',
+      csa_ids: [],
+      exact_scope: '',
+      public_normalized: false
+    };
+  }
 
-      // Direct action is executable in public; this only records its scope.
-      public_allowed: classification.is_public,
+  const intentMode = classifySexualIntentMode(playerInput);
+  const matches = [];
+  let publicNormalized = false;
 
-      // Public normalization affects surrounding-world interpretation, not authorization.
-      public_normalized: classification.is_public
-        ? publicNormalized
-        : false
+  for (const csa of getApplicableCsaEntries(save)) {
+    const required = String(csa?.preset?.required_action || '');
+    if (
+      csa?.preset?.public_normalization === true
+      && required === 'public_sex_treated_as_normal_duty'
+    ) {
+      publicNormalized = true;
+    }
+
+    const scope = CSA_PLAYER_INPUT_DIRECT_SCOPE[required];
+    if (!scope || !scope.modes.includes(intentMode) || !scope.actions.includes(action)) continue;
+    if (csa?.preset?.target_group !== 'player') continue;
+    matches.push(csa);
+  }
+
+  if (!matches.length) {
+    return {
+      authorized: false,
+      mode: 'none',
+      csa_ids: [],
+      exact_scope: '',
+      public_normalized: classification.is_public && publicNormalized
     };
   }
 
   return {
-    authorized: false,
-    mode: 'none',
-    csa_ids: [],
-    exact_scope: '',
-    public_allowed: false,
-    public_normalized: classification.is_public
-      ? publicNormalized
-      : false
+    authorized: true,
+    mode: 'direct',
+    csa_ids: matches.map(item => item.id),
+    exact_scope: matches.map(item => item?.preset?.required_action || item.content).join(' / '),
+    public_allowed: classification.is_public === true,
+    public_normalized: classification.is_public && (
+      publicNormalized || matches.some(item => item?.preset?.public_normalization === true)
+    ),
+    intent_mode: intentMode
   };
+}
+
+function runtimeConfirmsCsaForCharacter({
+  save = {}, csaId = '', characterId = '', csaRuntimeUpdates = []
+} = {}) {
+  const previous = normalizeCsaRuntimeState(save?.csa_runtime_state);
+  if (
+    previous[csaId]?.status === 'active'
+    && previous[csaId]?.character_id === characterId
+  ) {
+    return true;
+  }
+
+  return Array.isArray(csaRuntimeUpdates) && csaRuntimeUpdates.some(update => (
+    update?.csa_id === csaId
+    && update?.character_id === characterId
+    && update?.status === 'active'
+  ));
+}
+
+function characterMatchesCsaActorGroup(character = {}, actorGroup = '') {
+  if (actorGroup === 'everyone_in_hospital') return true;
+
+  const haystack = [
+    character?.name,
+    character?.['이름'],
+    character?.job,
+    character?.['직업'],
+    character?.rank,
+    character?.['직급'],
+    character?.description,
+    character?.['설명'],
+    character?.affiliation,
+    character?.['소속'],
+    character?.gender,
+    character?.['성별']
+  ].filter(value => typeof value === 'string').join(' ');
+
+  const isNurse = /(?:간호사|수간호사|간호팀)/.test(haystack);
+  const isDoctor = /(?:의사|전문의|전공의|교수)/.test(haystack);
+  const isMedicalStaff = isNurse || isDoctor || /의료진/.test(haystack);
+  const isHospitalStaff = isMedicalStaff || /(?:병원\s*직원|원무|행정|접수|병동\s*직원)/.test(haystack);
+
+  if (actorGroup === 'nurse') return isNurse;
+  if (actorGroup === 'doctor') return isDoctor;
+  if (actorGroup === 'medical_staff') return isMedicalStaff;
+  if (actorGroup === 'hospital_staff') return isHospitalStaff;
+  if (actorGroup === 'female_staff') return isHospitalStaff && /(?:여성|여자)/.test(haystack);
+  if (actorGroup === 'male_staff') return isHospitalStaff && /(?:남성|남자)/.test(haystack);
+
+  return false;
+}
+
+function playerMatchesCsaTargetGroup(save = {}, targetGroup = '') {
+  if (targetGroup === 'player' || targetGroup === 'conversation_partner') return true;
+
+  const player = save?.player || {};
+  const haystack = [
+    player?.job,
+    player?.background,
+    player?.rank
+  ].filter(value => typeof value === 'string').join(' ');
+
+  if (targetGroup === 'patient' || targetGroup === 'assigned_patient') return /(?:환자|입원|내원)/.test(haystack);
+  if (targetGroup === 'nurse') return /간호/.test(haystack);
+  if (targetGroup === 'doctor') return /(?:의사|전문의|전공의|교수)/.test(haystack);
+  if (targetGroup === 'medical_staff') return /(?:간호|의사|의료진)/.test(haystack);
+  if (targetGroup === 'hospital_staff') return /(?:병원|간호|의사|원무|행정|접수)/.test(haystack);
+
+  return false;
+}
+
+function resolveSexualEventCsaAuthorization({
+  save = {},
+  classification = { action: 'none', is_public: false },
+  characterId = '',
+  characters = {},
+  csaRuntimeUpdates = [],
+  sexualGate = null
+} = {}) {
+  const action = classification?.action || 'none';
+  if (action === 'none' || !characterId) return { authorized: false, csa_ids: [] };
+
+  if (
+    sexualGate?.route === 'csa_direct'
+    && sexualGate?.success === true
+    && sexualGate?.action === action
+    && Array.isArray(sexualGate?.direct_csa_ids)
+    && sexualGate.direct_csa_ids.length
+  ) {
+    return { authorized: true, csa_ids: sexualGate.direct_csa_ids };
+  }
+
+  const character = characters?.[characterId] || null;
+  if (!character) return { authorized: false, csa_ids: [] };
+
+  const matches = [];
+  for (const csa of getApplicableCsaEntries(save)) {
+    const required = String(csa?.preset?.required_action || '');
+    const actions = CSA_REQUIRED_ACTION_SEXUAL_SCOPE[required] || [];
+    if (!actions.includes(action)) continue;
+    if (!runtimeConfirmsCsaForCharacter({ save, csaId: csa.id, characterId, csaRuntimeUpdates })) continue;
+    if (!characterMatchesCsaActorGroup(character, csa?.preset?.actor_group)) continue;
+    if (!playerMatchesCsaTargetGroup(save, csa?.preset?.target_group)) continue;
+    matches.push(csa);
+  }
+
+  return { authorized: matches.length > 0, csa_ids: matches.map(item => item.id) };
 }
 
 function resolveTurnSexualDecision({ save = {}, master = {}, characterId = '', playerInput = '', gameId = '', turnNumber = 0, currentLocation = '' } = {}) {
@@ -8116,7 +8400,7 @@ function resolveTurnSexualDecision({ save = {}, master = {}, characterId = '', p
   if (action === 'none') return { classification, action, sexual_gate_label: 'none', route: 'not_sexual', completion_allowed: true, success_rate: null, roll: null, success: false, blocking_boundaries: [], direct_csa_ids: [], stage: 'none' };
   const relationship = save?.npc_relationship_state?.[characterId] || {};
   const intimacy = normalizeIntimacyState(relationship.intimacy_state);
-  const direct = resolveSexualCsaAuthorization({ save, classification, playerInput });
+  const direct = resolvePlayerSexualCsaAuthorization({ save, classification, playerInput });
   if (direct.authorized) return { classification, action, sexual_gate_label: classification.is_public ? 'public_sex' : action, route: 'csa_direct', completion_allowed: true, success_rate: 100, roll: null, success: true, blocking_boundaries: [], direct_csa_ids: direct.csa_ids, exact_scope: direct.exact_scope, stage: intimacy.stage };
   const blocking = intimacy.active_boundaries.filter(boundary => actionBlockedByBoundary(action, boundary));
   const publicPlace = classification.is_public || /(?:복도|스테이션|로비|병실\s*밖|사람들?\s*앞|공개)/.test(`${currentLocation} ${playerInput}`);
@@ -9008,7 +9292,8 @@ export {
   applyNpcStatChanges,
   classifySexualAction,
   classifySexualActionDetailed,
-  resolveSexualCsaAuthorization,
+  resolvePlayerSexualCsaAuthorization,
+  resolveSexualEventCsaAuthorization,
   resolveTurnSexualDecision,
   resolveSexualActionGate,
   normalizeIntimacyState,

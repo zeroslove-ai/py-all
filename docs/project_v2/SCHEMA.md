@@ -205,7 +205,7 @@ duration 옵션, `content_template`, `minimum_strength`, `required_action`
 }
 ```
 
-`status`는 `inactive|active|ended`. Extract의 `csa_runtime_updates`로만
+`status`는 `inactive|active|paused|ended`. `paused`는 규범 자체는 유효하지만 플레이어 요청 등으로 이번 턴만 물리적으로 중단된 상태이며(해제가 아니다), 대응하는 `csa_trigger_evaluations[].status`가 `temporarily_interrupted`(evidence 필수)일 때만 쓴다. Extract의 `csa_runtime_updates`로만
 갱신되며(현재 활성 프리셋 CSA + 현재 장면에 등장한 등록 NPC로 제한된
 검증, `buildCsaRuntimeStatePatch`), 프리셋이 비활성화·해제되거나
 `custom`으로 전환되면 Extract 입력과 무관하게 Worker가 즉시 `ended`로

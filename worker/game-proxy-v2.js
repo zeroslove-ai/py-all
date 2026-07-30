@@ -486,7 +486,7 @@ function readAppStrengthExamples(system, exampleKey, tier) {
     if (!text || seen.has(text)) continue;
     seen.add(text);
     result.push(text);
-    if (result.length >= 2) break;
+    if (result.length >= 5) break;
   }
   return result;
 }
@@ -1345,17 +1345,23 @@ async function handleStory(req, env) {
   const resolvedPlayerInput = structuredPlan?.ok ? structuredPlan.display_input : resolveMarkerChoiceInput(player_input, ctx?.save?.last_choices);
   const effectiveSave = buildStructuredEffectiveSave(ctx?.save, structuredPlan);
   const effectiveCtx = { ...ctx, save: effectiveSave, __structured_effective_save: true };
-  // Sexual intent is intentionally not classified before Story. Extract owns
-  // natural-language interpretation; the Worker later validates only its
-  // structured result against active CSA contracts and saved constraints.
-  // Choice metadata remains a nonsexual UI difficulty hint. Do not turn an
-  // unclassified free-text turn into a pre-Story success/failure contract.
-  const boldChoiceAttempt = null;
+  // Free-form player input is never classified before Story — Extract still
+  // owns all natural-language interpretation, and the Worker validates only
+  // the structured result against active CSA contracts and saved
+  // constraints. resolveBoldChoiceAttempt does not classify free text: it
+  // only fires when player_input is a byte-for-byte match against a choice
+  // the Worker itself already tagged 'bold' and rated at the end of the
+  // previous commit (buildChoiceMeta/calculateBoldChoiceRate) — so this is
+  // resolving an already-displayed probability, not guessing a new one.
+  // This is what keeps the shown success_rate% and the actual narrated
+  // outcome in sync (section 6 of the CSA-only bold-choice rebalance).
+  const boldChoiceAttempt = resolveBoldChoiceAttempt(effectiveSave, ctx?.master, player_input, game_id, currentTurn);
   if (boldChoiceAttempt) {
     console.log(JSON.stringify({
       event: 'bold_choice_resolved',
       turn: currentTurn + 1,
       choice_id: boldChoiceAttempt.choice_id,
+      severity: boldChoiceAttempt.severity,
       success_rate: boldChoiceAttempt.success_rate,
       roll: boldChoiceAttempt.roll,
       success: boldChoiceAttempt.success,
@@ -2691,7 +2697,7 @@ async function runCommitPipeline(env, { game_id, turn_number, content: rawConten
   // into state.context.save right after commit instead of showing stale
   // pre-commit values until the next full /api/context reload.
   const statePatch = {};
-  for (const key of ['player_progress', 'csa_active', 'world_state', 'player_location', 'npc_locations', 'npc_emotion', 'npc_stats', 'npc_stat_changes', 'npc_relationship_state', 'csa_aftereffect_state', 'last_character_id', 'last_npcs_present', 'last_choices', 'last_choice_meta']) {
+  for (const key of ['player_progress', 'csa_active', 'world_state', 'player_location', 'npc_locations', 'npc_emotion', 'npc_stats', 'npc_stat_changes', 'npc_relationship_state', 'csa_aftereffect_state', 'last_character_id', 'last_npcs_present', 'last_choices', 'last_choice_meta', 'player_inner_thought']) {
     if (key in patch) statePatch[key] = patch[key];
   }
 
@@ -3303,7 +3309,16 @@ function buildCsaPersistentSceneSection() {
 - 플레이어가 다른 대사를 입력해도 현재 자세를 유지할 수 있으면 그 상태를 기반으로 행동한다.
 - 대화 종료, 업무 이동, 명시적 자세 변경, 물리적 방해 등 실제 종료 이유가 있을 때만 상태를 종료한다.
 - 매 턴 규범의 설명을 반복하지 말고 현재 실행 상태의 다음 결과를 쓴다.
-- 규범을 한 문장으로 소비하고 바로 원래 상태로 복귀하지 않는다.`;
+- 규범을 한 문장으로 소비하고 바로 원래 상태로 복귀하지 않는다.
+
+[PLAYER AGENCY WITHIN AN ACTIVE NORM — HIGHEST PRIORITY]
+- 활성 상식은 NPC의 기본 행동과 사회적 기준을 정할 뿐, 플레이어 입력을 무효화하는 물리적 구속이나 절대 해제 불가능 상태가 아니다.
+- 플레이어가 내려오라고 요청하거나 다른 자세·장소·행동을 요청하면 Story는 그 요청을 실제 행동 후보로 반영한다. 플레이어 입력을 무시하고 매 턴 무조건 같은 자세를 유지시키지 않는다.
+- NPC는 그 요청에 자연스럽게 따르거나("알겠어요, 잠깐 내려갈게요"), 규정을 이유로 잠시 머뭇거리되 설득이나 추가 행동에는 응할 수 있다("대화 중에는 계속 앉아 있어야 하는데.. 꼭 내려가야 해요?").
+- 손을 씻거나 물건을 가져오는 등 짧은 이유로 잠시 벗어났다가, 그 용무가 끝나고 대화·상황이 이어지면 자연스럽게 원래 자세로 복귀할 수 있다. 규범 자체를 비활성화하지 않는다.
+- 대화나 상황이 사실상 끝났다면 자세를 종료하고 다음 장면으로 넘어간다.
+- 금지: "규칙이므로 어떤 상황에서도 절대로 내려올 수 없다"는 식의 서술, 플레이어의 명확한 이동 요청을 무시하는 것, 잠깐 벗어난 것만으로 다시 같은 문장 안에서 기계적으로 원위치시키는 것, 매 턴 처음부터 다시 자세를 잡는 장면 반복.
+- 규범이 이번 턴 일시적으로 중단됐다면(플레이어 요청·위생 처리 등 실제 근거가 있을 때만) Extract의 csa_trigger_evaluations에 해당 CSA를 status="temporarily_interrupted"로, csa_runtime_updates에 status="paused"로 반영할 수 있도록 그 중단 근거를 서사에 명확히 남긴다. 근거 없이 단순히 규범을 잊거나 생략하지 않는다.`;
 }
 
 function buildCsaPublicSceneSection() {
@@ -3770,7 +3785,12 @@ ${JSON.stringify({ rulebook_address: master.rulebook_address }, null, 2)}`;
   const playerStatusPanel = `
 
 [PLAYER STATUS PANEL CONTRACT — HIGHEST PRIORITY FOR SECTION 2]
-[2. 플레이어 상황판]은 플레이어 이름·현재 장소·플레이어의 1인칭 직접 독백(한국어 큰따옴표, 실질 40자 이상)·이번 턴의 실제 변화와 아래 Worker 확정 스냅샷을 포함한다. NPC 수치, 예상 수치 변화, 턴 번호, 사정·오르가즘 누적값은 출력하지 않는다.
+[2. 플레이어 상황판]은 플레이어 이름·현재 장소·아래 [PLAYER INNER THOUGHT FORMAT]을 따르는 속마음 한 줄·이번 턴의 실제 변화와 아래 Worker 확정 스냅샷을 포함한다. NPC 수치, 예상 수치 변화, 턴 번호, 사정·오르가즘 누적값은 출력하지 않는다.
+
+[PLAYER INNER THOUGHT FORMAT]
+- 형식은 정확히 "[플레이어 이름] 속마음: 내용" 한 줄이다. 큰따옴표나 다른 인용부호로 감싸지 않는다.
+- 내용은 플레이어의 실제 머릿속 구어체 반응이다. 분석문·관계 해설문·제3자 설명문이 아니다.
+- 이번 턴에서 실제로 벌어진 일에 대한 즉각적인 놀람·욕망·감상 중심으로, 한두 문장, 30~80자 권장이다.
 
 [PLAYER STATUS CSA SNAPSHOT — COPY EXACTLY]
 아래 블록은 Worker가 현재 저장 상태에서 계산한 확정 정보다. [2. 플레이어 상황판]에 내용·강도·범위·개수를 바꾸지 말고 그대로 출력한다. 요약, 생략, 각색, 추측, 내부 ID 추가를 하지 않는다.
@@ -3925,10 +3945,10 @@ function buildExtractPrompt(narrativeText, playerInput, ctx, images, turnCount, 
     : '';
   const presetCsaWithRequiredAction = applicableCsa.filter(item => item.source_type === 'preset' && isPlainObject(item.preset) && item.preset.required_action);
   const csaRuntimeExtractionSection = presetCsaWithRequiredAction.length
-    ? `\n\n[CSA RUNTIME STATE EXTRACTION]\n아래는 필수 행동이 정해진 프리셋 상식개변이다. 방금 서사에서 그 필수 행동이 실제로 시작되거나 계속되고 있으면 csa_runtime_updates에 status="active"로 넣고, 실제로 끝났으면 status="ended"로 넣는다. 발동 조건이 아직 충족되지 않았으면 아무것도 넣지 않는다(억지로 만들지 않는다).\n${presetCsaWithRequiredAction.map(item => `- id=${item.id}: ${item.content}`).join('\n')}`
+    ? `\n\n[CSA RUNTIME STATE EXTRACTION]\n아래는 필수 행동이 정해진 프리셋 상식개변이다. 방금 서사에서 그 필수 행동이 실제로 시작되거나 계속되고 있으면 csa_runtime_updates에 status="active"로 넣고, 실제로 끝났으면 status="ended"로 넣는다. 플레이어의 명시적 요청·위생 처리·물건을 가져오는 등 현재 턴에서만 잠시 행동을 중단했을 뿐 규범 자체는 여전히 유효하면 status="paused"로 넣는다(규범을 거부·해제한 것이 아니라 곧 이어질 수 있는 일시 중단). 발동 조건이 아직 충족되지 않았으면 아무것도 넣지 않는다(억지로 만들지 않는다).\n${presetCsaWithRequiredAction.map(item => `- id=${item.id}: ${item.content}`).join('\n')}`
     : '';
   const csaContractExtractionSection = true
-    ? `\n\n[STRUCTURED SEXUAL / CSA RESOLUTION — REQUIRED]\n자연어의 성적 의미, 행동 주체·대상·방향, 발동 여부는 아래 구조화 필드에서만 판단한다. 애매하면 none/blocked/unclear/absent/not_satisfied를 반환한다. 설명·질문·상담은 discussion이며, “해도 되나요?”는 consent가 아니다. 플레이어 발화를 NPC consent로 기록하지 않는다. consent evidence는 현재 NPC가 실제로 직접 말한 대사 본문만 쓴다. csa_direct는 실제 활성 CSA ID 하나를 참조하며 trigger가 충족됐으면 voluntary/blocked로 낮추지 않는다. CSA direct에는 consent.status=not_required다. completed=true는 Story에서 실제 완료된 경우만 가능하다.\n\n적용 CSA contract:\n${applicableCsa.map(item => `- id=${item.id}: ${JSON.stringify(buildCsaSemanticContract(item))}`).join('\n')}\n\n반드시 반환:\n"sexual_resolution":{"intent":"none|discussion|request_npc|player_acts|npc_initiates","action":"none|kiss|sexual_touch|genital_exposure|genital_touch|oral|penetration","direction":"none|npc_to_player|player_to_npc","actor_type":"none|player|npc","actor_character_id":null,"target_type":"none|player|npc","target_character_id":null,"route":"none|csa_direct|voluntary|blocked","completed":false,"csa_id":null,"trigger_status":"not_applicable|satisfied|continuing|not_satisfied","trigger_evidence":"짧은 근거","consent":{"status":"not_required|granted|denied|conditional|unclear|absent","speaker_character_id":null,"evidence":"NPC 직접 대사"},"completion_evidence":"Story 완료 근거"}\n"csa_trigger_evaluations":[{"csa_id":"활성 CSA ID","status":"satisfied|continuing|not_satisfied|ended","actor_character_id":null,"target_type":"player|npc|group|none","target_character_id":null,"direction":"npc_to_player|player_to_npc|none","action":"none|kiss|sexual_touch|genital_exposure|genital_touch|oral|penetration","evidence":"입력 또는 Story 근거"}]\n"relationship_events":[{"type":"romantic_interest_declared|boundary_added|boundary_removed|refusal","actor_character_id":"등록 NPC ID","target_type":"player","action":"none|kiss|sexual_touch|genital_exposure|genital_touch|oral|penetration","boundary":"선택적 경계 enum","evidence_source":"npc_dialogue|narrative","evidence":"Story 근거"}]\n모든 적용 CSA마다 csa_trigger_evaluations를 정확히 하나씩 반환한다.`
+    ? `\n\n[STRUCTURED SEXUAL / CSA RESOLUTION — REQUIRED]\n자연어의 성적 의미, 행동 주체·대상·방향, 발동 여부는 아래 구조화 필드에서만 판단한다. 애매하면 none/blocked/unclear/absent/not_satisfied를 반환한다. 설명·질문·상담은 discussion이며, “해도 되나요?”는 consent가 아니다. 플레이어 발화를 NPC consent로 기록하지 않는다. consent evidence는 현재 NPC가 실제로 직접 말한 대사 본문만 쓴다. csa_direct는 실제 활성 CSA ID 하나를 참조하며 trigger가 충족됐으면 voluntary/blocked로 낮추지 않는다. CSA direct에는 consent.status=not_required다. completed=true는 Story에서 실제 완료된 경우만 가능하다.\n\n적용 CSA contract:\n${applicableCsa.map(item => `- id=${item.id}: ${JSON.stringify(buildCsaSemanticContract(item))}`).join('\n')}\n\n반드시 반환:\n"sexual_resolution":{"intent":"none|discussion|request_npc|player_acts|npc_initiates","action":"none|kiss|sexual_touch|genital_exposure|genital_touch|oral|penetration","direction":"none|npc_to_player|player_to_npc","actor_type":"none|player|npc","actor_character_id":null,"target_type":"none|player|npc","target_character_id":null,"route":"none|csa_direct|voluntary|blocked","completed":false,"csa_id":null,"trigger_status":"not_applicable|satisfied|continuing|not_satisfied","trigger_evidence":"짧은 근거","consent":{"status":"not_required|granted|denied|conditional|unclear|absent","speaker_character_id":null,"evidence":"NPC 직접 대사"},"completion_evidence":"Story 완료 근거"}\n"csa_trigger_evaluations":[{"csa_id":"활성 CSA ID","status":"satisfied|continuing|temporarily_interrupted|not_satisfied|ended","actor_character_id":null,"target_type":"player|npc|group|none","target_character_id":null,"direction":"npc_to_player|player_to_npc|none","action":"none|kiss|sexual_touch|genital_exposure|genital_touch|oral|penetration","evidence":"입력 또는 Story 근거"}]\n"relationship_events":[{"type":"romantic_interest_declared|boundary_added|boundary_removed|refusal","actor_character_id":"등록 NPC ID","target_type":"player","action":"none|kiss|sexual_touch|genital_exposure|genital_touch|oral|penetration","boundary":"선택적 경계 enum","evidence_source":"npc_dialogue|narrative","evidence":"Story 근거"}]\n모든 적용 CSA마다 csa_trigger_evaluations를 정확히 하나씩 반환한다.\ntemporarily_interrupted는 규범 자체는 여전히 유효하지만 플레이어의 명시적 요청이나 위생 처리 등으로 이번 턴에만 그 자세·행동이 잠시 중단된 경우에만 쓰며, evidence에 player_input 또는 방금 Story 안의 중단 근거 문구를 반드시 넣는다. 단순히 모델이 규범을 언급하지 않았거나 잊었을 뿐이라면 not_satisfied나 ended가 아니라 여전히 satisfied/continuing으로 판단하고 필수 행동을 실행해야 한다 — temporarily_interrupted를 규범을 피하는 용도로 남발하지 않는다.`
     : '';
   const hasCsaTransaction = structuredPlan?.canonical_action?.type === 'app_transaction'
     && structuredPlan.canonical_action.operations?.some(operation => operation?.domain === 'csa') === true;
@@ -4081,6 +4101,7 @@ ${JSON.stringify(imageCatalog)}
   "npc_intimacy_state_patch": null,
   "npc_scene_state_patch": {"heroine1": {"clothing": {"uniform_top": "worn|removed|open|unknown", "uniform_bottom": "worn|removed|open|unknown", "underwear_top": "worn|removed|unknown", "underwear_bottom": "worn|removed|unknown"}, "posture": "standing|sitting|kneeling|lying|unknown", "current_action": "실제 현재 행동, 없으면 생략"}},
   "player_scene_state_patch": {"posture": "standing|sitting|kneeling|lying_supine|lying_prone|side_lying|straddling|bent_forward|leaning|walking|crouching|carrying|unknown", "position_label": "최종 Story에서 실제 완료된 플레이어의 현재 자세/방향, 없으면 생략"},
+  "player_inner_thought": "[2. 플레이어 상황판]에 실제로 적은 '[플레이어 이름] 속마음: ...' 줄에서 '속마음:' 뒤의 본문만 그대로 옮긴다. 따옴표 없이, 없으면 빈 문자열",
   "turn_summary": "이번 턴에서 변한 핵심 사실 1~3문장",
   "is_sexual": false,
   "choices": ["서사의 선택지를 그대로 옮겨라"],
@@ -4573,6 +4594,7 @@ function buildSavePatch(extract, enginePatch = {}, summaryPlan = null, previousS
     if (sceneState) patch.npc_scene_state = sceneState;
     const playerSceneState = buildPlayerSceneStatePatch(previousSave, extract.player_scene_state_patch, turnNumber);
     if (playerSceneState) patch.player_scene_state = playerSceneState;
+    if (extract.player_inner_thought) patch.player_inner_thought = extract.player_inner_thought;
     const registeredPresent = [...new Set((Array.isArray(extract.npcs_present) ? extract.npcs_present : []).filter(id => typeof id === 'string' && id && id !== 'narrator'))];
     patch.last_npcs_present = registeredPresent;
     const locationLabel = mergedWorldState.location_label || previousSave?.player_location || previousSave?.world_state?.location_label || '';
@@ -4805,7 +4827,7 @@ const STRUCTURED_SEXUAL_INTENTS = new Set(['none', 'discussion', 'request_npc', 
 const STRUCTURED_SEXUAL_DIRECTIONS = new Set(['none', 'npc_to_player', 'player_to_npc']);
 const STRUCTURED_SEXUAL_ROUTES = new Set(['none', 'csa_direct', 'voluntary', 'blocked']);
 const STRUCTURED_CONSENT_STATUSES = new Set(['not_required', 'granted', 'denied', 'conditional', 'unclear', 'absent']);
-const STRUCTURED_TRIGGER_STATUSES = new Set(['satisfied', 'continuing', 'not_satisfied', 'ended']);
+const STRUCTURED_TRIGGER_STATUSES = new Set(['satisfied', 'continuing', 'temporarily_interrupted', 'not_satisfied', 'ended']);
 const CSA_CONTRACT_ACTOR_GROUPS = new Set(['nurse', 'doctor', 'medical_staff', 'hospital_staff', 'everyone_in_hospital', 'player', 'unknown']);
 const CSA_CONTRACT_TARGET_GROUPS = new Set(['player', 'patient', 'assigned_patient', 'conversation_partner', 'hospital_staff', 'unknown']);
 
@@ -4941,7 +4963,7 @@ function normalizeCsaRuntimeUpdates(value = []) {
   return (Array.isArray(value) ? value : [])
     .filter(item => isPlainObject(item) && typeof item.csa_id === 'string' && item.csa_id.trim()
       && typeof item.character_id === 'string' && item.character_id.trim()
-      && ['active', 'ended'].includes(item.status))
+      && ['active', 'paused', 'ended'].includes(item.status))
     .slice(0, 6)
     .map(item => ({
       csa_id: item.csa_id.trim(),
@@ -5056,9 +5078,26 @@ function auditStructuredCsaExecution({ applicableCsa = [], triggerEvaluations = 
   for (const csa of (Array.isArray(applicableCsa) ? applicableCsa : [])) {
     const contract = buildCsaSemanticContract(csa);
     const evaluation = byId.get(csa.id);
-    if (!evaluation || !['satisfied', 'continuing'].includes(evaluation.status)) continue;
+    if (!evaluation || !['satisfied', 'continuing', 'temporarily_interrupted'].includes(evaluation.status)) continue;
     if (contract.confidence !== 'exact') {
       issues.push({ code: 'CSA_CONTRACT_NOT_EXACT', csa_id: csa.id });
+      continue;
+    }
+    // A player-requested/physically-necessary pause (e.g. briefly stepping
+    // off a lap to wash hands) is not an omission: the norm stays in force,
+    // it's just not being physically executed this exact instant. Requires
+    // evidence in player_input or the final narrative so the model can't use
+    // this status to silently skip a rule it simply forgot.
+    if (evaluation.status === 'temporarily_interrupted') {
+      if (!evidenceExists(evaluation.evidence, playerInput, narrativeText)) {
+        issues.push({ code: 'CSA_INTERRUPTION_EVIDENCE_MISSING', csa_id: csa.id });
+        continue;
+      }
+      const pausedEntry = (Array.isArray(csaRuntimeUpdates) ? csaRuntimeUpdates : [])
+        .find(item => item?.csa_id === csa.id && item?.status === 'paused');
+      if (pausedEntry && pausedEntry.character_id !== characterId && contract.sexual_authorization !== true) {
+        issues.push({ code: 'CSA_RUNTIME_NOT_VERIFIED', csa_id: csa.id });
+      }
       continue;
     }
     if (contract.sexual_authorization === true) {
@@ -5140,7 +5179,7 @@ function normalizeExtract(extract) {
     ? normalized.csa_runtime_updates
         .filter(item => isPlainObject(item) && typeof item.csa_id === 'string' && item.csa_id.trim()
           && typeof item.character_id === 'string' && item.character_id.trim()
-          && ['active', 'ended'].includes(item.status))
+          && ['active', 'paused', 'ended'].includes(item.status))
         .slice(0, 6)
         .map(item => ({
           csa_id: item.csa_id.trim(),
@@ -5163,6 +5202,9 @@ function normalizeExtract(extract) {
   normalized.relationship_memory_patch = normalizeRelationshipMemoryPatchExtract(normalized.relationship_memory_patch);
   normalized.npc_scene_state_patch = normalizeNpcSceneStatePatch(normalized.npc_scene_state_patch);
   normalized.player_scene_state_patch = normalizePlayerSceneStatePatch(normalized.player_scene_state_patch);
+  normalized.player_inner_thought = typeof normalized.player_inner_thought === 'string'
+    ? normalized.player_inner_thought.replace(/^[“"']+|[”"']+$/g, '').trim().slice(0, 120)
+    : '';
   if (!isPlainObject(normalized.first_encounter_stats)) normalized.first_encounter_stats = null;
   if (!isPlainObject(normalized.world_state_patch)) normalized.world_state_patch = null;
   delete normalized.image_reasoning;
@@ -6216,7 +6258,7 @@ function getApplicableCsaEntries(save, activeCsa = getActiveCsaEntries(save)) {
 // ─────────────────────────────────────────────
 
 function normalizeCsaRuntimeStateEntry(entry = {}) {
-  const status = ['inactive', 'active', 'ended'].includes(entry?.status) ? entry.status : 'inactive';
+  const status = ['inactive', 'active', 'paused', 'ended'].includes(entry?.status) ? entry.status : 'inactive';
   return {
     status,
     character_id: typeof entry?.character_id === 'string' && entry.character_id ? entry.character_id : null,
@@ -6266,7 +6308,7 @@ function buildCsaRuntimeStatePatch(previousSave, csaRuntimeUpdates, activeCsa, n
     if (!csa || csa.source_type !== 'preset') continue;
     const characterId = typeof update.character_id === 'string' ? update.character_id : '';
     if (!characterId || !presentIds.has(characterId)) continue;
-    const status = update.status === 'ended' ? 'ended' : (update.status === 'active' ? 'active' : null);
+    const status = ['active', 'paused', 'ended'].includes(update.status) ? update.status : null;
     if (!status) continue;
     const existing = previous[csaId];
     next[csaId] = {
@@ -9228,46 +9270,96 @@ function deprecatedResolveTurnSexualDecision({ save = {}, master = {}, character
 
 function deprecatedResolveSexualActionGate(options = {}) { return deprecatedResolveTurnSexualDecision(options); }
 
+// Section 4/5 rebalance: severity is judged from the choice's actual sexual
+// risk (deterministic string classification + structured intimacy/CSA
+// state), never from its position in the list. A choice with no sexual
+// action detected is 'none' — plain progress/relationship/free actions are
+// always attempted, never gambled. A choice inside an active CSA's exact
+// direct scope also bypasses the roll entirely (the CSA-first contract
+// already guarantees it at 100%; see [CSA DIRECT EXECUTION PRECEDENCE]).
+const CHOICE_RISK_SUCCESS_RANGE = {
+  mild: [65, 85],
+  high: [35, 60],
+  extreme: [10, 30]
+};
+
+function classifyChoiceRiskSeverity(choice = '', save = {}) {
+  const text = typeof choice === 'string' ? choice : '';
+  const classification = deprecatedClassifySexualActionDetailed(text);
+  const csaDirectRelevance = resolveCsaDirectRelevance(save, text);
+  if (classification.action === 'none' || classification.intent === 'discussion') {
+    return { severity: 'none', action: classification.action, is_public: classification.is_public, csa_direct_relevance: csaDirectRelevance };
+  }
+  if (csaDirectRelevance === 'direct') {
+    return { severity: 'none', action: classification.action, is_public: classification.is_public, csa_direct_relevance: csaDirectRelevance };
+  }
+  const characterId = save?.last_character_id;
+  const relationship = save?.npc_relationship_state?.[characterId] || {};
+  const intimacy = normalizeIntimacyState(relationship.intimacy_state);
+  const blockingBoundaries = intimacy.active_boundaries.filter(boundary => actionBlockedByBoundary(classification.action, boundary));
+  const refusal = intimacy.recent_refusal;
+  const blockedByRefusal = Boolean(refusal && SEXUAL_ACTION_RANK[classification.action] >= SEXUAL_ACTION_RANK[refusal.action]);
+  if (blockingBoundaries.length || blockedByRefusal) {
+    return {
+      severity: 'blocked', action: classification.action, is_public: classification.is_public,
+      csa_direct_relevance: csaDirectRelevance, stage: intimacy.stage,
+      blocking_boundaries: [...new Set(blockedByRefusal ? [...blockingBoundaries, 'recent_refusal'] : blockingBoundaries)]
+    };
+  }
+  const required = { kiss: 'romantic_interest', sexual_touch: 'kissed', genital_exposure: 'kissed', genital_touch: 'sexual_touch', oral: 'sexual_touch', penetration: 'sexual_touch' }[classification.action] || 'intercourse';
+  const gap = INTIMACY_STAGE_RANK[required] - INTIMACY_STAGE_RANK[intimacy.stage];
+  const severity = gap <= 0 ? 'mild' : gap === 1 ? 'high' : 'extreme';
+  return { severity, action: classification.action, is_public: classification.is_public, csa_direct_relevance: csaDirectRelevance, stage: intimacy.stage };
+}
+
 function calculateBoldChoiceRate(save = {}, master = {}, choice = '') {
   const characterId = save?.last_character_id;
   const stats = save?.npc_stats?.[characterId] || {};
   const affinity = Number(stats['호감도']) || 0;
   const acceptance = Number(stats['상식수용도']) || 0;
-  const resistance = resolveCsaResistance(master?.characters?.[characterId] || {});
-  const csaDirectRelevance = resolveCsaDirectRelevance(save, choice);
-  let rate = 25;
+  const risk = classifyChoiceRiskSeverity(choice, save);
+  if (risk.severity === 'none') return null;
+  if (risk.severity === 'blocked') {
+    return {
+      severity: 'blocked', success_rate: 0, affinity, csa_direct_relevance: risk.csa_direct_relevance,
+      acceptance_bonus_applied: false, sexual_action: risk.action, sexual_is_public: risk.is_public === true,
+      sexual_gate: 'blocked', blocking_boundaries: risk.blocking_boundaries || [], direct_csa_ids: [],
+      intimacy_stage: risk.stage || null
+    };
+  }
+  const [min, max] = CHOICE_RISK_SUCCESS_RANGE[risk.severity];
+  const mid = (min + max) / 2;
+  let rate = mid;
   rate += affinity >= 80 ? 15 : affinity >= 60 ? 10 : affinity >= 40 ? 5 : affinity >= 20 ? -5 : -15;
-  rate += csaDirectRelevance === 'direct' ? 15 : csaDirectRelevance === 'partial' ? 5 : 0;
-  const acceptanceBonus = csaDirectRelevance !== 'none'
-    ? (acceptance >= 70 ? 10 : acceptance >= 40 ? 5 : 0)
-    : 0;
+  const acceptanceBonus = risk.csa_direct_relevance === 'partial' ? (acceptance >= 40 ? 5 : 0) : 0;
   rate += acceptanceBonus;
-  rate += resistance >= 90 ? -15 : resistance >= 70 ? -10 : 0;
   if (/(?:불법|위조|조작|퇴원\s*(?:기록|절차)|기록\s*변경)/.test(choice)) rate -= 10;
   if (/(?:업무\s*(?:방해|중단)|진료\s*(?:방해|중단))/.test(choice)) rate -= 5;
   const currentEmotion = save?.npc_emotion?.[characterId];
   if (/(?:그만|싫|하지\s*마|거절)/.test(`${currentEmotion?.surface || ''} ${currentEmotion?.inner || ''}`)) rate -= 10;
   return {
-    success_rate: Math.max(10, Math.min(70, Math.round(rate / 5) * 5)),
+    severity: risk.severity,
+    success_rate: Math.max(min, Math.min(max, Math.round(rate / 5) * 5)),
     affinity,
-    csa_direct_relevance: csaDirectRelevance,
+    csa_direct_relevance: risk.csa_direct_relevance,
     acceptance_bonus_applied: acceptanceBonus > 0,
-    sexual_action: 'none',
-    sexual_is_public: false,
-    sexual_gate: 'unresolved',
+    sexual_action: risk.action,
+    sexual_is_public: risk.is_public === true,
+    sexual_gate: 'voluntary_eligible',
     blocking_boundaries: [],
     direct_csa_ids: [],
-    intimacy_stage: null
+    intimacy_stage: risk.stage || null
   };
 }
 
 function buildChoiceMeta(choices = [], save = {}, master = {}, turnNumber = 0, { allowBold = true } = {}) {
   return choices.map((choice, index) => {
-    const bold = allowBold && index === 3;
-    const details = bold ? calculateBoldChoiceRate(save, master, choice) : null;
+    const details = allowBold ? calculateBoldChoiceRate(save, master, choice) : null;
+    const bold = Boolean(details);
     return {
       choice_id: `turn_${turnNumber}_choice_${index + 1}`,
-      kind: bold ? 'bold' : ['safe', 'relationship', 'progress'][index] || 'safe',
+      kind: bold ? 'bold' : ['free_action', 'relationship', 'progress'][index % 3],
+      severity: details?.severity ?? 'none',
       success_rate: details?.success_rate ?? null,
       affinity: details?.affinity ?? null,
       csa_direct_relevance: details?.csa_direct_relevance ?? 'none',
@@ -9295,9 +9387,10 @@ function resolveBoldChoiceAttempt(save = {}, master = {}, playerInput = '', game
   return {
     choice_id: candidate.choice_id,
     kind: 'bold',
+    severity: candidate.severity || 'mild',
     success_rate: Number(candidate.success_rate),
     roll,
-    success: roll <= Number(candidate.success_rate),
+    success: candidate.severity !== 'blocked' && roll <= Number(candidate.success_rate),
     affinity: Number(candidate.affinity) || 0,
     csa_direct_relevance: candidate.csa_direct_relevance || 'none',
     acceptance_bonus_applied: candidate.acceptance_bonus_applied === true,
@@ -9401,6 +9494,13 @@ function buildCsaNarrativeIntegrityRepairPrompt({ narrativeText, applicableCsa, 
   };
   return `너는 게임 서사의 [1. 서사 및 행동] 섹션과 구조화 필드(npc_emotion, turn_summary) 중 문제가 있는 부분만 최소한으로 보정하는 역할이다. 전체 이야기를 새로 쓰지 않는다. 사건 순서, 등장인물, 대사 내용, 플레이어 행동을 최대한 유지한다. NPC가 상식개변·암시·어플·시스템에 의해 변경됐다는 사실 자체를 인식하지 않게 하고, 현재 상식을 원래부터 당연한 관행으로 받아들이게 한다. 누락된 강제 행동이 있으면 [1] 섹션 안에서 자연스럽게 실행되도록 삽입한다. [2. 플레이어 상황판]과 [3. 선택지]는 절대 반환하거나 언급하지 않는다. 문제없는 필드는 빈 문자열로 반환하거나 키를 생략한다. 마크다운 코드펜스와 설명문 없이 JSON 객체만 출력한다.
 
+[PLAYER AGENCY DURING CSA REPAIR — HIGHEST PRIORITY]
+- player_input에서 명시적으로 요청한 자세 변경·이동·중단·정리 행동을 삭제하지 않는다.
+- 활성 상식을 복원한다는 이유로 방금 서사에 이미 반영된 플레이어 요청을 무효화하지 않는다.
+- 플레이어 요청으로 규칙 행동이 이번 턴 일시적으로 중단된 것이 명확하면, 그 CSA를 강제로 다시 수행시키지 말고 csa_trigger_evaluations에 status="temporarily_interrupted"(evidence에 중단 근거 포함), csa_runtime_updates에 status="paused"로 구조화해 반환한다.
+- 상식개변은 사회 규범이지 플레이어 조작을 금지하는 물리적 구속이 아니다. 규칙의 장기 지속성과 현재 턴의 일시 중단을 구분한다.
+- [1] 섹션을 고칠 때 이미 생성된 정상적인 플레이어 행동(예: 요청에 따라 자세에서 벗어남)을 반대로 다시 쓰지 않는다 — Story와 structured field를 일치시키되 삭제·역전시키지 않는다.
+
 [적용 중인 상식개변 — 강제 규칙]
 ${csaLines}
 
@@ -9424,7 +9524,8 @@ ${JSON.stringify(integrityIssues)}
 
 - 기존 structured field는 수정이 필요 없으면 그대로 반환한다.
 - 누락 행동을 넣으면 resolution, trigger evaluation, runtime update, sexual event를 수정 Story와 일치시킨다.
-- CSA 범위 밖 행동을 추가하지 않으며 csa_id/action/direction은 contract와 정확히 맞춘다.`;
+- CSA 범위 밖 행동을 추가하지 않으며 csa_id/action/direction은 contract와 정확히 맞춘다.
+- 플레이어 요청에 따른 정당한 일시 중단이면 강제로 재수행시키지 말고 csa_trigger_evaluations status="temporarily_interrupted"(evidence 필수) + csa_runtime_updates status="paused"로 반환한다.`;
 }
 
 async function repairCsaNarrativeIntegrity(env, { narrativeText, applicableCsa, omissions, violations, integrityIssues = [], extract = {} }) {

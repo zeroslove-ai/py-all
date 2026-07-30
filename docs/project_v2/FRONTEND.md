@@ -144,6 +144,12 @@ const state = {
 - 선택지 버튼 클릭은 `submitChoice(text, { source, choice_index, choice_text })`를 통해 `pending.playerAction`으로 Commit까지 유지되고, `api.commitTurn`이 `player_action`으로 Worker에 전달한다. 최종 source 판정·검증은 Worker가 한다.
 - 게임 초기화(reset) 성공 시 `playHistory.onGameReset()`이 기록 캐시를 비운다.
 
+## 사이드바 플레이어 정보/속마음 + 과감 선택지 등급 (CSA-only 리밸런스)
+
+- `pages/sidebar.js`의 우측 패널 순서: 1) 플레이어 정보(`#player-info`, `save.player`+`save.world_state.location_label`/`time_label`) 2) NPC 이미지 3) NPC 상태(스탯) 4) 마인드 모니터 5) 관계 기록 6) 플레이어 속마음(`#player-inner-thought`, `save.player_inner_thought`).
+- `save.player_inner_thought`는 새 Extract 필드(`player_inner_thought`)에서 온 JSONB 전용 값이다(DB column/migration 없음). Worker가 `[플레이어 이름] 속마음: ...` 형식으로 Story [2] 섹션에 쓴 값을 그대로 옮긴 것이며, `/api/commit-turn`의 `state_patch` 화이트리스트에 포함되어 커밋 직후 바로 갱신된다.
+- `last_choice_meta`의 각 항목에 `severity`(`none|mild|high|extreme|blocked`)가 추가됐다. `kind:'bold'`는 더 이상 4번째 선택지 고정이 아니라 실제 위험도가 mild 이상일 때만 붙는다 — 프론트는 기존처럼 `kind==='bold' && Number.isFinite(success_rate)`일 때만 ⚡ 배지를 표시하면 되고, `severity` 자체를 렌더링할 필요는 없다(로그/서버 판정용).
+
 ## 선택지 표시/전달 분리 (2026-07-25 핫픽스)
 
 - Story 본문이 생성한 `[3. 선택지]` 블록은 화면에서 제거하지 않고 그대로 표시한다 (`removeTrailingChoiceBlock` 호출 삭제).

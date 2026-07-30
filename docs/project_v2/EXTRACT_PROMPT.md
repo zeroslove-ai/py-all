@@ -34,7 +34,7 @@ Extract는 자연어 의미를 `sexual_resolution`으로 구조화한다. `csa_d
 NPC의 직접 대사 consent가 모두 있을 때만 반환한다. 애매한 설명·질문·상담은
 `discussion`/`none`으로 둔다.
 
-모든 현재 적용 CSA는 `csa_trigger_evaluations`에 정확히 하나씩 기록한다.
+모든 현재 적용 CSA는 `csa_trigger_evaluations`에 정확히 하나씩 기록한다. status는 `satisfied|continuing|temporarily_interrupted|not_satisfied|ended` 중 하나이며, `temporarily_interrupted`는 규범은 유효하지만 플레이어 요청 등으로 이번 턴만 중단된 경우에만 evidence와 함께 쓴다(`csa_runtime_updates`의 대응 항목은 `status="paused"`). 규범을 단순히 잊었거나 언급하지 않은 경우에는 쓸 수 없다.
 관계 변화는 `relationship_events`의 `romantic_interest_declared`,
 `boundary_added`, `boundary_removed`, `refusal`만 사용한다. Worker는 이 구조와
 Story evidence를 검증하며 한국어 긍정 정규식으로 consent나 intent를 재해석하지 않는다.

@@ -1091,6 +1091,8 @@
         }
         ui.clearUncommittedNarrativeBadges();
         saveFeedback([]);
+        sidebar.updatePlayerInfo(state.context?.save);
+        sidebar.updatePlayerInnerThought(state.context?.save?.player_inner_thought);
 
         // Screen updates (narrative text/choices/sidebar/media/scroll) wait
         // for the typing animation to actually finish — everything above

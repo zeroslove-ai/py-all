@@ -9,10 +9,11 @@ const sidebar = {
   init() {
     const panel = document.querySelector('.side-panel');
     panel.innerHTML = `
+      <section class="panel-section"><div class="panel-title">플레이어 정보</div><div class="info-list" id="player-info">-</div></section>
       <section class="panel-section"><img class="character-img hidden" id="character-img" alt="현재 캐릭터"></section>
       <section class="panel-section"><div class="panel-title" id="character-info-title">캐릭터 기본정보</div><div class="info-list" id="character-info"></div></section>
-      <section class="panel-section"><div class="panel-title">마인드 모니터</div><div class="mind-monitor" id="mind-monitor"><div class="mind-item"><b>표면의식</b><blockquote id="mind-surface">-</blockquote></div><div class="mind-item"><b>잠재의식</b><blockquote id="mind-inner">-</blockquote></div><div class="mind-item"><b>신체적·행동적 반응</b><p id="mind-physical">-</p></div></div></section>
-      <section class="panel-section"><div class="panel-title" id="npc-status-title">NPC 상태</div><div class="npc-status" id="npc-status"></div></section>`;
+      <section class="panel-section"><div class="panel-title" id="npc-status-title">NPC 상태</div><div class="npc-status" id="npc-status"></div></section>
+      <section class="panel-section"><div class="panel-title">마인드 모니터</div><div class="mind-monitor" id="mind-monitor"><div class="mind-item"><b>표면의식</b><blockquote id="mind-surface">-</blockquote></div><div class="mind-item"><b>잠재의식</b><blockquote id="mind-inner">-</blockquote></div><div class="mind-item"><b>신체적·행동적 반응</b><p id="mind-physical">-</p></div></div></section>`;
     ui.init();
     // H3-A item 8: the audio element lives outside .side-panel now, but
     // re-resolve/re-bind it here anyway after every panel re-render so
@@ -22,6 +23,10 @@ const sidebar = {
     relationship.className = 'panel-section';
     relationship.innerHTML = '<div class="panel-title" id="npc-relationship-title">관계 기록</div><div id="npc-relationship" class="relationship-inline"></div>';
     panel.appendChild(relationship);
+    const innerThought = document.createElement('section');
+    innerThought.className = 'panel-section';
+    innerThought.innerHTML = '<div class="panel-title">플레이어 속마음</div><div id="player-inner-thought" class="player-inner-thought">-</div>';
+    panel.appendChild(innerThought);
     const actions = document.createElement('section');
     actions.className = 'side-panel-footer';
     actions.innerHTML = '<div class="side-action-row"><button id="app-info-side-button" class="side-action-btn" type="button">📱 상식개변 앱</button><button id="resume-game-button" class="side-action-btn" type="button">▶ 플레이 재개</button></div>'
@@ -38,6 +43,42 @@ const sidebar = {
     const save = context?.save || {};
     const characterId = save.last_character_id;
     if (characterId) this.updateCharacter(characterId, context);
+    this.updatePlayerInfo(save);
+    this.updatePlayerInnerThought(save.player_inner_thought);
+  },
+
+  updatePlayerInfo(save = {}) {
+    const root = document.getElementById('player-info');
+    if (!root) return;
+    const player = save?.player || {};
+    const worldState = save?.world_state || {};
+    root.replaceChildren();
+    const appendLine = text => {
+      if (!text) return;
+      const line = document.createElement('div');
+      line.textContent = text;
+      root.appendChild(line);
+    };
+    const identity = [player.name, this.withUnit(player.age, '세'), player.job || player.background]
+      .filter(value => typeof value === 'string' && value.trim())
+      .join(' · ');
+    appendLine(identity);
+    const metrics = [
+      this.withUnit(player.height_cm, 'cm'),
+      this.withUnit(player.weight_kg, 'kg'),
+      this.withUnit(player.penis_length_cm, 'cm')
+    ].filter(Boolean).join(' · ');
+    appendLine(metrics);
+    const location = worldState.location_label || save.player_location;
+    appendLine(location ? `📍 ${location}` : '');
+    appendLine(worldState.time_label ? `🕒 ${worldState.time_label}` : '');
+    if (!root.childNodes.length) root.textContent = '-';
+  },
+
+  updatePlayerInnerThought(text) {
+    const root = document.getElementById('player-inner-thought');
+    if (!root) return;
+    root.textContent = typeof text === 'string' && text.trim() ? text.trim() : '-';
   },
 
   updateCharacter(characterId, context = state.context) {

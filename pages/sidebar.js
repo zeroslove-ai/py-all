@@ -43,14 +43,19 @@ const sidebar = {
     actions.querySelector('#feedback-side-button').addEventListener('click', () => window.showFeedbackModal?.());
     panel.appendChild(actions);
     this.renderStats({});
-    this.setSetupVisibility(false);
   },
 
+  // Panel sections (player card, NPC image, NPC info/status, mind monitor,
+  // relationship record) stay visible through setup — only their inner
+  // content is empty/placeholder until a character is met. Hiding the whole
+  // section previously took the mind monitor, image, and status areas away
+  // with it even after setup completed and a character existed.
   updateContext(context) {
     const save = context?.save || {};
-    const setupComplete = save?.player_setup?.status === 'complete';
-    this.setSetupVisibility(setupComplete);
-    if (!setupComplete) {
+    const characterId = save.last_character_id;
+    if (characterId) {
+      this.updateCharacter(characterId, context);
+    } else {
       this.activeCharacter = null;
       this.activeCharacterId = null;
       document.getElementById('character-img')?.classList.add('hidden');
@@ -58,10 +63,7 @@ const sidebar = {
       document.getElementById('npc-status')?.replaceChildren();
       document.getElementById('npc-relationship')?.replaceChildren();
       this.updateMind({});
-      return;
     }
-    const characterId = save.last_character_id;
-    if (characterId) this.updateCharacter(characterId, context);
     this.updatePlayerInfo(save);
     this.updatePlayerInnerThought(save.player_inner_thought, save?.player?.name);
   },
@@ -130,12 +132,6 @@ const sidebar = {
     const name = typeof playerName === 'string' ? playerName.trim() : '';
     const alreadyPrefixed = /속마음\s*:/.test(value.slice(0, 40));
     root.textContent = alreadyPrefixed || !name ? value : `${name} 속마음: ${value}`;
-  },
-
-  setSetupVisibility(visible) {
-    document.querySelectorAll('.side-panel > .panel-section').forEach(section => {
-      section.hidden = !visible;
-    });
   },
 
   updateCharacter(characterId, context = state.context) {

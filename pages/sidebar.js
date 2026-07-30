@@ -9,7 +9,12 @@ const sidebar = {
   init() {
     const panel = document.querySelector('.side-panel');
     panel.innerHTML = `
-      <section class="panel-section"><div class="panel-title">플레이어 정보</div><div class="info-list" id="player-info">-</div></section>
+      <section class="panel-section player-card" id="player-info-section">
+        <div class="player-card-name" id="player-info-identity">-</div>
+        <div class="player-card-sub" id="player-info-status"></div>
+        <div class="player-card-metrics" id="player-info-metrics"></div>
+        <div class="player-card-world" id="player-info-world"></div>
+      </section>
       <section class="panel-section"><img class="character-img hidden" id="character-img" alt="현재 캐릭터"></section>
       <section class="panel-section"><div class="panel-title" id="character-info-title">캐릭터 기본정보</div><div class="info-list" id="character-info"></div></section>
       <section class="panel-section"><div class="panel-title" id="npc-status-title">NPC 상태</div><div class="npc-status" id="npc-status"></div></section>
@@ -25,6 +30,7 @@ const sidebar = {
     panel.appendChild(relationship);
     const innerThought = document.createElement('section');
     innerThought.className = 'panel-section';
+    innerThought.id = 'player-inner-thought-section';
     innerThought.innerHTML = '<div class="panel-title">플레이어 속마음</div><div id="player-inner-thought" class="player-inner-thought">-</div>';
     panel.appendChild(innerThought);
     const actions = document.createElement('section');
@@ -44,41 +50,73 @@ const sidebar = {
     const characterId = save.last_character_id;
     if (characterId) this.updateCharacter(characterId, context);
     this.updatePlayerInfo(save);
-    this.updatePlayerInnerThought(save.player_inner_thought);
+    this.updatePlayerInnerThought(save.player_inner_thought, save?.player?.name);
   },
 
+  // Compact player card: name/age/profession line, a separate current-status
+  // line (job's text after the first "/", e.g. "건축설계사 / 오른쪽 발목 인대
+  // 파열로 3병동 입원 4일차" — the long background text never fills this
+  // card), body metrics, then location/time. Each sub-line hides itself when
+  // empty instead of leaving a blank row.
   updatePlayerInfo(save = {}) {
-    const root = document.getElementById('player-info');
-    if (!root) return;
     const player = save?.player || {};
     const worldState = save?.world_state || {};
-    root.replaceChildren();
-    const appendLine = text => {
-      if (!text) return;
-      const line = document.createElement('div');
-      line.textContent = text;
-      root.appendChild(line);
-    };
-    const identity = [player.name, this.withUnit(player.age, '세'), player.job || player.background]
+
+    const jobText = typeof player.job === 'string' ? player.job : '';
+    const slashIndex = jobText.indexOf('/');
+    const profession = (slashIndex >= 0 ? jobText.slice(0, slashIndex) : jobText).trim();
+    const currentStatus = slashIndex >= 0 ? jobText.slice(slashIndex + 1).trim() : '';
+
+    const identity = [player.name, this.withUnit(player.age, '세'), profession || player.background]
       .filter(value => typeof value === 'string' && value.trim())
       .join(' · ');
-    appendLine(identity);
+    const identityEl = document.getElementById('player-info-identity');
+    if (identityEl) identityEl.textContent = identity || '-';
+
+    const statusEl = document.getElementById('player-info-status');
+    if (statusEl) {
+      statusEl.textContent = currentStatus;
+      statusEl.style.display = currentStatus ? '' : 'none';
+    }
+
     const metrics = [
       this.withUnit(player.height_cm, 'cm'),
       this.withUnit(player.weight_kg, 'kg'),
       this.withUnit(player.penis_length_cm, 'cm')
     ].filter(Boolean).join(' · ');
-    appendLine(metrics);
-    const location = worldState.location_label || save.player_location;
-    appendLine(location ? `📍 ${location}` : '');
-    appendLine(worldState.time_label ? `🕒 ${worldState.time_label}` : '');
-    if (!root.childNodes.length) root.textContent = '-';
+    const metricsEl = document.getElementById('player-info-metrics');
+    if (metricsEl) {
+      metricsEl.textContent = metrics;
+      metricsEl.style.display = metrics ? '' : 'none';
+    }
+
+    const location = worldState.location_label || player.location || save.player_location || '';
+    const time = worldState.time_label || '';
+    const worldParts = [location ? `📍 ${location}` : '', time ? `🕒 ${time}` : ''].filter(Boolean);
+    const worldEl = document.getElementById('player-info-world');
+    if (worldEl) {
+      worldEl.textContent = worldParts.join('  ');
+      worldEl.style.display = worldParts.length ? '' : 'none';
+    }
   },
 
-  updatePlayerInnerThought(text) {
+  updatePlayerInnerThought(text, playerName = '') {
+    const section = document.getElementById('player-inner-thought-section');
     const root = document.getElementById('player-inner-thought');
     if (!root) return;
-    root.textContent = typeof text === 'string' && text.trim() ? text.trim() : '-';
+    const value = typeof text === 'string' ? text.trim() : '';
+    if (!value) {
+      if (section) section.style.display = 'none';
+      root.textContent = '-';
+      return;
+    }
+    if (section) section.style.display = '';
+    // Stored values are just the body after "속마음:" — the UI prefixes the
+    // player's name unless the value already carries a "속마음:" prefix
+    // (defends against a saved value that already includes it).
+    const name = typeof playerName === 'string' ? playerName.trim() : '';
+    const alreadyPrefixed = /속마음\s*:/.test(value.slice(0, 40));
+    root.textContent = alreadyPrefixed || !name ? value : `${name} 속마음: ${value}`;
   },
 
   updateCharacter(characterId, context = state.context) {

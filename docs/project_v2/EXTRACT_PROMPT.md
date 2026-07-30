@@ -26,6 +26,10 @@ Worker는 다음 값을 프롬프트에 직접 삽입한다.
 
 ## 추출 규칙
 
+### CSA runtime delta (feature/csa-only, 이 문서 범위 밖 — 실제 계약은 `worker/game-proxy-v2.js`의 `buildExtractPrompt`/`buildEffectiveCsaRuntimeState` 참고)
+
+`csa_runtime_updates`는 `csa_runtime_state`의 전체 스냅샷이 아니라 이번 턴의 delta다. `status`는 `active|paused|ended`이며(설명문과 최종 JSON 스키마가 항상 동일해야 한다), 이전 턴부터 이미 `active`였고 이번 턴도 변화가 없으면 중복 update를 생략할 수 있다. Worker의 정합성 감사는 이 delta만 보지 않고 저장된 runtime에 delta를 적용한 effective runtime을 기준으로 판단한다. CSA 정합성 repair는 실제로 수정한 필드만 담은 `changed_fields`를 함께 반환하고, `csa_trigger_evaluations`/`csa_runtime_updates`는 전체 교체가 아니라 ID 기준 병합이다.
+
 ### CSA-first sexual resolution
 
 Extract는 자연어 의미를 `sexual_resolution`으로 구조화한다. `csa_direct`는

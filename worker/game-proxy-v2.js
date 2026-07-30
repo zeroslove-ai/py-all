@@ -165,7 +165,20 @@ function buildCsaOnlyEffectiveSave(save = {}, master = {}) {
 
 function buildCsaOnlyPublicContext(ctx = {}) {
   if (!isPlainObject(ctx)) return ctx;
-  return { ...ctx, save: buildCsaOnlyEffectiveSave(ctx.save, ctx.master) };
+  const save = buildCsaOnlyEffectiveSave(ctx.save, ctx.master);
+  // A stale last_choice_meta (wrong turn, or predating the severity-based
+  // rebalance — e.g. a stored kind:"bold" with sexual_action:"none") is
+  // never served as-is: the public view recomputes it in-memory from the
+  // current choices/save so a legacy 20%-bold display can't outlive the
+  // turn that produced it. This is a view-only reclassification — it never
+  // writes back to the DB.
+  const choices = Array.isArray(save.last_choices) ? save.last_choices : [];
+  if (!isCurrentChoiceMetaValid(choices, save.last_choice_meta, ctx.turn_count)) {
+    save.last_choice_meta = buildChoiceMeta(choices, save, ctx.master, ctx.turn_count, {
+      allowBold: isSetupComplete(save) && save.last_character_id && save.last_character_id !== 'narrator'
+    });
+  }
+  return { ...ctx, save };
 }
 
 // Only aborts the in-flight fetch itself (e.g. waiting for response headers);
@@ -1646,7 +1659,33 @@ async function performExtractionPass(env, { narrativeText, playerInput, compatCt
     && !hasStructuredEncounter(compatCtx?.save, extract.character_id)
     && !hasLegacyEncounterEvidence(compatCtx?.save, extract.character_id)
     && hasMeaningfulNpcEmotion(extract.npc_emotion);
-  const shouldReserveRecovery = potentialFirstEncounter || extract.csa_omission.length > 0;
+
+  // A CSA structural defect (or meta-awareness leak) must reserve the
+  // turn's one recovery slot ahead of mind-monitor repair — otherwise a
+  // mind-monitor repair can spend the only slot this turn has, leaving the
+  // higher-priority CSA integrity repair with none and forcing a hard
+  // CSA_INTEGRITY_UNRESOLVED failure it could otherwise have recovered from.
+  const applicableCsaForPriority = getApplicableCsaEntries(compatCtx?.save || {});
+  const preliminaryCsaAudit = applicableCsaForPriority.length
+    ? auditStructuredCsaExecution({
+        applicableCsa: applicableCsaForPriority,
+        triggerEvaluations: extract.csa_trigger_evaluations,
+        sexualResolution: extract.sexual_resolution,
+        csaRuntimeUpdates: extract.csa_runtime_updates,
+        save: compatCtx?.save || {},
+        master: compatCtx?.master || {},
+        characterId: extract.character_id,
+        npcsPresent: extract.npcs_present,
+        narrativeText,
+        playerInput
+      })
+    : { ok: true, issues: [] };
+  const preliminaryCsaViolations = collectCsaMetaAwarenessViolations(narrativeText, extract);
+
+  const shouldReserveRecovery = potentialFirstEncounter
+    || extract.csa_omission.length > 0
+    || !preliminaryCsaAudit.ok
+    || preliminaryCsaViolations.length > 0;
 
   let mindMonitorRepaired = false;
   if (!validation.ok) {
@@ -2017,12 +2056,27 @@ async function runExtractPipeline(env, { game_id, narrative_text, player_input, 
         ...validatedSelfReportedOmissions,
         ...structuralOmissions
       ])];
+      if (!csaAudit.ok) {
+        console.warn(JSON.stringify({
+          event: 'csa_integrity_audit_failed',
+          endpoint: '/api/extract',
+          request_id: requestId,
+          game_id,
+          turn_number: nextTurn,
+          recovery_budget_used: recoveryBudget.used,
+          recovery_budget_kind: recoveryBudget.kind,
+          issues: buildCsaIntegrityLogIssues({
+            issues: csaAudit.issues, applicableCsa, triggerEvaluations: extract.csa_trigger_evaluations,
+            csaRuntimeUpdates: extract.csa_runtime_updates, save: effectiveCtx.save, effectiveRuntime: csaAudit.effectiveRuntime
+          })
+        }));
+      }
       if (omissions.length || violations.length || !csaAudit.ok) {
         csaMetaAwarenessDetected = violations.length > 0;
         csaMetaAwarenessFields = violations.map(v => v.field);
         const tCsaIntegrity = Date.now();
         const integrityResult = await resolveCsaNarrativeIntegrity(env, {
-          narrativeText: finalNarrativeText,
+          narrativeText: finalNarrativeText, playerInput: player_input,
           applicableCsa, omissions, violations, integrityIssues: csaAudit.issues, extract,
           previousSave: effectiveCtx.save, characters, requestId, recoveryBudget
         });
@@ -2043,6 +2097,19 @@ async function runExtractPipeline(env, { game_id, narrative_text, player_input, 
           playerInput: player_input
         });
         if (!unresolvedCsa.ok) {
+          console.error(JSON.stringify({
+            event: 'csa_integrity_unresolved',
+            endpoint: '/api/extract',
+            request_id: requestId,
+            game_id,
+            turn_number: nextTurn,
+            recovery_budget_used: recoveryBudget.used,
+            recovery_budget_kind: recoveryBudget.kind,
+            issues: buildCsaIntegrityLogIssues({
+              issues: unresolvedCsa.issues, applicableCsa, triggerEvaluations: extract.csa_trigger_evaluations,
+              csaRuntimeUpdates: extract.csa_runtime_updates, save: effectiveCtx.save, effectiveRuntime: unresolvedCsa.effectiveRuntime
+            })
+          }));
           return {
             body: {
               error: 'CSA direct execution could not be verified after integrity repair.',
@@ -2087,6 +2154,7 @@ async function runExtractPipeline(env, { game_id, narrative_text, player_input, 
       const applicableCsa = getApplicableCsaEntries(effectiveCtx.save);
       const repaired = await resolveCsaNarrativeIntegrity(env, {
         narrativeText: finalNarrativeText,
+        playerInput: player_input,
         applicableCsa,
         omissions: sexualTurnIntegrity.issues.map(issue => `(${issue.code}) ${issue.reason || ''}`),
         violations: [],
@@ -3945,7 +4013,7 @@ function buildExtractPrompt(narrativeText, playerInput, ctx, images, turnCount, 
     : '';
   const presetCsaWithRequiredAction = applicableCsa.filter(item => item.source_type === 'preset' && isPlainObject(item.preset) && item.preset.required_action);
   const csaRuntimeExtractionSection = presetCsaWithRequiredAction.length
-    ? `\n\n[CSA RUNTIME STATE EXTRACTION]\n아래는 필수 행동이 정해진 프리셋 상식개변이다. 방금 서사에서 그 필수 행동이 실제로 시작되거나 계속되고 있으면 csa_runtime_updates에 status="active"로 넣고, 실제로 끝났으면 status="ended"로 넣는다. 플레이어의 명시적 요청·위생 처리·물건을 가져오는 등 현재 턴에서만 잠시 행동을 중단했을 뿐 규범 자체는 여전히 유효하면 status="paused"로 넣는다(규범을 거부·해제한 것이 아니라 곧 이어질 수 있는 일시 중단). 발동 조건이 아직 충족되지 않았으면 아무것도 넣지 않는다(억지로 만들지 않는다).\n${presetCsaWithRequiredAction.map(item => `- id=${item.id}: ${item.content}`).join('\n')}`
+    ? `\n\n[CSA RUNTIME STATE EXTRACTION]\ncsa_runtime_updates는 전체 스냅샷이 아니라 이번 턴의 delta다. 아래는 필수 행동이 정해진 프리셋 상식개변이다. 방금 서사에서 그 필수 행동이 실제로 시작되거나 계속되고 있으면 csa_runtime_updates에 status="active"로 넣고, 실제로 끝났으면 status="ended"로 넣는다. 이전 턴부터 이미 active였고 이번 턴에도 상태 변화 없이 계속 active라면 중복 update를 생략할 수 있다(Worker가 저장된 상태를 그대로 유지한다). 플레이어의 명시적 요청·위생 처리·물건을 가져오는 등 현재 턴에서만 잠시 행동을 중단했을 뿐 규범 자체는 여전히 유효하면 status="paused"로 넣는다(규범을 거부·해제한 것이 아니라 곧 이어질 수 있는 일시 중단). 발동 조건이 아직 충족되지 않았으면 아무것도 넣지 않는다(억지로 만들지 않는다).\n${presetCsaWithRequiredAction.map(item => `- id=${item.id}: ${item.content}`).join('\n')}`
     : '';
   const csaContractExtractionSection = true
     ? `\n\n[STRUCTURED SEXUAL / CSA RESOLUTION — REQUIRED]\n자연어의 성적 의미, 행동 주체·대상·방향, 발동 여부는 아래 구조화 필드에서만 판단한다. 애매하면 none/blocked/unclear/absent/not_satisfied를 반환한다. 설명·질문·상담은 discussion이며, “해도 되나요?”는 consent가 아니다. 플레이어 발화를 NPC consent로 기록하지 않는다. consent evidence는 현재 NPC가 실제로 직접 말한 대사 본문만 쓴다. csa_direct는 실제 활성 CSA ID 하나를 참조하며 trigger가 충족됐으면 voluntary/blocked로 낮추지 않는다. CSA direct에는 consent.status=not_required다. completed=true는 Story에서 실제 완료된 경우만 가능하다.\n\n적용 CSA contract:\n${applicableCsa.map(item => `- id=${item.id}: ${JSON.stringify(buildCsaSemanticContract(item))}`).join('\n')}\n\n반드시 반환:\n"sexual_resolution":{"intent":"none|discussion|request_npc|player_acts|npc_initiates","action":"none|kiss|sexual_touch|genital_exposure|genital_touch|oral|penetration","direction":"none|npc_to_player|player_to_npc","actor_type":"none|player|npc","actor_character_id":null,"target_type":"none|player|npc","target_character_id":null,"route":"none|csa_direct|voluntary|blocked","completed":false,"csa_id":null,"trigger_status":"not_applicable|satisfied|continuing|not_satisfied","trigger_evidence":"짧은 근거","consent":{"status":"not_required|granted|denied|conditional|unclear|absent","speaker_character_id":null,"evidence":"NPC 직접 대사"},"completion_evidence":"Story 완료 근거"}\n"csa_trigger_evaluations":[{"csa_id":"활성 CSA ID","status":"satisfied|continuing|temporarily_interrupted|not_satisfied|ended","actor_character_id":null,"target_type":"player|npc|group|none","target_character_id":null,"direction":"npc_to_player|player_to_npc|none","action":"none|kiss|sexual_touch|genital_exposure|genital_touch|oral|penetration","evidence":"입력 또는 Story 근거"}]\n"relationship_events":[{"type":"romantic_interest_declared|boundary_added|boundary_removed|refusal","actor_character_id":"등록 NPC ID","target_type":"player","action":"none|kiss|sexual_touch|genital_exposure|genital_touch|oral|penetration","boundary":"선택적 경계 enum","evidence_source":"npc_dialogue|narrative","evidence":"Story 근거"}]\n모든 적용 CSA마다 csa_trigger_evaluations를 정확히 하나씩 반환한다.\ntemporarily_interrupted는 규범 자체는 여전히 유효하지만 플레이어의 명시적 요청이나 위생 처리 등으로 이번 턴에만 그 자세·행동이 잠시 중단된 경우에만 쓰며, evidence에 player_input 또는 방금 Story 안의 중단 근거 문구를 반드시 넣는다. 단순히 모델이 규범을 언급하지 않았거나 잊었을 뿐이라면 not_satisfied나 ended가 아니라 여전히 satisfied/continuing으로 판단하고 필수 행동을 실행해야 한다 — temporarily_interrupted를 규범을 피하는 용도로 남발하지 않는다.`
@@ -4094,7 +4162,7 @@ ${JSON.stringify(imageCatalog)}
   "world_state_patch": {"building": "이동 완료 시 기존 또는 새 건물명, 이동 없으면 전체 비움", "floor": "이동 완료 시 기존 또는 새 층 명칭", "ward": "이동 완료 시 기존 또는 새 병동 명칭", "location_label": "이동 완료 시 도착한 새 장소, 이동 없으면 전체 비움", "time_label": "이번 장면 뒤의 단조 증가 게임 시간, 불명확하면 생략"},
   "csa_omission": ["조건을 충족했는데도 실행되지 않은 강제 상식개변에 대한 짧은 설명. 누락이 없으면 []"],
   "csa_experienced_ids": ["이번 장면에서 현재 NPC가 실제로 경험한 활성 CSA의 내부 ID만. 없으면 []"],
-  "csa_runtime_updates": [{"csa_id": "필수 행동이 실제로 시작·계속·종료된 프리셋 CSA의 내부 ID", "character_id": "그 행동을 수행한 등록 NPC ID", "target_type": "player 또는 대상 구분, 없으면 생략", "status": "active|ended", "action_state": "짧은 행동 상태, 없으면 생략", "position_label": "관찰 가능한 현재 자세 한 문장, 없으면 생략", "reason": "짧은 근거"}],
+  "csa_runtime_updates": [{"csa_id": "필수 행동이 실제로 시작·계속·일시중단·종료된 프리셋 CSA의 내부 ID", "character_id": "그 행동을 수행한 등록 NPC ID", "target_type": "player 또는 대상 구분, 없으면 생략", "status": "active|paused|ended", "action_state": "짧은 행동 상태, 없으면 생략", "position_label": "관찰 가능한 현재 자세 한 문장, 없으면 생략", "reason": "짧은 근거"}],
   "sexual_events": [{"character_id": "현재 등장한 등록 NPC ID", "type": "vaginal_penetration|anal_penetration|oral_sex|npc_orgasm|player_orgasm|vaginal_ejaculation|anal_ejaculation|oral_ejaculation|facial_ejaculation|body_ejaculation|unspecified_ejaculation", "completed": true, "evidence": "이번 최종 Story에서 실제 완료된 짧은 근거"}],
   "relationship_memory_patch": [{"character_id": "현재 메인 NPC ID", "text": "최종 Story에서 실제 완료된 중요한 관계 사건의 짧은 사실", "permanent": false}],
   "arousal_event": null,
@@ -5001,9 +5069,64 @@ function parseAuthoritativeNpcDialogue({ narrativeText = '', characters = {} } =
   return result;
 }
 
+// Character-normalization-only comparison — never a semantic/keyword or
+// paraphrase match. Collapses curly quotes to straight quotes, runs of
+// whitespace (including newlines) to a single space, and Unicode NFKC
+// so evidence copied verbatim from player_input/Story still matches
+// across incidental formatting differences.
+function normalizeEvidenceText(value = '') {
+  return String(value || '')
+    .normalize('NFKC')
+    .replace(/[“”]/g, '"')
+    .replace(/[‘’]/g, "'")
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
 function evidenceExists(evidence = '', ...sources) {
-  const text = typeof evidence === 'string' ? evidence.trim() : '';
-  return Boolean(text && sources.some(source => typeof source === 'string' && source.includes(text)));
+  const needle = normalizeEvidenceText(evidence);
+  if (!needle) return false;
+  return sources.some(source => normalizeEvidenceText(source).includes(needle));
+}
+
+// csa_runtime_updates is a per-turn delta, not a full snapshot: a preset
+// that was already active last turn and stays active this turn can omit a
+// duplicate update. Audit/authorization must therefore check the *effective*
+// runtime (saved state with this turn's delta applied), never the delta
+// array alone — otherwise a legitimate "still active, nothing changed" turn
+// is indistinguishable from "never confirmed". This is a read-only audit
+// view: it never mutates its inputs and is never itself the DB patch (that
+// remains buildCsaRuntimeStatePatch).
+function buildEffectiveCsaRuntimeState({ save = {}, csaRuntimeUpdates = [], applicableCsa = [], npcsPresent = [] } = {}) {
+  const effective = structuredClone(normalizeCsaRuntimeState(save?.csa_runtime_state));
+  const applicableById = new Map(
+    (Array.isArray(applicableCsa) ? applicableCsa : [])
+      .map(item => [item?.id, item])
+      .filter(([id]) => typeof id === 'string' && id)
+  );
+  const presentIds = new Set(
+    (Array.isArray(npcsPresent) ? npcsPresent : [])
+      .filter(id => typeof id === 'string' && id)
+  );
+
+  for (const update of normalizeCsaRuntimeUpdates(csaRuntimeUpdates)) {
+    const csa = applicableById.get(update.csa_id);
+    if (!csa || csa.source_type !== 'preset') continue;
+    if (!presentIds.has(update.character_id)) continue;
+    const previous = effective[update.csa_id];
+    effective[update.csa_id] = normalizeCsaRuntimeStateEntry({
+      status: update.status,
+      character_id: update.character_id,
+      target_type: update.target_type || previous?.target_type || null,
+      started_turn: previous?.started_turn ?? null,
+      last_confirmed_turn: previous?.last_confirmed_turn ?? null,
+      action_state: update.action_state || previous?.action_state || null,
+      position_label: update.position_label || previous?.position_label || null,
+      end_reason: update.status === 'ended' ? (update.reason || previous?.end_reason || null) : null
+    });
+  }
+
+  return effective;
 }
 
 function resolutionMatchesCurrentNpc(resolution, characterId) {
@@ -5016,7 +5139,8 @@ function resolutionMatchesCurrentNpc(resolution, characterId) {
 function validateCsaDirectResolution({ resolution, triggerEvaluations, save, master = {}, characterId, npcsPresent, narrativeText, playerInput, csaRuntimeUpdates = [] } = {}) {
   if (resolution?.route !== 'csa_direct' || resolution?.completed !== true) return { authorized: false, reason: 'not csa direct' };
   if (!resolutionMatchesCurrentNpc(resolution, characterId) || !npcsPresent.includes(characterId)) return { authorized: false, reason: 'current npc mismatch' };
-  const csa = getApplicableCsaEntries(save).find(item => item.id === resolution.csa_id);
+  const applicableCsa = getApplicableCsaEntries(save);
+  const csa = applicableCsa.find(item => item.id === resolution.csa_id);
   if (!csa) return { authorized: false, reason: 'inactive csa' };
   const contract = buildCsaSemanticContract(csa);
   if (contract.confidence !== 'exact' || contract.sexual_authorization !== true || contract.direct_execution !== true || !contract.actions.includes(resolution.action) || !contract.directions.includes(resolution.direction)) return { authorized: false, reason: 'contract mismatch' };
@@ -5025,7 +5149,11 @@ function validateCsaDirectResolution({ resolution, triggerEvaluations, save, mas
   if (contract.target_group !== 'unknown' && !playerMatchesCsaTargetGroup(save, contract.target_group)) return { authorized: false, reason: 'target group mismatch' };
   const evaluation = (Array.isArray(triggerEvaluations) ? triggerEvaluations : []).find(item => item.csa_id === csa.id);
   if (!evaluation || !['satisfied', 'continuing'].includes(evaluation.status) || evaluation.action !== resolution.action || evaluation.direction !== resolution.direction) return { authorized: false, reason: 'trigger not confirmed' };
-  if (evaluation.status === 'continuing' && !(Array.isArray(csaRuntimeUpdates) && csaRuntimeUpdates.some(item => item?.csa_id === csa.id && item?.status === 'active'))) return { authorized: false, reason: 'continuing runtime absent' };
+  if (evaluation.status === 'continuing') {
+    const effectiveRuntime = buildEffectiveCsaRuntimeState({ save, csaRuntimeUpdates, applicableCsa, npcsPresent });
+    const runtime = effectiveRuntime[csa.id];
+    if (runtime?.status !== 'active' || runtime?.character_id !== characterId) return { authorized: false, reason: 'continuing runtime absent' };
+  }
   if (evaluation.actor_character_id && evaluation.actor_character_id !== characterId) return { authorized: false, reason: 'trigger actor mismatch' };
   if (resolution.direction === 'npc_to_player' && evaluation.target_type !== 'player') return { authorized: false, reason: 'trigger target mismatch' };
   if (resolution.direction === 'player_to_npc' && (evaluation.target_type !== 'npc' || evaluation.target_character_id !== characterId)) return { authorized: false, reason: 'trigger target mismatch' };
@@ -5074,11 +5202,21 @@ function auditStructuredCsaExecution({ applicableCsa = [], triggerEvaluations = 
   const issues = [];
   const setValidation = validateCsaTriggerEvaluationSet({ applicableCsa, triggerEvaluations });
   if (!setValidation.ok) issues.push({ code: 'CSA_TRIGGER_EVALUATION_SET_INVALID', ...setValidation });
+  const effectiveRuntime = buildEffectiveCsaRuntimeState({ save, csaRuntimeUpdates, applicableCsa, npcsPresent });
   const byId = new Map((Array.isArray(triggerEvaluations) ? triggerEvaluations : []).map(item => [item.csa_id, item]));
   for (const csa of (Array.isArray(applicableCsa) ? applicableCsa : [])) {
     const contract = buildCsaSemanticContract(csa);
     const evaluation = byId.get(csa.id);
-    if (!evaluation || !['satisfied', 'continuing', 'temporarily_interrupted'].includes(evaluation.status)) continue;
+    if (!evaluation) continue;
+    // A trigger session that Extract reports as ended must be reflected in
+    // the effective runtime too — an evaluation saying "ended" while the
+    // saved+delta runtime is silently still "active" is the exact
+    // inconsistency this audit exists to catch, not a pass-through.
+    if (evaluation.status === 'ended') {
+      if (effectiveRuntime[csa.id]?.status === 'active') issues.push({ code: 'CSA_RUNTIME_NOT_VERIFIED', csa_id: csa.id });
+      continue;
+    }
+    if (!['satisfied', 'continuing', 'temporarily_interrupted'].includes(evaluation.status)) continue;
     if (contract.confidence !== 'exact') {
       issues.push({ code: 'CSA_CONTRACT_NOT_EXACT', csa_id: csa.id });
       continue;
@@ -5093,9 +5231,8 @@ function auditStructuredCsaExecution({ applicableCsa = [], triggerEvaluations = 
         issues.push({ code: 'CSA_INTERRUPTION_EVIDENCE_MISSING', csa_id: csa.id });
         continue;
       }
-      const pausedEntry = (Array.isArray(csaRuntimeUpdates) ? csaRuntimeUpdates : [])
-        .find(item => item?.csa_id === csa.id && item?.status === 'paused');
-      if (pausedEntry && pausedEntry.character_id !== characterId && contract.sexual_authorization !== true) {
+      const runtime = effectiveRuntime[csa.id];
+      if (!runtime || runtime.status !== 'paused' || runtime.character_id !== characterId) {
         issues.push({ code: 'CSA_RUNTIME_NOT_VERIFIED', csa_id: csa.id });
       }
       continue;
@@ -5111,12 +5248,45 @@ function auditStructuredCsaExecution({ applicableCsa = [], triggerEvaluations = 
       continue;
     }
     if (contract.direct_execution === true) {
-      const runtimeConfirmed = (Array.isArray(csaRuntimeUpdates) ? csaRuntimeUpdates : [])
-        .some(item => item?.csa_id === csa.id && item?.status === 'active');
+      const runtime = effectiveRuntime[csa.id];
+      const runtimeConfirmed = runtime?.status === 'active' && runtime?.character_id === characterId;
       if (!runtimeConfirmed) issues.push({ code: 'CSA_RUNTIME_NOT_VERIFIED', csa_id: csa.id });
     }
   }
-  return { ok: issues.length === 0, issues };
+  return { ok: issues.length === 0, issues, effectiveRuntime };
+}
+
+// Server-side diagnostic shape for a CSA_INTEGRITY_UNRESOLVED failure —
+// enough per-issue state (evaluation vs. current delta vs. saved vs.
+// effective runtime) to diagnose without ever logging narrative/player-input/
+// dialogue/evidence text.
+function buildCsaIntegrityLogIssues({ issues = [], applicableCsa = [], triggerEvaluations = [], csaRuntimeUpdates = [], save = {}, effectiveRuntime = {} } = {}) {
+  const csaById = new Map((Array.isArray(applicableCsa) ? applicableCsa : []).map(item => [item?.id, item]));
+  const evaluationById = new Map((Array.isArray(triggerEvaluations) ? triggerEvaluations : []).map(item => [item?.csa_id, item]));
+  const savedRuntime = normalizeCsaRuntimeState(save?.csa_runtime_state);
+  const currentUpdateByCsaId = new Map(normalizeCsaRuntimeUpdates(csaRuntimeUpdates).map(item => [item.csa_id, item]));
+  return (Array.isArray(issues) ? issues : []).map(issue => {
+    const csa = csaById.get(issue.csa_id);
+    const contract = csa ? buildCsaSemanticContract(csa) : null;
+    const evaluation = evaluationById.get(issue.csa_id);
+    const currentUpdate = currentUpdateByCsaId.get(issue.csa_id);
+    const saved = savedRuntime[issue.csa_id];
+    const effective = effectiveRuntime[issue.csa_id];
+    return {
+      code: issue.code,
+      csa_id: issue.csa_id || null,
+      evaluation_status: evaluation?.status ?? null,
+      evaluation_actor_character_id: evaluation?.actor_character_id ?? null,
+      current_runtime_update_status: currentUpdate?.status ?? null,
+      current_runtime_update_character_id: currentUpdate?.character_id ?? null,
+      saved_runtime_status: saved?.status ?? null,
+      saved_runtime_character_id: saved?.character_id ?? null,
+      effective_runtime_status: effective?.status ?? null,
+      effective_runtime_character_id: effective?.character_id ?? null,
+      contract_direct_execution: contract?.direct_execution === true,
+      contract_sexual_authorization: contract?.sexual_authorization === true
+    };
+  });
 }
 
 function validateStructuredSexualTurn({ extract = {}, save = {}, master = {}, characterId = '', npcsPresent = [], narrativeText = '', playerInput = '' } = {}) {
@@ -6315,7 +6485,7 @@ function buildCsaRuntimeStatePatch(previousSave, csaRuntimeUpdates, activeCsa, n
       status,
       character_id: characterId,
       target_type: typeof update.target_type === 'string' && update.target_type ? update.target_type.slice(0, 40) : (existing?.target_type ?? null),
-      started_turn: status === 'active' ? (existing?.status === 'active' ? existing.started_turn : turnNumber) : (existing?.started_turn ?? null),
+      started_turn: status === 'active' ? (existing?.started_turn ?? turnNumber) : (existing?.started_turn ?? null),
       last_confirmed_turn: turnNumber,
       action_state: typeof update.action_state === 'string' && update.action_state ? update.action_state.slice(0, 60) : (existing?.action_state ?? null),
       position_label: typeof update.position_label === 'string' && update.position_label.trim() ? update.position_label.trim().slice(0, 100) : (existing?.position_label ?? null),
@@ -9355,10 +9525,12 @@ function calculateBoldChoiceRate(save = {}, master = {}, choice = '') {
 function buildChoiceMeta(choices = [], save = {}, master = {}, turnNumber = 0, { allowBold = true } = {}) {
   return choices.map((choice, index) => {
     const details = allowBold ? calculateBoldChoiceRate(save, master, choice) : null;
-    const bold = Boolean(details);
+    const kind = details
+      ? (details.severity === 'blocked' ? 'blocked' : 'bold')
+      : ['free_action', 'relationship', 'progress'][index % 3];
     return {
       choice_id: `turn_${turnNumber}_choice_${index + 1}`,
-      kind: bold ? 'bold' : ['free_action', 'relationship', 'progress'][index % 3],
+      kind,
       severity: details?.severity ?? 'none',
       success_rate: details?.success_rate ?? null,
       affinity: details?.affinity ?? null,
@@ -9374,9 +9546,42 @@ function buildChoiceMeta(choices = [], save = {}, master = {}, turnNumber = 0, {
   });
 }
 
+const CHOICE_META_SEVERITIES = new Set(['none', 'mild', 'high', 'extreme', 'blocked']);
+
+// Guards against a stale/legacy last_choice_meta (wrong turn, missing
+// severity, or a bold/none combination that predates the severity-based
+// rebalance) ever being trusted as-is by an audit or a payout roll — see
+// buildCsaOnlyPublicContext (display) and resolveBoldChoiceAttempt (actual
+// roll), both of which fall back to an in-memory buildChoiceMeta() recompute
+// when this returns false.
+function isCurrentChoiceMetaValid(choices, choiceMeta, turnNumber) {
+  if (!Array.isArray(choices) || !choices.length) return false;
+  if (!Array.isArray(choiceMeta) || choiceMeta.length !== choices.length) return false;
+  return choiceMeta.every((meta, index) => {
+    if (!isPlainObject(meta)) return false;
+    if (meta.choice_id !== `turn_${turnNumber}_choice_${index + 1}`) return false;
+    if (!CHOICE_META_SEVERITIES.has(meta.severity)) return false;
+    if (meta.sexual_action === 'none' && meta.kind === 'bold') return false;
+    if (meta.severity === 'none') return meta.kind !== 'bold' && meta.success_rate == null;
+    if (meta.severity === 'blocked') return meta.kind === 'blocked';
+    if (meta.kind !== 'bold') return false;
+    const range = CHOICE_RISK_SUCCESS_RANGE[meta.severity];
+    const rate = Number(meta.success_rate);
+    return Boolean(range) && Number.isFinite(rate) && rate >= range[0] && rate <= range[1];
+  });
+}
+
 function resolveBoldChoiceAttempt(save = {}, master = {}, playerInput = '', gameId = '', turnNumber = 0) {
   const choices = Array.isArray(save?.last_choices) ? save.last_choices : [];
-  const meta = Array.isArray(save?.last_choice_meta) ? save.last_choice_meta : [];
+  const rawMeta = Array.isArray(save?.last_choice_meta) ? save.last_choice_meta : [];
+  // A legacy/stale stored meta (e.g. from before the severity rebalance, or
+  // simply from a turn that never got a fresh commit) must never gate the
+  // actual roll — recompute it in-memory from the current save/choice text
+  // instead of trusting a cached kind/success_rate that no longer reflects
+  // reality.
+  const meta = isCurrentChoiceMetaValid(choices, rawMeta, turnNumber)
+    ? rawMeta
+    : buildChoiceMeta(choices, save, master, turnNumber, { allowBold: true });
   const index = choices.findIndex(choice => typeof choice === 'string' && choice.trim() === String(playerInput || '').trim());
   const candidate = index >= 0 ? meta[index] : null;
   if (candidate?.kind !== 'bold' || !Number.isFinite(Number(candidate.success_rate))) return null;
@@ -9478,7 +9683,7 @@ function collectCsaMetaAwarenessViolations(narrativeText, extract) {
   return violations;
 }
 
-function buildCsaNarrativeIntegrityRepairPrompt({ narrativeText, applicableCsa, omissions, violations, integrityIssues = [], extract = {} }) {
+function buildCsaNarrativeIntegrityRepairPrompt({ narrativeText, playerInput, applicableCsa, omissions, violations, integrityIssues = [], extract = {} }) {
   const section1 = extractNarrativeActionSection(narrativeText);
   const csaLines = (applicableCsa || []).map(csa => `- ${csa.content}`).join('\n') || '없음';
   const omissionLines = (omissions || []).length ? omissions.map(o => `- ${o}`).join('\n') : '없음';
@@ -9492,7 +9697,7 @@ function buildCsaNarrativeIntegrityRepairPrompt({ narrativeText, applicableCsa, 
     sexual_events: extract?.sexual_events || [],
     relationship_events: extract?.relationship_events || []
   };
-  return `너는 게임 서사의 [1. 서사 및 행동] 섹션과 구조화 필드(npc_emotion, turn_summary) 중 문제가 있는 부분만 최소한으로 보정하는 역할이다. 전체 이야기를 새로 쓰지 않는다. 사건 순서, 등장인물, 대사 내용, 플레이어 행동을 최대한 유지한다. NPC가 상식개변·암시·어플·시스템에 의해 변경됐다는 사실 자체를 인식하지 않게 하고, 현재 상식을 원래부터 당연한 관행으로 받아들이게 한다. 누락된 강제 행동이 있으면 [1] 섹션 안에서 자연스럽게 실행되도록 삽입한다. [2. 플레이어 상황판]과 [3. 선택지]는 절대 반환하거나 언급하지 않는다. 문제없는 필드는 빈 문자열로 반환하거나 키를 생략한다. 마크다운 코드펜스와 설명문 없이 JSON 객체만 출력한다.
+  return `너는 게임 서사의 [1. 서사 및 행동] 섹션과 구조화 필드(npc_emotion, turn_summary) 중 문제가 있는 부분만 최소한으로 보정하는 역할이다. 전체 이야기를 새로 쓰지 않는다. 사건 순서, 등장인물, 대사 내용, 플레이어 행동을 최대한 유지한다. NPC가 상식개변·암시·어플·시스템에 의해 변경됐다는 사실 자체를 인식하지 않게 하고, 현재 상식을 원래부터 당연한 관행으로 받아들이게 한다. 누락된 강제 행동이 있으면 [1] 섹션 안에서 자연스럽게 실행되도록 삽입한다. [2. 플레이어 상황판]과 [3. 선택지]는 절대 반환하거나 언급하지 않는다. 실제로 수정한 필드만 changed_fields에 넣고, 그 필드만 채운다. 수정하지 않은 필드는 changed_fields에 넣지 않으며 값도 비워서(빈 문자열/빈 배열/빈 객체) 반환한다 — changed_fields에 없는 값은 Worker가 절대 적용하지 않는다. 마크다운 코드펜스와 설명문 없이 JSON 객체만 출력한다.
 
 [PLAYER AGENCY DURING CSA REPAIR — HIGHEST PRIORITY]
 - player_input에서 명시적으로 요청한 자세 변경·이동·중단·정리 행동을 삭제하지 않는다.
@@ -9500,6 +9705,9 @@ function buildCsaNarrativeIntegrityRepairPrompt({ narrativeText, applicableCsa, 
 - 플레이어 요청으로 규칙 행동이 이번 턴 일시적으로 중단된 것이 명확하면, 그 CSA를 강제로 다시 수행시키지 말고 csa_trigger_evaluations에 status="temporarily_interrupted"(evidence에 중단 근거 포함), csa_runtime_updates에 status="paused"로 구조화해 반환한다.
 - 상식개변은 사회 규범이지 플레이어 조작을 금지하는 물리적 구속이 아니다. 규칙의 장기 지속성과 현재 턴의 일시 중단을 구분한다.
 - [1] 섹션을 고칠 때 이미 생성된 정상적인 플레이어 행동(예: 요청에 따라 자세에서 벗어남)을 반대로 다시 쓰지 않는다 — Story와 structured field를 일치시키되 삭제·역전시키지 않는다.
+
+[플레이어의 이번 원본 입력 — 보존 대상]
+${String(playerInput || '').slice(0, 2000)}
 
 [적용 중인 상식개변 — 강제 규칙]
 ${csaLines}
@@ -9520,16 +9728,40 @@ ${JSON.stringify(structuredFields)}
 ${JSON.stringify(integrityIssues)}
 
 [요구 JSON 스키마]
-{"narrative_section_1":"보정이 필요한 경우에만 수정된 [1] 전체 내용","sexual_resolution":{},"csa_trigger_evaluations":[],"csa_runtime_updates":[],"sexual_events":[],"relationship_events":[],"npc_emotion":{"surface":"위반한 경우에만","inner":"위반한 경우에만","physical_reaction":"위반한 경우에만"},"turn_summary":"위반한 경우에만"}
+{"changed_fields":["실제로 수정한 필드 이름만. 예: narrative_section_1, sexual_resolution, csa_trigger_evaluations, csa_runtime_updates, sexual_events, relationship_events, npc_emotion, turn_summary"],"narrative_section_1":"changed_fields에 포함된 경우에만 수정된 [1] 전체 내용","sexual_resolution":{},"csa_trigger_evaluations":[],"csa_runtime_updates":[],"sexual_events":[],"relationship_events":[],"npc_emotion":{"surface":"changed_fields에 포함된 경우에만","inner":"changed_fields에 포함된 경우에만","physical_reaction":"changed_fields에 포함된 경우에만"},"turn_summary":"changed_fields에 포함된 경우에만"}
 
-- 기존 structured field는 수정이 필요 없으면 그대로 반환한다.
-- 누락 행동을 넣으면 resolution, trigger evaluation, runtime update, sexual event를 수정 Story와 일치시킨다.
+- csa_trigger_evaluations/csa_runtime_updates는 전체 배열을 다시 나열하지 않고, 실제로 새로 판단하거나 고친 항목만 담는다(csa_id 기준으로 Worker가 기존 값과 병합한다). 손대지 않은 다른 CSA 항목은 changed_fields에 포함하더라도 생략해도 된다.
+- 누락 행동을 넣으면 resolution, trigger evaluation, runtime update, sexual event를 수정 Story와 일치시키고 해당 필드를 changed_fields에 넣는다.
 - CSA 범위 밖 행동을 추가하지 않으며 csa_id/action/direction은 contract와 정확히 맞춘다.
 - 플레이어 요청에 따른 정당한 일시 중단이면 강제로 재수행시키지 말고 csa_trigger_evaluations status="temporarily_interrupted"(evidence 필수) + csa_runtime_updates status="paused"로 반환한다.`;
 }
 
-async function repairCsaNarrativeIntegrity(env, { narrativeText, applicableCsa, omissions, violations, integrityIssues = [], extract = {} }) {
-  const prompt = buildCsaNarrativeIntegrityRepairPrompt({ narrativeText, applicableCsa, omissions, violations, integrityIssues, extract });
+// csa_id 기준 병합 — repair가 일부 항목만 다시 판단해도 손대지 않은 나머지
+// applicable CSA의 평가가 사라지지 않는다. repaired 항목이 있는 csa_id만
+// 교체하고, applicable하지 않게 된 csa_id는 제거한다.
+function mergeCsaTriggerEvaluationsById(current = [], repaired = [], applicableIds = new Set()) {
+  const byId = new Map((Array.isArray(current) ? current : []).filter(isPlainObject).map(item => [item.csa_id, item]));
+  for (const item of (Array.isArray(repaired) ? repaired : [])) {
+    if (isPlainObject(item) && typeof item.csa_id === 'string' && item.csa_id) byId.set(item.csa_id, item);
+  }
+  return normalizeCsaTriggerEvaluations([...byId.values()].filter(item => applicableIds.has(item.csa_id)));
+}
+
+// csa_id + character_id 기준 병합 (동일 규범을 여러 NPC가 수행할 가능성을
+// 열어둔다). 나머지 규칙은 mergeCsaTriggerEvaluationsById와 동일.
+function mergeCsaRuntimeUpdatesById(current = [], repaired = [], applicableIds = new Set()) {
+  const key = item => `${item.csa_id}::${item.character_id}`;
+  const byKey = new Map((Array.isArray(current) ? current : []).filter(isPlainObject).map(item => [key(item), item]));
+  for (const item of (Array.isArray(repaired) ? repaired : [])) {
+    if (isPlainObject(item) && typeof item.csa_id === 'string' && item.csa_id && typeof item.character_id === 'string' && item.character_id) {
+      byKey.set(key(item), item);
+    }
+  }
+  return normalizeCsaRuntimeUpdates([...byKey.values()].filter(item => applicableIds.has(item.csa_id)));
+}
+
+async function repairCsaNarrativeIntegrity(env, { narrativeText, playerInput, applicableCsa, omissions, violations, integrityIssues = [], extract = {} }) {
+  const prompt = buildCsaNarrativeIntegrityRepairPrompt({ narrativeText, playerInput, applicableCsa, omissions, violations, integrityIssues, extract });
   const result = await requestDeepSeekJsonWithRetry(env, {
     model: 'deepseek-v4-flash',
     thinking: { type: 'disabled' },
@@ -9606,7 +9838,7 @@ function resolveCsaMetaFallbackForEmotionField(field, previousSavedValue, subjec
 // deterministic per-field fallback above. Always fail-open — never blocks
 // Extract or Commit, and only ever touches [1]/npc_emotion/turn_summary.
 async function resolveCsaNarrativeIntegrity(env, {
-  narrativeText, applicableCsa, omissions, violations, integrityIssues = [], extract, previousSave, characters, requestId, recoveryBudget
+  narrativeText, playerInput, applicableCsa, omissions, violations, integrityIssues = [], extract, previousSave, characters, requestId, recoveryBudget
 }) {
   let finalNarrativeText = narrativeText;
   let narrativeReplacement = null;
@@ -9614,28 +9846,45 @@ async function resolveCsaNarrativeIntegrity(env, {
 
   if (consumeRecoveryBudget(recoveryBudget, 'csa_narrative_integrity')) {
     try {
-      const repaired = await repairCsaNarrativeIntegrity(env, { narrativeText, applicableCsa, omissions, violations, integrityIssues, extract });
+      const repaired = await repairCsaNarrativeIntegrity(env, { narrativeText, playerInput, applicableCsa, omissions, violations, integrityIssues, extract });
+      // changed_fields is the sole gate: a field absent from it is never
+      // applied, even if the model also happened to return a value for it —
+      // this is what stops an accidentally-empty array from silently wiping
+      // a structurally valid extract.csa_trigger_evaluations/csa_runtime_updates.
       if (isPlainObject(repaired)) {
         repairSucceeded = true;
-        if (typeof repaired.narrative_section_1 === 'string' && repaired.narrative_section_1.trim()) {
+        const changedFields = new Set(Array.isArray(repaired.changed_fields) ? repaired.changed_fields.filter(field => typeof field === 'string') : []);
+        const applicableIds = new Set((Array.isArray(applicableCsa) ? applicableCsa : []).map(item => item?.id).filter(id => typeof id === 'string' && id));
+
+        if (changedFields.has('narrative_section_1') && typeof repaired.narrative_section_1 === 'string' && repaired.narrative_section_1.trim()) {
           const corrected = replaceNarrativeActionSection(narrativeText, repaired.narrative_section_1);
           narrativeReplacement = corrected;
           finalNarrativeText = corrected;
         }
-        if (isPlainObject(repaired.npc_emotion)) {
+        if (changedFields.has('npc_emotion') && isPlainObject(repaired.npc_emotion)) {
           for (const field of ['surface', 'inner', 'physical_reaction']) {
             const value = repaired.npc_emotion[field];
             if (typeof value === 'string' && value.trim()) extract.npc_emotion[field] = value.trim();
           }
         }
-        if (typeof repaired.turn_summary === 'string' && repaired.turn_summary.trim() && repaired.turn_summary.length <= 200) {
+        if (changedFields.has('turn_summary') && typeof repaired.turn_summary === 'string' && repaired.turn_summary.trim() && repaired.turn_summary.length <= 200) {
           extract.turn_summary = repaired.turn_summary.trim();
         }
-        if (isPlainObject(repaired.sexual_resolution)) extract.sexual_resolution = normalizeSexualResolution(repaired.sexual_resolution);
-        if (Array.isArray(repaired.csa_trigger_evaluations)) extract.csa_trigger_evaluations = normalizeCsaTriggerEvaluations(repaired.csa_trigger_evaluations);
-        if (Array.isArray(repaired.csa_runtime_updates)) extract.csa_runtime_updates = normalizeCsaRuntimeUpdates(repaired.csa_runtime_updates);
-        if (Array.isArray(repaired.sexual_events)) extract.sexual_events = normalizeSexualEvents(repaired.sexual_events);
-        if (Array.isArray(repaired.relationship_events)) extract.relationship_events = normalizeRelationshipEvents(repaired.relationship_events);
+        if (changedFields.has('sexual_resolution') && isPlainObject(repaired.sexual_resolution) && Object.keys(repaired.sexual_resolution).length) {
+          extract.sexual_resolution = normalizeSexualResolution(repaired.sexual_resolution);
+        }
+        if (changedFields.has('csa_trigger_evaluations') && Array.isArray(repaired.csa_trigger_evaluations) && repaired.csa_trigger_evaluations.length) {
+          extract.csa_trigger_evaluations = mergeCsaTriggerEvaluationsById(extract.csa_trigger_evaluations, repaired.csa_trigger_evaluations, applicableIds);
+        }
+        if (changedFields.has('csa_runtime_updates') && Array.isArray(repaired.csa_runtime_updates) && repaired.csa_runtime_updates.length) {
+          extract.csa_runtime_updates = mergeCsaRuntimeUpdatesById(extract.csa_runtime_updates, repaired.csa_runtime_updates, applicableIds);
+        }
+        if (changedFields.has('sexual_events') && Array.isArray(repaired.sexual_events)) {
+          extract.sexual_events = normalizeSexualEvents(repaired.sexual_events);
+        }
+        if (changedFields.has('relationship_events') && Array.isArray(repaired.relationship_events)) {
+          extract.relationship_events = normalizeRelationshipEvents(repaired.relationship_events);
+        }
       }
     } catch (error) {
       console.error('CSA narrative integrity repair failed:', { request_id: requestId, error: error.message });

@@ -142,6 +142,13 @@
       margin-bottom: 12px;
     }
 
+    /* Player compact card */
+    .player-card { display: grid; gap: 5px; padding-top: 12px; padding-bottom: 12px; }
+    .player-card-name { color: var(--text-primary); font-weight: 750; line-height: 1.45; }
+    .player-card-sub { color: var(--text-secondary); font-size: .8rem; line-height: 1.4; }
+    .player-card-metrics, .player-card-world { color: var(--text-primary); font-size: .82rem; line-height: 1.45; }
+    .player-inner-thought { color: var(--text-primary); font-size: .85rem; line-height: 1.55; white-space: pre-wrap; }
+
     /* Character Image */
     .character-img {
       width: 100%;
@@ -308,6 +315,7 @@
       border-color: var(--warning);
     }
     .choice-btn.bold-choice { border-color: var(--warning); }
+    .choice-btn.blocked-choice { opacity: .7; }
     .choice-btn.selected { border-color: var(--accent); background: rgba(233, 69, 96, .18); }
     .choice-btn:disabled { cursor: not-allowed; opacity: .7; }
 
@@ -1092,7 +1100,7 @@
         ui.clearUncommittedNarrativeBadges();
         saveFeedback([]);
         sidebar.updatePlayerInfo(state.context?.save);
-        sidebar.updatePlayerInnerThought(state.context?.save?.player_inner_thought);
+        sidebar.updatePlayerInnerThought(state.context?.save?.player_inner_thought, state.context?.save?.player?.name);
 
         // Screen updates (narrative text/choices/sidebar/media/scroll) wait
         // for the typing animation to actually finish — everything above

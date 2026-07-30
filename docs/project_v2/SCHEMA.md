@@ -135,7 +135,7 @@ CSA-only runtime additions inside `game_save.data` (no database column or migrat
 
 `npc_stats[*].성적민감도` is legacy JSONB retained for compatibility only. New Worker logic ignores it; fixed `성적민감도초기` is read from the character master solely to scale physical arousal changes. These are JSONB payload additions only: no DB column, RPC, or migration changes are required.
 
-`last_choice_meta` may include `sexual_action`, `sexual_is_public`, `sexual_gate`, `blocking_boundaries`, `direct_csa_ids`, and `intimacy_stage` as display metadata. The actual decision is recalculated deterministically at the selected turn. `last_explicit_consent` is this-turn-only and never grants future automatic permission. `romantic_interest` is non-sexual; `kissed` and later stages require the voluntary sexual path's current action-specific consent and completed event. `csa_aftereffect_state` can be created from a confirmed runtime execution record even while that NPC is absent; medium/strong confirmed direct sexual `required_action` executions add `needs_discussion` on deactivation. No database migration is involved.
+`last_choice_meta` may include `sexual_action`, `sexual_is_public`, `sexual_gate`, `blocking_boundaries`, `direct_csa_ids`, and `intimacy_stage` as display metadata, plus `severity` (`none|mild|high|extreme|blocked`) and `kind` (`bold` only for `mild|high|extreme`; `blocked` is its own kind, never `bold`). The actual decision is recalculated deterministically at the selected turn. A stored `last_choice_meta` that doesn't match the current turn/choices/contract (`isCurrentChoiceMetaValid`) is never trusted as-is: both the public `/api/context` view and the actual bold-choice roll recompute it in-memory from the current save instead — this never rewrites the stored JSONB. `last_explicit_consent` is this-turn-only and never grants future automatic permission. `romantic_interest` is non-sexual; `kissed` and later stages require the voluntary sexual path's current action-specific consent and completed event. `csa_aftereffect_state` can be created from a confirmed runtime execution record even while that NPC is absent; medium/strong confirmed direct sexual `required_action` executions add `needs_discussion` on deactivation. No database migration is involved.
 
 These changes only refine Worker validation and runtime interpretation of existing JSONB fields; they add no schema, RPC, or migration.
 
@@ -210,6 +210,8 @@ duration 옵션, `content_template`, `minimum_strength`, `required_action`
 검증, `buildCsaRuntimeStatePatch`), 프리셋이 비활성화·해제되거나
 `custom`으로 전환되면 Extract 입력과 무관하게 Worker가 즉시 `ended`로
 표시한다.
+
+`csa_runtime_updates`는 이 필드의 전체 스냅샷이 아니라 이번 턴의 delta다 — 이전 턴부터 `active`였고 이번 턴도 변화가 없으면 Extract는 중복 update를 생략할 수 있다. 그래서 `commit_turn` 저장(`buildCsaRuntimeStatePatch`)과 별개로, `/api/extract`의 정합성 감사는 저장된 `csa_runtime_state`에 이번 턴 delta를 합친 effective runtime(`buildEffectiveCsaRuntimeState`, 감사 전용 view이며 그 자체로 DB patch는 아니다)을 기준으로 판단한다. `active` 재진입 시 `started_turn`은 기존 값을 유지한다(paused를 거쳐 다시 `active`가 되어도 최초 시작 턴이 새 턴으로 덮이지 않는다).
 
 ### `game_memories`
 

@@ -462,16 +462,25 @@ const ui = {
     const actions = setup ? all : all.filter(text => !/(?:어플|앱)\s*정보|📱/i.test(text)).slice(0, 4);
     actions.forEach((text, index) => {
       const meta = Array.isArray(choiceMeta) ? choiceMeta[index] : null;
-      const bold = meta?.kind === 'bold' && Number.isFinite(Number(meta.success_rate));
+      // A legacy/stale meta (no severity, or a stray bold with no success
+      // rate) must never show the ⚡ badge or a success-rate figure the
+      // Worker isn't actually honoring anymore.
+      const validSeverity = ['mild', 'high', 'extreme'].includes(meta?.severity);
+      const bold = meta?.kind === 'bold' && validSeverity && Number.isFinite(Number(meta.success_rate));
+      const blocked = meta?.kind === 'blocked';
       const explicit = text.startsWith('❗');
       // 표시문(30자 축약)과 전달 원문을 분리한다 — 콜백/기록에는 항상 원문 전체.
       const fullText = text;
       const displayText = this.summarizeChoiceLabel(explicit ? fullText.slice(1).trim() : fullText, 30);
       const button = document.createElement('button');
-      button.className = `choice-btn ${explicit ? 'explicit' : ''}${bold ? ' bold-choice' : ''}`;
+      button.className = `choice-btn ${explicit ? 'explicit' : ''}${bold ? ' bold-choice' : ''}${blocked ? ' blocked-choice' : ''}`;
       const marker = document.createElement('span'); marker.className = 'marker'; marker.textContent = markers[index] || `${index + 1}.`;
       const label = document.createElement('span'); label.className = 'choice-label';
-      label.textContent = bold ? `⚡ 과감 · 성공률 ${meta.success_rate}% · ${displayText}` : (explicit ? `❗ ${displayText}` : displayText);
+      label.textContent = bold
+        ? `⚡ 과감 · 성공률 ${meta.success_rate}% · ${displayText}`
+        : blocked
+          ? `⛔ 실행 불가 · ${displayText}`
+          : (explicit ? `❗ ${displayText}` : displayText);
       button.append(marker, label);
       button.title = fullText;
       button.setAttribute('aria-label', `${index + 1}. ${fullText}`);

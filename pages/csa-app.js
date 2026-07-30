@@ -197,12 +197,61 @@ window.csaApp = (() => {
     });
     body.appendChild(grid); (home.diagnostics || []).forEach(item => body.appendChild(el('p', `csa-app-diagnostic ${item.type || ''}`, item.text)));
   }
+  // 값이 있을 때만 rows를 채우는 상세정보 섹션 — 숨겨진설정/내부 ID/raw
+  // JSON/프롬프트 정보는 절대 다루지 않는다. 표시 가능한 공개 필드만.
+  function withUnit(value, unit) {
+    if (value === null || value === undefined || value === '') return '';
+    const text = String(value).trim();
+    return new RegExp(`${unit}$`, 'i').test(text) ? text : `${value}${unit}`;
+  }
+  function detailSection(root, title, rows, className = '') {
+    const box = el('section', `csa-app-detail-section${className ? ` ${className}` : ''}`);
+    box.appendChild(el('h4', '', title));
+    rows.filter(([, value]) => value !== null && value !== undefined && value !== '')
+      .forEach(([label, value]) => box.appendChild(el('p', 'csa-app-record-row', `${label}: ${value}`)));
+    root.appendChild(box);
+  }
+  function renderNpcDetails(card, npc) {
+    const details = el('details', 'csa-app-npc-details');
+    details.appendChild(el('summary', '', '상세정보'));
+    const stats = npc.stats || {}, profile = npc.profile || {}, npcBody = npc.body || {}, record = npc.relationship_record || {};
+    const privateInfo = npc.private_info || { unlocked: false };
+    detailSection(details, '인물정보', [
+      ['이름', npc.name], ['나이', withUnit(profile.age, '세')], ['소속', profile.affiliation], ['직책', profile.role]
+    ]);
+    detailSection(details, '신체정보', [
+      ['키', withUnit(npcBody.height_cm, 'cm')], ['몸무게', withUnit(npcBody.weight_kg, 'kg')], ['체형', npcBody.body_type], ['가슴', npcBody.cup]
+    ]);
+    detailSection(details, '현재 상태', [
+      ['마음상태', npc.mind?.state_label || '상태 미확인'],
+      ['위치', npc.location?.known ? npc.location.location_label : '위치 미확인'],
+      ['호감도', stats.호감도], ['상식수용도', stats.상식수용도], ['성적흥분도', stats.성적흥분도],
+      ['상식저항력', npc.resistance]
+    ]);
+    detailSection(details, '관계 기록', [
+      ['플레이어 사정 횟수', `${record.player_ejaculation_count || 0}회`],
+      [`${npc.name || 'NPC'} 오르가즘 횟수`, `${record.npc_orgasm_count || 0}회`]
+    ]);
+    if (!privateInfo.unlocked) {
+      detailSection(details, '은밀정보', [['🔒', '해당 NPC와의 사정 또는 오르가즘 기록이 생기면 확인할 수 있습니다.']], 'csa-app-private-locked');
+    } else {
+      detailSection(details, '은밀정보', [
+        ['유두', privateInfo.nipple], ['유륜 크기', privateInfo.areola_size], ['유륜 색', privateInfo.areola_color],
+        ['음모 상태', privateInfo.pubic_hair],
+        ['과거 남성 경험', privateInfo.past_partner_count === undefined ? '' : `${privateInfo.past_partner_count}명`],
+        ['과거 오르가즘 경험', privateInfo.past_orgasm_count === undefined ? '' : `${privateInfo.past_orgasm_count}회`],
+        ['연인 관계', privateInfo.relationship]
+      ], 'csa-app-private-unlocked');
+    }
+    card.appendChild(details);
+  }
   function renderNpcs(body) {
     (appState.npcs || []).forEach(npc => {
       const card = el('article', 'csa-app-npc-card'); card.append(el('h3', '', npc.name || 'NPC'), el('p', '', npc.role || '역할 미확인'));
       card.append(el('p', '', `마음상태: ${npc.mind?.state_label || '상태 미확인'}`));
       if (npc.mind?.surface) card.append(el('blockquote', '', npc.mind.surface));
       card.append(el('p', '', `위치: ${npc.location?.known ? npc.location.location_label : '위치 미확인'}`));
+      renderNpcDetails(card, npc);
       const find = el('button', 'choice-btn', npc.present_now ? '현재 함께 있음' : '찾아가기');
       find.disabled = applying || npc.present_now || !npc.location?.known;
       find.onclick = async () => {

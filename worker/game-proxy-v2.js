@@ -1126,10 +1126,20 @@ function buildPublicNpcBody(character = {}) {
   return result;
 }
 
+// Recognizes both the current relationship-state shape and legacy/nested
+// shapes so a save written by an older or different code path still
+// unlocks correctly — read compatibility only, never mutates the save.
+// Never unlocks from nudity, embarrassment, an active CSA, or nonsexual
+// contact alone; only from a positive completed intimate-contact counter or
+// an explicit prior-intimacy flag.
 function isNpcIntimateInfoUnlocked(relationship = {}) {
+  const history = isPlainObject(relationship?.sexual_history) ? relationship.sexual_history : {};
   return relationship?.intimate_info_unlocked === true
+    || relationship?.has_had_sex_with_player === true
     || Math.max(0, Number(relationship?.player_ejaculation_count) || 0) > 0
-    || Math.max(0, Number(relationship?.npc_orgasm_count) || 0) > 0;
+    || Math.max(0, Number(relationship?.npc_orgasm_count) || 0) > 0
+    || Math.max(0, Number(history?.player_ejaculation_count) || 0) > 0
+    || Math.max(0, Number(history?.npc_orgasm_count) || 0) > 0;
 }
 
 function buildNpcRelationshipRecord(save = {}, characterId) {
@@ -1237,6 +1247,9 @@ function buildAppStatePayload(master, save, turnCount = 0) {
         updated_turn: Number.isInteger(location?.updated_turn) ? location.updated_turn : null
       },
       stats: csaOnlyNpcStats(save?.npc_stats?.[character_id]),
+      // Public numeric counterpart of resolveCsaResistance() — added for the
+      // NPC detailed-info UI's 상식저항력 row. Never a legacy hypnosis field.
+      resistance: resolveCsaResistance(character),
       profile: buildPublicNpcProfile(character),
       body: buildPublicNpcBody(character),
       relationship_record: buildNpcRelationshipRecord(save, character_id),
@@ -4083,7 +4096,7 @@ function buildExtractPrompt(narrativeText, playerInput, ctx, images, turnCount, 
 
   return `너는 플레이 LLM이 방금 쓴 서사와 플레이어의 원본 입력을 읽고, 저장/이미지/음성에 필요한 값만 구조화하는 역할이다. NPC 수치만은 아래 delta 계약에 따라 이번 턴의 실제 변화와 근거를 판단한다. 유효한 JSON 객체 하나만 출력한다. 마크다운 코드펜스와 설명문을 절대 쓰지 마라.
 
-arousal_event는 이번 최종 Story의 실제 신체적 성적 반응이 있을 때만 {active:true, intensity:low|medium|high|climax, evidence}로 반환한다. 노출·호감·CSA 존재·플레이어 입력 선언만으로 만들지 않는다. 성적흥분도 수치는 Worker만 계산한다. sexual_events에는 이번 턴에 실제 완료된 사건만 넣고 누적 카운터나 과거 경험은 절대 반환하지 않는다. 플레이어 사정 이벤트는 이번 입력에 명시적 사정 지시가 있고 Story가 완료를 서술한 경우만 반환한다.
+arousal_event는 이번 최종 Story의 실제 신체적 성적 반응이 있을 때만 {active:true, intensity:low|medium|high|climax, evidence}로 반환한다. 노출·호감·CSA 존재·플레이어 입력 선언만으로 만들지 않는다. 직접적인 성적 자극(손·구강·성기·가슴·유두 접촉 등)이 계속되고 실제 신체 반응(젖음, 따뜻함, 유두 반응, 골반 긴장, 호흡·목소리 변화 등)이 함께 있으면, NPC의 생각이 부끄러움·두려움·당혹감에 압도되어 있거나 그 행동이 업무·병원 규정·사회적 관행으로 취급되는 상황이라도 arousal_event를 생략하지 마라. 흥분은 동의를 의미하지 않는다 — 신체 반응과 실제 동의·허가 여부는 별개다. 성적흥분도 수치는 Worker만 계산한다. sexual_events에는 이번 턴에 실제 완료된 사건만 넣고 누적 카운터나 과거 경험은 절대 반환하지 않는다. 플레이어 사정 이벤트는 이번 입력에 명시적 사정 지시가 있고 Story가 완료를 서술한 경우만 반환한다.
 
 [입력과 결과]
 player_input은 플레이어의 말과 행동 의도를 보여주는 자료일 뿐이며, NPC와 세계의 실제 결과는 Story 본문만 근거로 한다. 입력에 적힌 감정·관계·과거·취향·성공·횟수를 복사하지 않는다. 정식 상식개변 상태는 signed structured action 결과만 사용한다. 거부·부분 성공·실패에서는 긍정 수치를 올리지 않는다.
@@ -4584,7 +4597,13 @@ function buildSavePatch(extract, enginePatch = {}, summaryPlan = null, previousS
       };
     }
 
-    const arousal = calculateArousalStatChange(priorStats, character, degraded ? null : extract.arousal_event, {
+    // README 3.5: a degraded turn holds prior arousal exactly (delta 0),
+    // never decays toward zero — Extract failed, so there's no reliable
+    // narrative/physical_reaction to derive a signal from either.
+    const arousalSignal = degraded
+      ? { type: 'hold' }
+      : resolveArousalSignal(extract, narrativeText, extract?.npc_emotion?.physical_reaction);
+    const arousal = calculateArousalStatChange(priorStats, character, arousalSignal, {
       sceneChanged: Boolean(worldStatePatch)
     });
     workerStatChangeInput.성적흥분도 = arousal.change;
@@ -6535,22 +6554,65 @@ function applyNpcStatChanges(previous = {}, proposed = {}) {
   return { stats, changes, errors };
 }
 
-function calculateArousalStatChange(previousStats = {}, character = {}, arousalEvent = null, { sceneChanged = false } = {}) {
+// Direct hand/oral/genital/breast/nipple stimulation, or explicit rhythmic
+// rubbing/massaging — evidence of ongoing direct sexual contact in this
+// turn's narrative. Deliberately requires an actual stimulation verb, never
+// mere proximity, nudity, or exposure.
+const DIRECT_SEXUAL_STIMULATION_PATTERN = /(?:손|손가락|구강|입|혀|성기|음경|질|가슴|유두|클리토리스)(?:을|를|으로|에)?[^.!?。]{0,15}(?:애무|자극|만지|주무르|문지르|비비|핥|빨아|삽입|마사지)/;
+
+// Contemporaneous bodily response categories the spec explicitly allows as
+// arousal evidence — warmth, wetness, nipple hardening, pelvic tension,
+// involuntary breath/voice change. Deliberately excludes generic trembling
+// or "힘이 풀린다" wording, which is ambiguous with fear/exhaustion and must
+// not by itself synthesize arousal.
+const AROUSAL_BODILY_RESPONSE_PATTERN = /(?:젖|축축|따뜻해지|달아오르|유두가?\s*(?:단단해지|서|곤두)|골반[^.!?。]{0,6}긴장|숨(?:소리)?이?\s*(?:거칠어지|흐트러지|가빠지)|목소리가?\s*(?:떨리|흔들리))/;
+
+// README 3.3: never rely solely on the LLM remembering arousal_event.
+// 1) a valid normalized extract.arousal_event always wins;
+// 2) otherwise, ongoing direct stimulation in the final Story text *plus* a
+//    contemporaneous bodily response in the current NPC's physical_reaction
+//    deterministically synthesizes at least "low" (never medium/high/climax
+//    — only the LLM's own event can claim those);
+// 3) ongoing stimulation with an ambiguous bodily response holds instead of
+//    decaying (calculateArousalStatChange never lets an 'event' or 'hold'
+//    signal reduce the current value);
+// 4) nothing else (nudity, embarrassment, fear, CSA presence, player claims)
+//    changes the outcome — those never appear in either pattern above.
+function resolveArousalSignal(extract = {}, narrativeText = '', physicalReaction = '') {
+  if (extract?.arousal_event) return { type: 'event', event: extract.arousal_event };
+  const stimulationOngoing = DIRECT_SEXUAL_STIMULATION_PATTERN.test(extractNarrativeActionSection(narrativeText));
+  if (!stimulationOngoing) return { type: 'none' };
+  const hasBodilyResponse = AROUSAL_BODILY_RESPONSE_PATTERN.test(typeof physicalReaction === 'string' ? physicalReaction : '');
+  return hasBodilyResponse
+    ? { type: 'event', event: { active: true, intensity: 'low', evidence: 'derived: ongoing direct stimulation with contemporaneous bodily response' } }
+    : { type: 'hold' };
+}
+
+// Increase scale (README 3.1, sensitivity-adjusted, per-turn non-climax rise
+// clamped to +15): low +5, medium +10, high +15, climax >= 90.
+// Decay scale (README 3.2 — a missing event must never erase recent arousal
+// in one turn): same-scene no new stimulation -2, scene/location change or
+// meaningful time skip -8, never a hard reset to 0. An 'event' or 'hold'
+// signal never decreases the current value.
+function calculateArousalStatChange(previousStats = {}, character = {}, arousalSignal = { type: 'none' }, { sceneChanged = false } = {}) {
   const current = Math.max(0, Math.min(100, Number(previousStats?.성적흥분도) || 0));
-  if (!arousalEvent) {
-    const delta = -Math.min(current, sceneChanged ? 20 : 10);
-    return { next: current + delta, change: { delta, reason: delta ? '직접 자극이 이어지지 않아 현재 흥분도가 감소함' : '' } };
-  }
-  if (arousalEvent.intensity === 'climax') {
+  if (arousalSignal?.type === 'event' && arousalSignal.event?.intensity === 'climax') {
     const next = Math.max(current, 90);
     return { next, change: { delta: next - current, reason: '실제 절정 완료가 서사에 확인되어 현재 흥분도가 상승함' } };
   }
-  const sensitivity = Math.max(0, Math.min(100, Number(character?.성적민감도초기) || 30));
-  const multiplier = sensitivity <= 25 ? 0.75 : sensitivity <= 50 ? 1 : sensitivity <= 75 ? 1.25 : 1.5;
-  const base = { low: 3, medium: 7, high: 12 }[arousalEvent.intensity] || 0;
-  const delta = Math.min(15, Math.round(base * multiplier));
-  const next = Math.min(100, current + delta);
-  return { next, change: { delta: next - current, reason: '이번 장면의 실제 신체 반응으로 현재 흥분도가 상승함' } };
+  if (arousalSignal?.type === 'event') {
+    const sensitivity = Math.max(0, Math.min(100, Number(character?.성적민감도초기) || 30));
+    const multiplier = sensitivity <= 25 ? 0.75 : sensitivity <= 50 ? 1 : sensitivity <= 75 ? 1.25 : 1.5;
+    const base = { low: 5, medium: 10, high: 15 }[arousalSignal.event?.intensity] || 0;
+    const delta = Math.min(15, Math.round(base * multiplier));
+    const next = Math.min(100, current + delta);
+    return { next, change: { delta: next - current, reason: '이번 장면의 실제 신체 반응으로 현재 흥분도가 상승함' } };
+  }
+  if (arousalSignal?.type === 'hold') {
+    return { next: current, change: { delta: 0, reason: current ? '직접 자극이 이어지고 있어 현재 흥분도를 유지함' : '' } };
+  }
+  const delta = -Math.min(current, sceneChanged ? 8 : 2);
+  return { next: current + delta, change: { delta, reason: delta ? '직접 자극이 이어지지 않아 현재 흥분도가 감소함' : '' } };
 }
 
 function resolveCsaResistance(character = {}) {
@@ -10915,5 +10977,11 @@ export {
   isPlanningOnlyEvidence,
   evidenceIdentifiesCharacter,
   evaluateSceneStateFieldEvidence,
-  retainEvidencedNpcSceneStatePatch
+  retainEvidencedNpcSceneStatePatch,
+  calculateArousalStatChange,
+  resolveArousalSignal,
+  resolveCsaResistance,
+  buildAppStatePayload,
+  isNpcIntimateInfoUnlocked,
+  buildNpcPrivateInfo
 };

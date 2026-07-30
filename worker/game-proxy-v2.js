@@ -271,10 +271,10 @@ async function requestDeepSeekJsonWithRetry(env, requestBody, { timeoutMs = 6000
   throw lastError;
 }
 
-// H2: caps a single turn to at most one auxiliary LLM recovery call (JSON
-// syntax repair, first-encounter stat repair, CSA-omission narrative repair,
-// or mind-monitor repair) — the initial Extract call itself is not counted
-// against this budget, and choice repair never uses the LLM at all.
+// P1: no runtime path consumes this budget anymore (all auxiliary post-
+// stream recovery LLM calls were removed) — retained only for its existing
+// exported/test contract and so response bodies can keep reporting neutral
+// `recovery_used`/`recovery_kind` values without a shape change.
 function createRecoveryBudget() {
   return { used: false, kind: null };
 }
@@ -1471,27 +1471,7 @@ async function handleStory(req, env) {
 // 3. /api/extract — 상태 추출 (JSON)
 // ─────────────────────────────────────────────
 
-function buildMindRepairPrompt(characterName, characterStyle, narrativeText, badEmotion, errors) {
-  return `너는 방금 실패한 mind monitor(npc_emotion)만 다시 작성하는 역할이다. 다른 필드는 건드리지 않는다. 유효한 JSON 객체 하나만 출력한다. 마크다운 코드펜스와 설명문을 절대 쓰지 마라.
-
-[캐릭터]
-이름: ${characterName}
-말투: ${characterStyle || ''}
-
-[방금 생성된 서사]
-${narrativeText}
-
-[이전에 실패한 npc_emotion]
-${JSON.stringify(badEmotion)}
-
-[검증 오류]
-${errors.join('; ')}
-
-[요구 JSON 스키마]
-{"npc_emotion": {"surface": "따옴표로 감싼 1인칭 내면 독백, 실질 길이 최소 40자", "inner": "따옴표로 감싼 1인칭 내면 독백, 실질 길이 최소 40자", "physical_reaction": "관찰 가능한 신체적·행동적 반응, 최소 2문장", "state": "normal|questioning|conflicted|self_rationalizing|accepting|resisting|dependent"}}`;
-}
-
-// Deterministic, LLM-free — used only when mind-monitor generation/repair
+// Deterministic, LLM-free — used only when mind-monitor generation
 // still fails validation. Deliberately generic (no plot-specific facts, no
 // concrete action/outfit/body state) so it can never contradict the current
 // narrative; never the previous turn's saved surface/inner/physical_reaction.
@@ -1522,23 +1502,10 @@ function resolveMindMonitorDegradedFallback(field, turnNumber) {
   return candidates[index];
 }
 
-async function repairMindMonitor(env, characterName, characterStyle, narrativeText, badEmotion, errors) {
-  const prompt = buildMindRepairPrompt(characterName, characterStyle, narrativeText, badEmotion, errors);
-  const result = await requestDeepSeekJsonWithRetry(env, {
-    model: 'deepseek-v4-flash',
-    thinking: { type: 'disabled' },
-    messages: [{ role: 'system', content: prompt }],
-    response_format: { type: 'json_object' },
-    stream: false,
-    max_tokens: 1200
-  }, { timeoutMs: 30000, maxAttempts: 1 });
-  return result.parsed?.npc_emotion;
-}
-
-// Last-resort recovery after both full extraction attempts still produced
-// unparseable JSON: fixes only the syntax (stray prose, code fences,
-// trailing commas, bad quoting) around the model's own already-generated
-// content. Never re-runs the (expensive) narrative-to-JSON extraction.
+// P1: not called from the runtime Extract path anymore (retained only for
+// its existing exported/test contract). Fixes only the syntax (stray prose,
+// code fences, trailing commas, bad quoting) around already-generated
+// content — never re-runs the narrative-to-JSON extraction.
 function buildJsonRepairPrompt(rawText) {
   return `다음 텍스트는 유효한 JSON 객체여야 하지만 파싱에 실패했다. 앞뒤 설명문, 마크다운 코드펜스, 트레일링 콤마, 잘못된 따옴표 등 JSON 문법 오류만 고쳐서 정확히 같은 내용을 담은 strict JSON 객체 하나로 다시 출력하라. 필드 값이나 의미를 새로 짓거나 바꾸지 마라. 원본에 없는 내용을 추가하지 마라. 설명문이나 코드펜스 없이 JSON 객체만 출력하라.
 
@@ -1560,10 +1527,8 @@ async function repairRawJsonOutput(env, rawText) {
 }
 
 // One full "narrative text -> structured extract" cycle: prompt build,
-// DeepSeek call (with the JSON-repair fallback), NPC normalization/location
-// eligibility, and mind-monitor validation+repair. Factored out so the CSA-
-// omission fix (item 7) can re-run the exact same pipeline once against a
-// corrected narrative without duplicating any of this logic.
+// a single DeepSeek call, NPC normalization/location eligibility, and
+// mind-monitor validation with deterministic (non-LLM) fallback only.
 async function performExtractionPass(env, { narrativeText, playerInput, compatCtx, shortlistedImages, nextTurn, requestId, recoveryBudget, maxAttempts = 1, structuredPlan = null }) {
   const timing = {};
   const tPrompt = Date.now();
@@ -1571,7 +1536,7 @@ async function performExtractionPass(env, { narrativeText, playerInput, compatCt
   timing.prompt_build_ms = Date.now() - tPrompt;
 
   let result;
-  let jsonRepaired = false;
+  const jsonRepaired = false;
   try {
     const t3 = Date.now();
     result = await requestDeepSeekJsonWithRetry(env, {
@@ -1584,45 +1549,29 @@ async function performExtractionPass(env, { narrativeText, playerInput, compatCt
     }, { timeoutMs: 60000, maxAttempts });
     timing.deepseek_total_ms = Date.now() - t3;
   } catch (error) {
+    // P1: no auxiliary JSON-repair LLM call. attemptDeepSeekJsonRequest's own
+    // parseJsonContent already tries raw/fenced/brace-sliced parsing before
+    // failing, which is the deterministic cleanup this path relies on. A
+    // still-unparseable result falls straight through to the caller's
+    // existing degraded (non-app-transaction) or fail-closed (app
+    // transaction) handling — no second full Extract call happens here.
     const errorCode = error.code === 'UPSTREAM_TIMEOUT' ? 'UPSTREAM_TIMEOUT'
       : /JSON parse failed/.test(error.message) ? 'EXTRACT_JSON_PARSE_FAILED'
       : /Empty content|truncated/.test(error.message) ? 'EXTRACT_EMPTY_OUTPUT'
       : 'EXTRACT_UPSTREAM_FAILED';
-
-    // Both full regeneration attempts still produced unparseable JSON — try
-    // one cheap syntax-only repair of the model's own last output instead of
-    // giving up (or re-running the expensive narrative-to-JSON extraction).
-    // H2: this is one of the turn's auxiliary recovery calls, so it only
-    // runs if the shared per-turn recovery budget is still available.
-    let repaired = null;
-    if (errorCode === 'EXTRACT_JSON_PARSE_FAILED' && error.rawText && consumeRecoveryBudget(recoveryBudget, 'json_syntax')) {
-      const tRepair = Date.now();
-      try {
-        repaired = await repairRawJsonOutput(env, error.rawText);
-      } catch (repairError) {
-        console.error('Extract JSON repair failed:', { request_id: requestId, error: repairError.message });
+    console.error('Extract request failed:', { request_id: requestId, error_code: errorCode, error: error.message, raw: (error.rawText || '').slice(0, 500) });
+    return {
+      ok: false,
+      timing,
+      status: 502,
+      response: {
+        error: error.message,
+        error_code: errorCode,
+        request_id: requestId,
+        upstream_status: error.upstreamStatus ?? null,
+        finish_reason: error.finishReason ?? null
       }
-      timing.json_repair_ms = Date.now() - tRepair;
-    }
-
-    if (isPlainObject(repaired)) {
-      result = { parsed: repaired, rawText: error.rawText, finishReason: error.finishReason ?? null, upstreamStatus: error.upstreamStatus ?? null };
-      jsonRepaired = true;
-    } else {
-      console.error('Extract request failed:', { request_id: requestId, error_code: errorCode, error: error.message, raw: (error.rawText || '').slice(0, 500) });
-      return {
-        ok: false,
-        timing,
-        status: 502,
-        response: {
-          error: error.message,
-          error_code: errorCode,
-          request_id: requestId,
-          upstream_status: error.upstreamStatus ?? null,
-          finish_reason: error.finishReason ?? null
-        }
-      };
-    }
+    };
   }
 
   const t4 = Date.now();
@@ -1685,75 +1634,10 @@ async function performExtractionPass(env, { narrativeText, playerInput, compatCt
   // 영구 저장되지 않는다. 정상 첫 생성이면 generated.
   if (validation.ok) extract.mind_monitor_source = 'generated';
 
-  // H2 item 9: don't let a mind-monitor repair spend the turn's one
-  // auxiliary-recovery slot when this turn might also need it for a
-  // higher-priority repair (a first direct encounter's stats, or a CSA
-  // omission) — those are reserved ahead of mind-monitor repair.
-  const potentialFirstEncounter = isSetupComplete(compatCtx?.save)
-    && extract.character_id
-    && extract.character_id !== 'narrator'
-    && !hasStructuredEncounter(compatCtx?.save, extract.character_id)
-    && !hasLegacyEncounterEvidence(compatCtx?.save, extract.character_id)
-    && hasMeaningfulNpcEmotion(extract.npc_emotion);
-
-  // A CSA structural defect (or meta-awareness leak) must reserve the
-  // turn's one recovery slot ahead of mind-monitor repair — otherwise a
-  // mind-monitor repair can spend the only slot this turn has, leaving the
-  // higher-priority CSA integrity repair with none and forcing a hard
-  // CSA_INTEGRITY_UNRESOLVED failure it could otherwise have recovered from.
-  const applicableCsaForPriority = getApplicableCsaEntries(compatCtx?.save || {});
-  const preliminaryCsaAudit = applicableCsaForPriority.length
-    ? auditStructuredCsaExecution({
-        applicableCsa: applicableCsaForPriority,
-        triggerEvaluations: extract.csa_trigger_evaluations,
-        sexualResolution: extract.sexual_resolution,
-        csaRuntimeUpdates: extract.csa_runtime_updates,
-        save: compatCtx?.save || {},
-        master: compatCtx?.master || {},
-        characterId: extract.character_id,
-        npcsPresent: extract.npcs_present,
-        narrativeText,
-        playerInput
-      })
-    : { ok: true, issues: [] };
-  const preliminaryCsaViolations = collectCsaMetaAwarenessViolations(narrativeText, extract);
-
-  const shouldReserveRecovery = potentialFirstEncounter
-    || extract.csa_omission.length > 0
-    || !preliminaryCsaAudit.ok
-    || preliminaryCsaViolations.length > 0;
-
-  let mindMonitorRepaired = false;
-  if (!validation.ok) {
-    const characterId = mindMonitorCharacterId;
-    const character = characterId ? compatCtx?.master?.characters?.[characterId] : null;
-    if (character && !shouldReserveRecovery && consumeRecoveryBudget(recoveryBudget, 'mind_monitor')) {
-      const t6 = Date.now();
-      try {
-        const repaired = await repairMindMonitor(env, character.name || character['이름'], character['말투'], narrativeText, extract.npc_emotion, validation.errors);
-        if (isPlainObject(repaired)) {
-          const repairedValidation = applyMindMonitorRepeatCheck(validateNpcEmotion(repaired, characterId), repaired, previousNpcEmotion);
-          // Adopt whichever fields the repair actually fixed even if the
-          // repair didn't fully pass — one still-failing field must not
-          // discard a sibling field that already validates cleanly.
-          for (const field of ['surface', 'inner', 'physical_reaction']) {
-            if (!repairedValidation.fieldErrors[field].length) {
-              extract.npc_emotion[field] = repaired[field];
-              validation.fieldErrors[field] = [];
-            }
-          }
-          validation.errors = [...validation.fieldErrors.surface, ...validation.fieldErrors.inner, ...validation.fieldErrors.physical_reaction];
-          validation.ok = validation.errors.length === 0;
-          mindMonitorRepaired = true;
-          // 마인드 보정 호출의 결과를 사용한 턴은 repaired로 기록한다.
-          if (validation.ok) extract.mind_monitor_source = 'repaired';
-        }
-      } catch (error) {
-        console.error('Mind monitor repair failed:', { request_id: requestId, error: error.message });
-      }
-      timing.mind_repair_ms = Date.now() - t6;
-    }
-  }
+  // P1: no auxiliary mind-monitor repair LLM call. An invalid field goes
+  // straight to the deterministic degraded fallback below — a valid sibling
+  // field is never discarded just because another field failed.
+  const mindMonitorRepaired = false;
   if (!validation.ok) {
     // 이전 턴 npc_emotion을 그대로 복사하지 않는다 — 실패한 필드만 간결한
     // 현재 턴 degraded 문구로 대체하고, 이미 검증을 통과한 형제 필드는
@@ -1775,10 +1659,10 @@ async function performExtractionPass(env, { narrativeText, playerInput, compatCt
 }
 
 // ─────────────────────────────────────────────
-// H2: Extract degraded fallback — when Extract's own final JSON generation
-// fails outright (and no auxiliary recovery call fixes it), a turn that
-// can't possibly mutate persistent app state (suggestions/CSA/first
-// encounter) still saves its narrative and choices instead of blocking.
+// Extract degraded fallback — when the single primary Extract call fails
+// outright, a turn that can't possibly mutate persistent app state
+// (suggestions/CSA/first encounter) still saves its narrative and choices
+// instead of blocking.
 // ─────────────────────────────────────────────
 
 // Deterministic, LLM-free turn_summary for a degraded turn — takes the
@@ -1841,8 +1725,8 @@ async function handleExtract(req, env) {
 
 // Factored out of handleExtract so /api/feedback's regeneration flow can run
 // the exact same Extract pipeline (image shortlist, degraded fallback, CSA
-// narrative-integrity repair, choice normalization) in-process, without a
-// second HTTP round-trip or a duplicated copy of this logic.
+// integrity observation, choice normalization) in-process, without a second
+// HTTP round-trip or a duplicated copy of this logic.
 async function runExtractPipeline(env, { game_id, narrative_text, player_input, structured_action = null, requestId }) {
   const timing = {};
   const totalStart = Date.now();
@@ -1912,13 +1796,16 @@ async function runExtractPipeline(env, { game_id, narrative_text, player_input, 
   // Streaming-first: once Story has streamed, Extract failure is non-fatal
   // unless this is a validated structured app transaction. Optional state is
   // omitted and the narrative is committed with a deterministic degraded extract.
+  // P1: exactly one primary Extract LLM request either way — a validated
+  // structured app transaction stays fail-closed on that single attempt's
+  // failure instead of triggering a second full regeneration call.
   const recoveryBudget = createRecoveryBudget();
   const isStructuredAppTransaction = structuredPlan?.canonical_action?.type === 'app_transaction';
   const degradedAllowed = !isStructuredAppTransaction;
 
   const firstPass = await performExtractionPass(env, {
     narrativeText: narrative_text, playerInput: player_input, compatCtx: effectiveCtx, shortlistedImages, nextTurn, requestId,
-    recoveryBudget, maxAttempts: degradedAllowed ? 1 : 2, structuredPlan
+    recoveryBudget, maxAttempts: 1, structuredPlan
   });
   Object.assign(timing, firstPass.timing);
   if (!firstPass.ok) {
@@ -2076,47 +1963,22 @@ async function runExtractPipeline(env, { game_id, narrative_text, player_input, 
   let narrativeReplacement = null;
   let finalNarrativeText = narrative_text;
 
-  // H2 item 9: first-encounter repair now runs BEFORE the CSA-omission
-  // repair, and both compete for the same one-per-turn recovery budget —
-  // first encounter has priority (see performExtractionPass's
-  // shouldReserveRecovery, which already held the budget back from mind-
-  // monitor repair for exactly this reason). Mirrors the exact gate
-  // buildSavePatch itself uses (no recorded/inferred prior encounter for
-  // this NPC) so this only ever fires when a first-turn absolute value
-  // would otherwise silently be skipped — never for an NPC already known to
-  // have been met, and never a uniform fixed default (see
-  // repairMissingFirstEncounterStats). hasMeaningfulNpcEmotion(...) stands
-  // in for "genuinely engaged this turn, not just a background mention".
-  let firstEncounterRepaired = false;
-  if (isSetupComplete(compatCtx.save) && extract.character_id && extract.character_id !== 'narrator'
-    && extract._npc_registration_rejected !== true && extract._npc_location_rejected !== true
-    && !isPlainObject(extract.first_encounter_stats)) {
-    const characterId = extract.character_id;
-    const alreadyEncountered = hasStructuredEncounter(compatCtx.save, characterId) || hasLegacyEncounterEvidence(compatCtx.save, characterId);
-    if (!alreadyEncountered && hasMeaningfulNpcEmotion(extract.npc_emotion) && consumeRecoveryBudget(recoveryBudget, 'first_encounter')) {
-      const tFirstEncounter = Date.now();
-      try {
-        const repaired = await repairMissingFirstEncounterStats(
-          env, finalNarrativeText, compatCtx.save?.player || {}, characters[characterId] || {}
-        );
-        if (repaired) {
-          extract.first_encounter_stats = repaired;
-          firstEncounterRepaired = true;
-        }
-      } catch (error) {
-        console.error('First encounter repair failed:', { request_id: requestId, error: error.message });
-      }
-      timing.first_encounter_repair_ms = Date.now() - tFirstEncounter;
-    }
-  }
+  // P1: no auxiliary first-encounter repair LLM call. When the primary
+  // Extract omits or invalidates first_encounter_stats, that optional patch
+  // is simply left out (buildSavePatch already treats a missing/invalid
+  // value as "no first-encounter write this turn") — NPC detection,
+  // npc_emotion, dialogue, relationship, and image shortlist processing all
+  // continue unaffected, and the turn never hard-fails over this.
+  const firstEncounterRepaired = false;
 
-  // H3-B: CSA narrative integrity — a self-reported CSA omission (an active,
-  // applicable forced rule that never actually executed) and CSA
-  // meta-awareness (the NPC narrating that a rule/app/system is doing this
-  // to them, instead of just naturally living it) are both fail-open,
-  // non-blocking issues repaired by a single combined call at most — never
-  // a Story/Extract re-run. Only checked when there's an applicable CSA to
-  // begin with; no applicable CSA means nothing to detect or repair.
+  // CSA narrative integrity — a hard/soft classification of the structural
+  // audit (validated app-transaction-independent runtime/evaluation issues)
+  // and CSA meta-awareness (the NPC narrating that a rule/app/system is
+  // doing this to them) are both fail-open, non-blocking observations. P1:
+  // neither triggers an LLM repair or a Story/Extract re-run — soft issues
+  // become warnings, meta-awareness is logged, and the streamed narrative is
+  // never rewritten. Only checked when there's an applicable CSA to begin
+  // with; no applicable CSA means nothing to observe.
   let csaMetaAwarenessDetected = false;
   let csaMetaAwarenessRepaired = false;
   let csaMetaAwarenessFields = [];
@@ -2175,26 +2037,20 @@ async function runExtractPipeline(env, { game_id, narrative_text, player_input, 
       for (const csaId of runtime.ignored) {
         csaValidationWarnings.push({ code: 'CSA_RUNTIME_OBSERVATION_IGNORED', csa_id: csaId });
       }
+      // P1: meta-awareness is observed and reported, never repaired — no LLM
+      // call and no post-stream narrative replacement. The already-streamed
+      // Story text is never rewritten.
       if (violations.length) {
         csaMetaAwarenessDetected = true;
         csaMetaAwarenessFields = violations.map(v => v.field);
-        const integrityResult = await resolveCsaNarrativeIntegrity(env, {
-          narrativeText: finalNarrativeText,
-          applicableCsa,
-          omissions: [],
-          violations,
-          integrityIssues: [],
-          extract,
-          previousSave: effectiveCtx.save,
-          characters,
-          requestId,
-          // Meta cleanup is deterministic in this path; do not spend the
-          // normal recovery budget on a narrative/CSA observation.
-          recoveryBudget: { used: true, kind: 'meta_only' }
-        });
-        finalNarrativeText = integrityResult.finalNarrativeText;
-        if (integrityResult.narrativeReplacement) narrativeReplacement = integrityResult.narrativeReplacement;
-        csaMetaAwarenessRepaired = integrityResult.finalViolations.length === 0;
+        console.warn(JSON.stringify({
+          event: 'csa_meta_awareness_observed',
+          endpoint: '/api/extract',
+          request_id: requestId,
+          game_id,
+          turn_number: nextTurn,
+          fields: csaMetaAwarenessFields
+        }));
       }
     }
   }

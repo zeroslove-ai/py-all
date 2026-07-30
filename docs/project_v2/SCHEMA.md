@@ -301,6 +301,19 @@ Worker의 `buildSavePatch()`는 추출 결과를 DB 구조에 맞게 바꾼다.
 
 `dialogue_lines`는 렌더링 보조값이며 그대로 세이브 JSON에 넣지 않는다.
 
+## CSA-first structured authorization (JSONB only)
+
+`game_save.data`의 기존 JSONB 안에서만 다음 선택 필드를 사용한다.
+
+- `csa_active[*].semantic_contract`: custom CSA activate/update semantic validation이
+  서명해 저장하는 actor/target/direction/action/trigger/duration contract.
+- Extract transient fields `sexual_resolution`, `csa_trigger_evaluations`,
+  `relationship_events`: Worker의 CSA-first / voluntary default-deny Commit
+  검증 입력이다. 이 중 영구 관계 변화만 `npc_relationship_state[*].intimacy_state`에 병합한다.
+
+새 DB column, RPC, migration은 없다. legacy custom CSA에 contract가 없으면
+runtime sexual authorization에는 사용하지 않는다.
+
 ## `reset_game_progress` 규칙
 
 - 사용자 확인은 프론트에서 먼저 받는다.

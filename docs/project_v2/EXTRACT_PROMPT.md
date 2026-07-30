@@ -26,6 +26,19 @@ Worker는 다음 값을 프롬프트에 직접 삽입한다.
 
 ## 추출 규칙
 
+### CSA-first sexual resolution
+
+Extract는 자연어 의미를 `sexual_resolution`으로 구조화한다. `csa_direct`는
+실제 활성 CSA ID, exact action/direction, trigger evidence, completion evidence를
+가져야 하며 consent는 `not_required`다. CSA 밖 completion은 `voluntary`와 현재
+NPC의 직접 대사 consent가 모두 있을 때만 반환한다. 애매한 설명·질문·상담은
+`discussion`/`none`으로 둔다.
+
+모든 현재 적용 CSA는 `csa_trigger_evaluations`에 정확히 하나씩 기록한다.
+관계 변화는 `relationship_events`의 `romantic_interest_declared`,
+`boundary_added`, `boundary_removed`, `refusal`만 사용한다. Worker는 이 구조와
+Story evidence를 검증하며 한국어 긍정 정규식으로 consent나 intent를 재해석하지 않는다.
+
 ### 플레이어 정보
 
 이번 턴의 `player_input`에 플레이어가 실제로 답한 항목을 우선 `player_patch`에 넣는다. 서사에 같은 값이 다시 서술되지 않아도 저장한다. 원본 입력에 없는 항목만 서사에서 실제로 답한 값으로 보완한다. 답하지 않은 키는 생략하고, 아무 답도 없으면 `{}`를 사용한다.

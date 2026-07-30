@@ -89,3 +89,17 @@ action instead of narrating it once and forgetting it.
   `detectPresetRequiredActionOmissions` (deliberately scoped to
   `target_group:'player'` presets, since staff-on-NPC presets depend on a
   trigger judgment that can't be verified structurally).
+
+## CSA-first sexual authorization
+
+- CSA direct는 voluntary gate의 예외가 아니라 먼저 평가되는 독립 경로다.
+  유효한 semantic contract의 exact actor/target/action/trigger가 구조화
+  Extract 결과와 일치하면 consent, intimacy stage, boundary, refusal,
+  random roll을 보지 않고 집행한다.
+- CSA 밖의 sexual completion은 default deny다. 현재 NPC의 구조화된
+  voluntary consent, stage, boundary, recent refusal, Story 완료 evidence가
+  모두 검증될 때만 저장한다. Worker는 한국어 긍정 정규식으로 이를 추측하지 않는다.
+- custom CSA는 activate/update의 기존 semantic validation에서
+  `semantic_contract`를 받고 서명된 canonical action과 함께 저장한다.
+  ambiguous contract는 `CUSTOM_CSA_SEXUAL_SCOPE_AMBIGUOUS`로 거절하며,
+  legacy custom은 Story 배경 규칙으로만 남고 sexual direct authorization에는 쓰지 않는다.

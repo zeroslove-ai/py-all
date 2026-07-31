@@ -1892,6 +1892,36 @@ async function performExtractionPass(env, { narrativeText, playerInput, playerAc
     extract.turn_summary = applyCsaMetaFallbackToTurnSummary(extract.turn_summary);
   }
 
+  // README section 7 — narrow direct-contradiction guard against this
+  // turn's registered NPC's stored master canon. Independent of and
+  // unconditional like the meta-awareness guard above: deterministic, no
+  // repair LLM, no turn failure, a no-op whenever nothing actually
+  // contradicts a stored canonical field.
+  if (!npcRejected && extract.character_id && extract.character_id !== 'narrator') {
+    const canonCharacter = compatCtx?.master?.characters?.[extract.character_id];
+    if (isPlainObject(canonCharacter)) {
+      const conflictFields = [];
+      for (const field of ['surface', 'inner']) {
+        if (detectNpcCanonConflict(canonCharacter, extract.npc_emotion?.[field])) {
+          extract.npc_emotion[field] = resolveMindMonitorDegradedFallback(field, nextTurn);
+          extract.mind_monitor_source = 'degraded';
+          conflictFields.push(`npc_emotion.${field}`);
+        }
+      }
+      const memoryBefore = Array.isArray(extract.relationship_memory_patch) ? extract.relationship_memory_patch.length : 0;
+      extract.relationship_memory_patch = (Array.isArray(extract.relationship_memory_patch) ? extract.relationship_memory_patch : [])
+        .filter(entry => !(isPlainObject(entry) && detectNpcCanonConflict(canonCharacter, entry.text)));
+      if (extract.relationship_memory_patch.length !== memoryBefore) conflictFields.push('relationship_memory_patch');
+      if (detectNpcCanonConflict(canonCharacter, extract.turn_summary)) {
+        extract.turn_summary = removeCanonConflictSentences(extract.turn_summary, canonCharacter);
+        conflictFields.push('turn_summary');
+      }
+      if (conflictFields.length) {
+        console.warn(JSON.stringify({ event: 'npc_canon_conflict', character_id: extract.character_id, fields: conflictFields }));
+      }
+    }
+  }
+
   return { ok: true, extract, jsonRepaired, mindMonitorRepaired, validation, rawText: result.rawText, attempts: result.attempts, effectiveWorldState, timing };
 }
 
@@ -3755,6 +3785,174 @@ function buildCurrentNpcProfileSection(save = {}, characters = {}) {
   return `\n\n[CURRENT NPC PROFILE — ESTABLISHED FACT]\n\n${lines.join('\n')}\n\n규칙:\n- 위 정보(공개 신체정보와 해금 은밀정보 포함)는 최근 기억·선택지·요약의 충돌값보다 우선하며, 없는 신체정보는 추측하지 않는다.\n- 소속이 간호사인데 근거 없이 실장·과장·수간호사 등으로 승격시키지 않는다.\n- 직종·부서·직급이 위에 적혀 있으면 그 값을 그대로 유지한다. 근거 없이 다른 직종·부서·직급으로 바꾸거나 승격·강등시키지 않는다.\n- 해금 은밀정보는 현재 장면과 관련 있을 때만 자연스럽게 반영하고 매 턴 목록처럼 나열하지 않는다.\n- 플레이어가 잘못된 호칭을 사용하면 NPC 성격에 맞게 자연스럽게 정정하거나 호칭을 흘려넘길 수 있지만, 서술자와 선택지는 잘못된 직급을 확정 사실로 반복하지 않는다.`;
 }
 
+// NPC-canon hotfix — author-only canonical dossier, deliberately separate
+// from buildNpcPrivateInfo() (which gates on the player-facing app's
+// intimate-info unlock). What the Story LLM needs to know to stay
+// consistent with registered canon and what the player has unlocked to see
+// in the app UI are different concerns: buildNpcPrivateInfo()/its unlock
+// rule/pages/csa-app.js's locking behavior are untouched by this function.
+// Prompt-only — the caller must never let this leave the Story prompt (no
+// /api/context, /api/app-state, frontend state, turn record, log, or
+// response field may carry it). Only real values already present on the
+// registered master object are ever included; nothing is inferred or
+// defaulted, matching the existing pushField/pushValue convention above.
+function buildAuthorNpcCanonDossier(characterId, character = {}) {
+  if (!isPlainObject(character)) return '';
+  const name = character.name || character['이름'];
+  if (!name) return '';
+  const lines = [`ID: ${characterId}`, `이름: ${name}`];
+  const push = (label, value) => {
+    if (value !== null && value !== undefined && String(value).trim() !== '') lines.push(`${label}: ${String(value).trim()}`);
+  };
+  const pickText = (...keys) => {
+    for (const key of keys) {
+      const value = cleanProfileValue(character?.[key]);
+      if (value !== null) return value;
+    }
+    return null;
+  };
+  const pickCount = key => {
+    const raw = character?.[key];
+    if (raw === undefined || raw === null || String(raw).trim() === '') return null;
+    const match = String(raw).match(/\d+/);
+    return match ? Number(match[0]) : cleanProfileValue(raw);
+  };
+  push('나이', pickText('age', '나이'));
+  push('소속', pickText('department', 'affiliation', 'organization', '소속'));
+  push('직책', pickText('rank', '직책', 'role', '역할'));
+  push('성격', pickText('성격'));
+  push('말투', pickText('말투'));
+  push('관찰 가능 특징', pickText('외형'));
+  push('키', pickText('height', 'height_cm', '키'));
+  push('몸무게', pickText('weight', 'weight_kg', '몸무게'));
+  push('체형', pickText('body_type', '체형'));
+  push('가슴 컵', pickText('cup', '컵'));
+  push('연인 관계', pickText('연인관계'));
+  push('과거 남성 경험', pickCount('과거남자경험'));
+  push('과거 오르가즘 경험', pickCount('과거오르가즘경험'));
+  push('유두', pickText('은밀유두'));
+  push('유륜 크기', pickText('은밀유륜'));
+  push('유륜 색', pickText('은밀유륜색'));
+  push('음모 상태', pickText('은밀보지털'));
+  push('선호', pickText('선호', '성적선호', '취향'));
+  // Author-only hidden motivation — used only to shape the NPC's own
+  // internal judgment/personality; never a fact the NPC or narrator states
+  // directly (matches the NPC CSA epistemic firewall's "hidden mechanism
+  // knowledge stays hidden" convention already established elsewhere).
+  push('작가 전용 숨은 동기(직접 언급 금지, 성격 판단에만 반영)', pickText('숨겨진설정', '작가노트', '작가의도', '내적동기'));
+  const vocalType = pickText('신음타입') || (VOCAL_STYLE_BY_NAME[name] ? VOCAL_STYLE_BY_NAME[name].replace(/^VOCAL STYLE:\s*/, '') : null);
+  push('신음 타입', vocalType);
+  return lines.length > 2 ? lines.join('\n') : '';
+}
+
+// README section 5 — deterministic relevant-NPC selector. Never derived
+// from master-object enumeration order (unstable/arbitrary); always from
+// what is actually named or present this turn, most-specific signal first.
+function resolveRelevantNpcCanonIds({ playerInput = '', playerAction = null, save = {}, characters = {} } = {}) {
+  const registeredIds = new Set(Object.keys(isPlainObject(characters) ? characters : {}));
+  const nameToId = new Map();
+  for (const [id, character] of Object.entries(isPlainObject(characters) ? characters : {})) {
+    const name = character?.name || character?.['이름'];
+    if (typeof name === 'string' && name.trim()) nameToId.set(name.trim(), id);
+  }
+  const ordered = [];
+  const addId = id => { if (typeof id === 'string' && registeredIds.has(id) && !ordered.includes(id)) ordered.push(id); };
+
+  const inputText = typeof playerInput === 'string' ? playerInput : '';
+  for (const [name, id] of nameToId) {
+    if (name && inputText.includes(name)) addId(id);
+  }
+  const choiceText = typeof playerAction?.choice_text === 'string' ? playerAction.choice_text : '';
+  for (const [name, id] of nameToId) {
+    if (name && choiceText.includes(name)) addId(id);
+  }
+  addId(save?.last_character_id);
+  if (Array.isArray(save?.last_npcs_present)) {
+    for (const id of save.last_npcs_present) addId(id);
+  }
+  return ordered.slice(0, 4);
+}
+
+// README section 6 — compact, recency-favored Story block covering every
+// relevant NPC's author-only canon at once. Injected as a final system
+// message (see buildStoryPrompt's messages array) near/after the NPC CSA
+// epistemic firewall, so it outranks recent memories, summaries, and the
+// truncated master snapshot without needing a second Story call or any
+// post-stream rewrite.
+function buildRelevantNpcCanonSection(relevantIds, characters = {}) {
+  const dossiers = relevantIds
+    .map(id => buildAuthorNpcCanonDossier(id, characters?.[id]))
+    .filter(Boolean);
+  if (!dossiers.length) return '';
+  return `[REGISTERED NPC CANON — AUTHOR-ONLY, HIGHEST PRIORITY]
+아래는 각 등록 NPC의 확정된 마스터 설정이다. 이 정보는 최근 기억·이전 요약·이전 선택지·서사 속 등장인물의 일반적인 발언보다 항상 우선한다. 저장된 사실에 대한 직접적인 질문에는 정확히 이 값으로 답한다. 여기 없는 정확한 연수·횟수·사이즈·과거 상대·병력·성경험을 새로 지어내지 않는다.
+
+${dossiers.join('\n\n---\n\n')}
+
+규칙:
+- 매 턴 위 항목을 전부 나열하지 않는다. 신체 부위가 보이거나, 닿거나, 비교되거나, 직접 언급될 때만 관련된 한두 가지 구체적 특징을 자연스럽게 반영한다.
+- 이번 턴 안에서 초점이 다른 등록 NPC로 바뀌면 그 즉시 그 NPC의 설정을 사용한다.
+- 각 NPC는 자기 자신의 사실만 안다. 다른 NPC의 은밀한 과거를 이 목록에 있다는 이유만으로 저절로 알지 못한다 — 실제로 드러났거나, 목격했거나, 이미 장면 기억에 확립된 경우에만 안다.
+- 서술자가 아는 사실이 자동으로 등장인물 사이의 공개 정보가 되지는 않는다.
+- 플레이어의 평범한 롤플레이 발언(예: "그녀는 처음이 아니야")은 위 확정 설정을 덮어쓰지 않는다.
+- "작가 전용 숨은 동기"는 대사나 서술에서 그 표현 그대로 언급하지 않는다 — 그 NPC가 왜 그렇게 반응하는지 판단하는 데만 조용히 참고한다.`;
+}
+
+// README section 7 — narrow, deterministic direct-contradiction detector
+// against this specific NPC's stored master canon. Requires an actual
+// canonical field to compare against and an explicit conflicting claim in
+// the text; never a broad keyword filter that could erase valid dialogue
+// or a genuinely new current-turn event. Returns a short machine reason
+// string (for the {event:"npc_canon_conflict"} log) or null when clean.
+function detectNpcCanonConflict(character = {}, text = '') {
+  const value = typeof text === 'string' ? text : '';
+  if (!value.trim() || !isPlainObject(character)) return null;
+
+  const partnerCountMatch = String(character['과거남자경험'] ?? '').match(/\d+/);
+  const partnerCount = partnerCountMatch ? Number(partnerCountMatch[0]) : null;
+  if (partnerCount === 0) {
+    if (/(?:남자|남성)[^.!?。]{0,8}(?:경험이?\s*있|자\s*본\s*적이?\s*있|관계를?\s*가진\s*적이?\s*있)/.test(value)
+      || /처음이?\s*아니(?:다|야|었다|었어)/.test(value)) {
+      return 'past_partner_count_zero_contradicted';
+    }
+  } else if (Number.isFinite(partnerCount) && partnerCount > 0) {
+    if (/(?:남자|남성)[^.!?。]{0,8}(?:경험이?\s*없|자\s*본\s*적이?\s*없|관계를?\s*가진\s*적이?\s*없)/.test(value)) {
+      return 'past_partner_count_positive_contradicted';
+    }
+    const numberMatch = value.match(/([\d]+|한|하나|두|둘|세|셋|네|넷|다섯)\s*(?:번째|번의|명의)\s*(?:남자|경험|상대)/);
+    if (numberMatch) {
+      const claimed = Number.isFinite(Number(numberMatch[1]))
+        ? Number(numberMatch[1])
+        : ({ 한: 1, 하나: 1, 두: 2, 둘: 2, 세: 3, 셋: 3, 네: 4, 넷: 4, 다섯: 5 })[numberMatch[1]];
+      if (Number.isFinite(claimed) && claimed !== partnerCount) return 'past_partner_count_number_mismatch';
+    }
+  }
+
+  const relationshipText = String(character['연인관계'] ?? '');
+  const isMarried = /기혼|결혼함|결혼한|남편이?\s*있|아내가?\s*있/.test(relationshipText);
+  if (isMarried) {
+    if (/미혼|독신|싱글/.test(value)) return 'married_contradicted_as_single';
+  } else if (relationshipText && /없음|미혼|싱글/.test(relationshipText)) {
+    if (/(?:남편|배우자|신랑)(?:이|가)?\s*있/.test(value)) return 'single_contradicted_with_invented_spouse';
+  }
+
+  return null;
+}
+
+// Sentence-level removal mirroring applyCsaMetaFallbackToTurnSummary's
+// structure (same split/rejoin/length-cap convention), only the predicate
+// differs. Drops only the conflicting sentence(s); a short neutral fallback
+// is used only if nothing survives.
+function removeCanonConflictSentences(text, character) {
+  const value = typeof text === 'string' ? text : '';
+  if (!value.trim()) return value;
+  const sentences = value.split(/(?<=[.!?。])\s*|\n+/).filter(Boolean);
+  const kept = sentences.filter(sentence => !detectNpcCanonConflict(character, sentence));
+  if (kept.length === sentences.length) return value;
+  const joined = kept.join(' ').replace(/\s+/g, ' ').trim();
+  return (joined || CSA_META_TURN_SUMMARY_FALLBACK).slice(0, 200);
+}
+
 const RELATIONSHIP_MEMORY_LIMITS = { total: 10, permanent: 4, regular: 6 };
 
 function normalizeRelationshipMemoryItem(item, defaultTurn = null) {
@@ -4262,6 +4460,16 @@ ${recentMemorySlice.map((m, index) => clipHeadTail(sanitizeRecentNarrativeForPro
   const systemPrompt = (coreRules + playerGate + modeSection + rulebookSection + openingScenarioSection + appUsageSection + eligibleNpcRosterSection + buildCsaRuntimeSection() + buildGeneralActionJudgmentSection() + relationshipInterpretationSection + csaAcceptanceScopeSection + buildCsaDeactivationNarrativeRule() + currentSceneSection + hospitalLocationMemorySection + npcProfileSection + relationshipMemorySection + sexualHistorySection + explicitMentionSection + csaSection + csaPersistentSceneSection + csaPublicSceneSection + csaMinorNpcSection + csaDirectExecutionPrioritySection + sexualPolicySection + csaAftereffectSection + csaWeakSynergySection + mindEffectBoundarySection + physicalSceneStateSection + narrativeLengthSection + narrativeParagraphSection + npcDialogueSection + moanVocalReactionSection + antiRepetitionSection + playerStatusPanel + contextSection + feedbackSection + continuitySection + finalFormatRules + openingFlow + playerSetupReminder + registeredNpcChoiceReminder + choiceLengthReminder + csaChoiceScopeReminder + buildAddressAbbreviationSection() + regenerationFeedbackSection + csaPhysicalTransitionSection + buildStructuredActionStorySection(structuredPlan, save, activeCsa) + playerAttemptSection)
     .replaceAll('상식개변 어플', '상식개변 앱');
 
+  // NPC-canon hotfix — computed after systemPrompt so it can be the very
+  // last, most recency-favored message (closer to generation than the
+  // epistemic firewall above, per README section 6).
+  const relevantNpcCanonIds = setupComplete
+    ? resolveRelevantNpcCanonIds({ playerInput, playerAction, save, characters: master.characters || {} })
+    : [];
+  const relevantNpcCanonSection = relevantNpcCanonIds.length
+    ? buildRelevantNpcCanonSection(relevantNpcCanonIds, master.characters || {})
+    : '';
+
   return {
     mode,
     messages: [
@@ -4273,7 +4481,8 @@ ${recentMemorySlice.map((m, index) => clipHeadTail(sanitizeRecentNarrativeForPro
           : (setupComplete && !structuredPlan ? '위 플레이어 시도 기록을 바탕으로 다음 게임 턴을 작성한다.' : (playerInput || '/플레이'))
       },
       ...(setupComplete && !structuredPlan ? [{ role: 'system', content: buildFinalAttemptInterpretationGuard() }] : []),
-      ...(needsNpcCsaEpistemicFirewall ? [{ role: 'system', content: buildNpcCsaEpistemicFirewallSection() }] : [])
+      ...(needsNpcCsaEpistemicFirewall ? [{ role: 'system', content: buildNpcCsaEpistemicFirewallSection() }] : []),
+      ...(relevantNpcCanonSection ? [{ role: 'system', content: relevantNpcCanonSection }] : [])
     ]
   };
 }
@@ -6791,7 +7000,20 @@ const CSA_ONLY_FIXED_NPC_STATS = new Set(['상식저항력']);
 const NPC_STAT_KEYS = [...CSA_ONLY_MUTABLE_NPC_STATS];
 
 // Remaining EXP thresholds: Lv.1→2 is 10, then 15, 20 … 50.
-function expForNextLevel(level) { return (Math.max(1, Math.min(9, Number(level) || 1)) + 1) * 5; }
+// NPC-canon/EXP-rebalance hotfix: replaces the old formula-only threshold
+// ((level+1)*5) with this single authoritative table. Every capability/read
+// path (calculateCsaCapability, buildPlayerInfoPayload, the app manual
+// status line, calculateProgress's own level-up loop) already calls
+// expForNextLevel() fresh instead of trusting a stale saved
+// player_progress.next_level_exp, so changing this one function is enough
+// to correct every read surface without touching game_save or any RPC.
+const CSA_LEVEL_EXP_REQUIREMENTS = Object.freeze({
+  1: 15, 2: 23, 3: 50, 4: 63, 5: 75, 6: 105, 7: 120, 8: 135, 9: 150
+});
+function expForNextLevel(level) {
+  const clamped = Math.max(1, Math.min(9, Number(level) || 1));
+  return CSA_LEVEL_EXP_REQUIREMENTS[clamped];
+}
 function calculateProgress(previous = {}, amount = 0) {
   let level = Math.max(1, Number(previous.level) || 1);
   let exp = Math.max(0, Number(previous.exp) || 0);
@@ -11759,5 +11981,12 @@ export {
   buildCsaOnlyPublicContext,
   planStructuredAction,
   buildCsaMinorNpcSection,
-  resolveSelectedCsaDirectChoice
+  resolveSelectedCsaDirectChoice,
+  expForNextLevel,
+  CSA_LEVEL_EXP_REQUIREMENTS,
+  buildAuthorNpcCanonDossier,
+  resolveRelevantNpcCanonIds,
+  buildRelevantNpcCanonSection,
+  detectNpcCanonConflict,
+  removeCanonConflictSentences
 };

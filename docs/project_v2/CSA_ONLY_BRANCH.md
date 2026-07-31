@@ -174,3 +174,15 @@ NPC는 상식개변의 존재·작동 원리·시점 변화를 절대 인식하�
 LLM이 자연스럽게 처리할 수 있는 서사 형식, 플레이어 설정 추천, 선택지 문구, 카드 표현을 Worker의 hard gate로 검증하지 않는다. 이들 품질 문제는 warning 또는 best-effort fallback으로 처리하며 이미 스트리밍된 Story를 폐기하거나 Commit을 차단하지 않는다.
 
 Hard failure는 중복 Commit, turn mismatch, 잘못된 structured transaction, DB 저장 실패, 권한 없는 성적 완료 상태 저장처럼 실제 무결성·권한 문제가 있는 경우에만 사용한다.
+
+## NPC canon enforcement (author-only dossier)
+
+`buildCurrentNpcProfileSection`은 `save.last_character_id` 하나만 읽는 기존 단일 프로필 절이며 그대로 유지된다. 같은 턴 초점 전환이나 복수 등장 NPC를 지원하기 위해 `buildAuthorNpcCanonDossier(characterId, character)`가 별도로 master의 실제 값만(추론·placeholder 없음) 담은 프롬프트 전용 요약을 만든다 — 이름/나이/소속/직책/성격/말투/외형/신체 치수/체형/컵/연애 상태/과거 남성 경험 수/과거 오르가즘 경험 수/유두·유륜·음모 상태/선호/작가 전용 숨은 동기/신음 타입(master 우선, `VOCAL_STYLE_BY_NAME` fallback)을 포함한다. `buildNpcPrivateInfo()`(플레이어 앱 은밀정보 해금 게이트)는 별개 관심사로 변경하지 않았다 — author 지식과 player 해금 상태는 분리된 개념이다.
+
+`resolveRelevantNpcCanonIds({playerInput, playerAction, save, characters})`가 (1) 이번 입력에 정확히 언급된 등록 NPC 이름, (2) 선택된 `player_action.choice_text` 내 정확한 이름, (3) `save.last_character_id`, (4) `save.last_npcs_present` 저장 순서 순으로 최대 4명까지 중복 없이 고른다 — master 객체 순서에 의존하지 않는다. `buildRelevantNpcCanonSection(...)`이 이 dossier들을 CSA epistemic firewall 뒤, user 메시지 이후 별도 system 메시지로 주입해(recency 우선) canon이 최근 서사·요약·선택지·일반 플레이어 주장보다 우선하도록 하고, 직접 질문에는 정확한 canonical 값으로 답하되 매 턴 전체 항목을 나열하지 않으며, 각 NPC는 자기 자신의 사실만 안다는 규칙을 명시한다. 두 번째 Story 호출이나 스트림 이후 재작성은 없다.
+
+`npc_emotion.surface/inner`, `turn_summary`, `relationship_memory_patch`에 대해 `detectNpcCanonConflict(character, text)`/`removeCanonConflictSentences(text, character)`가 canonical 필드와 직접 모순되는 경우만(0 경험 vs 경험 주장, 양수 경험 vs 무경험 주장, 숫자 불일치, 기혼 vs 미혼, 미혼 vs 가상 배우자) 좁게 감지한다 — 기존 `applyCsaMetaFallbackToTurnSummary`류와 동일한 fail-open, narrow-contradiction-only 구조를 재사용하며, 위반 필드/문장/항목만 제거하고 정상 형제는 보존한다. repair LLM이나 Story 재작성은 없으며, 로그는 `{event:"npc_canon_conflict", character_id, fields}`만 남긴다(원문 은밀 텍스트 없음).
+
+## Progression EXP rebalance
+
+레벨업 요구 경험치가 `CSA_LEVEL_EXP_REQUIREMENTS = {1:15,2:23,3:50,4:63,5:75,6:105,7:120,8:135,9:150}` 고정 테이블로 바뀌었다(`expForNextLevel`). 기존 레벨/EXP를 낮추거나 저장된 `next_level_exp`를 신뢰하지 않으며, `calculateCsaCapability`를 통해 모든 read 경로(수동 상태줄, `buildAppStatePayload`, player-info, choice-meta 계산)가 항상 이 테이블에서 다시 계산한 값을 쓴다. 레벨 10은 `next_level_exp: 0`이다.

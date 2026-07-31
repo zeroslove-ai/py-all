@@ -1002,7 +1002,11 @@
         pending.extract = result.extract;
         pending.extract.extract_degraded = result.extract_degraded === true;
         pending.extract.extract_degraded_reason = result.extract_degraded_reason || null;
+        pending.extract.extract_attempts = result.extract_attempts || 1;
+        pending.extract.finish_reason = result.finish_reason || null;
+        pending.extract.upstream_status = result.upstream_status || null;
         pending.extractDegraded = result.extract_degraded === true;
+        pending.extractRequestId = result.request_id || null;
         pending.timing = { ...(pending.timing || {}), extract: result.timing };
         // Story가 생성한 [3. 선택지] 블록은 본문에 그대로 표시한다 (제거 호출 삭제).
         // The actual DOM patch is deferred to finalizeRenderedNarrative() —
@@ -1114,7 +1118,15 @@
         // nothing new for TTS to read.
         if (pending.extractDegraded) {
           if (!pending.degradedNoticeShown) {
-            ui.showSystemMessage('상태 분석 일부를 복구하지 못해 이번 턴은 서사와 선택지만 저장했습니다. NPC 수치·이미지·암시·상식개변 상태는 변경되지 않았습니다.');
+            const code = pending.extract.extract_degraded_reason || 'UNKNOWN';
+            const requestId = pending.extractRequestId || '없음';
+            const attempts = pending.extract.extract_attempts || 1;
+            let degradedMessage = `상태 분석 실패 [${code} · 요청 ${requestId} · 시도 ${attempts}회].\n이번 턴은 서사와 선택지만 저장했으며\nNPC 수치·마인드 모니터·이미지·상식개변 상태는 유지했습니다.`;
+            const detailParts = [];
+            if (pending.extract.finish_reason) detailParts.push(`finish_reason=${pending.extract.finish_reason}`);
+            if (pending.extract.upstream_status) detailParts.push(`upstream_status=${pending.extract.upstream_status}`);
+            if (detailParts.length) degradedMessage += `\n상세정보: ${detailParts.join(', ')}`;
+            ui.showSystemMessage(degradedMessage);
             pending.degradedNoticeShown = true;
           }
         } else {

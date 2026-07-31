@@ -12,6 +12,8 @@
 - 플레이어 설정은 LLM이 만든 4개 후보(`player_setup.recommendations[]`)와 번호 선택+자유 입력 수정으로 끝나는 준비 단계다. 선택지 문구·개수는 hard gate가 아니다.
 - Worker는 자연어의 표현 차이를 다시 판정하거나 Story를 사후 교체하지 않는다.
 - 앱 상태 변경은 검증된 structured action으로만 수행한다. 자유 입력은 Story로 전달한다.
+- Primary Extract는 정상 턴에서 항상 DeepSeek 호출 1회다. 첫 호출이 업스트림 타임아웃/429/5xx/빈 응답/`finish_reason=length`/JSON 파싱 실패로 완전히 실패했을 때만 동일 prompt로 1회 재시도한다(최대 2회). 응답 필드 일부가 검증에 실패했다는 이유로는 재시도하지 않으며, 그런 필드는 결정론적 fallback으로만 대체한다 — repair LLM을 다시 호출하지 않는다. 두 시도가 모두 실패하면 일반 턴은 fail-open degraded commit, validated app_transaction은 fail-closed(미적용)로 끝난다. Extract 응답은 `extract_attempts`/`upstream_status`/`finish_reason`/`raw_length`를 진단용으로 반환하지만, 원본 모델 텍스트(raw)는 절대 반환하거나 저장하지 않는다.
+- `extract.choices`는 Extract LLM이 JSON으로 다시 작성한 값이 아니라 Story의 `[3. 선택지]`에서 Worker가 직접 추출한 값이 authoritative source다. Story에 정확히 4개가 있으면 그대로 쓰고, 없거나 형식이 깨졌을 때만 기존 결정론적 fallback을 쓴다.
 
 ## 금지 구조
 - 카드/선택지 exact match 422

@@ -462,25 +462,33 @@ const ui = {
     const actions = setup ? all : all.filter(text => !/(?:어플|앱)\s*정보|📱/i.test(text)).slice(0, 4);
     actions.forEach((text, index) => {
       const meta = Array.isArray(choiceMeta) ? choiceMeta[index] : null;
+      // Checked before bold — an exact active-CSA-covered choice is never a
+      // probability roll, so it must never fall into the bold/blocked
+      // branches below (README: csa_direct outranks bold).
+      const csaDirect = meta?.kind === 'csa_direct';
       // A legacy/stale meta (no severity, or a stray bold with no success
       // rate) must never show the ⚡ badge or a success-rate figure the
       // Worker isn't actually honoring anymore.
       const validSeverity = ['mild', 'high', 'extreme'].includes(meta?.severity);
-      const bold = meta?.kind === 'bold' && validSeverity && Number.isFinite(Number(meta.success_rate));
-      const blocked = meta?.kind === 'blocked';
+      const bold = !csaDirect && meta?.kind === 'bold' && validSeverity && Number.isFinite(Number(meta.success_rate));
+      const blocked = !csaDirect && meta?.kind === 'blocked';
       const explicit = text.startsWith('❗');
       // 표시문(30자 축약)과 전달 원문을 분리한다 — 콜백/기록에는 항상 원문 전체.
       const fullText = text;
       const displayText = this.summarizeChoiceLabel(explicit ? fullText.slice(1).trim() : fullText, 30);
       const button = document.createElement('button');
-      button.className = `choice-btn ${explicit ? 'explicit' : ''}${bold ? ' bold-choice' : ''}${blocked ? ' blocked-choice' : ''}`;
+      button.className = `choice-btn ${explicit ? 'explicit' : ''}${csaDirect ? ' csa-direct-choice' : ''}${bold ? ' bold-choice' : ''}${blocked ? ' blocked-choice' : ''}`;
       const marker = document.createElement('span'); marker.className = 'marker'; marker.textContent = markers[index] || `${index + 1}.`;
       const label = document.createElement('span'); label.className = 'choice-label';
-      label.textContent = bold
-        ? `⚡ 과감 · 성공률 ${meta.success_rate}% · ${displayText}`
-        : blocked
-          ? `⛔ 실행 불가 · ${displayText}`
-          : (explicit ? `❗ ${displayText}` : displayText);
+      // csa_direct never shows a probability/percentage — it is an
+      // already-validated fact, not an attempt being judged.
+      label.textContent = csaDirect
+        ? `🌀 상식개변 직접 실행 · ${displayText}`
+        : bold
+          ? `⚡ 과감 · 성공률 ${meta.success_rate}% · ${displayText}`
+          : blocked
+            ? `⛔ 실행 불가 · ${displayText}`
+            : (explicit ? `❗ ${displayText}` : displayText);
       button.append(marker, label);
       button.title = fullText;
       button.setAttribute('aria-label', `${index + 1}. ${fullText}`);

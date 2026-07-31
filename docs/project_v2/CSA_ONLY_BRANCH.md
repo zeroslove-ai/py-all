@@ -42,11 +42,24 @@ alongside `content`, so Story can execute the rule as a real, persistent
 action instead of narrating it once and forgetting it.
 
 - Single source of truth: `CSA_PRESET_CATALOG` in `worker/game-proxy-v2.js`
-  (~38 items across `약함`/`중간`/`강함`). The frontend never hardcodes
-  actor/target/trigger/duration lists — it renders `/api/app-state`'s
-  `csa_presets` payload (`actor_options`, `target_options`,
-  `trigger_options`, `duration_options`, `categories`, `items`, each item's
-  `content_template`).
+  (~68 items across `약함`/`중간`/`강함`, including the expand-CSA-participants
+  additions). The frontend never hardcodes actor/target/trigger/duration
+  lists — it renders `/api/app-state`'s `csa_presets` payload
+  (`actor_options`, `target_options`, `trigger_options`, `duration_options`,
+  `categories`, `items`, each item's `content_template`).
+- Actor/target options now include `player` (an independent actor
+  regardless of job — never assumed to be a patient), `conversation_partner`,
+  `another_present_person`, and `nearby_person`, plus the existing role IDs.
+  Reusable matrices (`CSA_PRESET_ANY_PERSON_ACTORS/TARGETS`,
+  `CSA_PRESET_STAFF_TARGETS`, `CSA_PRESET_PUBLIC_USER_ACTORS`) back most new
+  presets instead of ad hoc per-preset lists. `resolveCsaParticipants()` is
+  the single resolver (used by the semantic contract, Story instructions,
+  choice-route classification, and selected-choice resolution) that turns
+  actor_group/target_group into concrete, distinct people — a registered
+  NPC, the player, or (only for patient/guardian/visitor/nearby_person, only
+  in a plausible public location, at most one per turn) a transient,
+  non-persisted anonymous minor NPC. Counterpart-contact presets never
+  resolve the same concrete person as both actor and target.
 - `csa_active` entries gain two optional fields: `source_type`
   (`'preset'|'custom'`) and, for presets, `preset` (`template_id`,
   `actor_group`, `target_group`, `trigger`, `duration`, `modifier`,
@@ -83,6 +96,25 @@ action instead of narrating it once and forgetting it.
   table; the regex table remains the fallback for custom CSAs only. Public
   place / being watched / on-duty wording is never a relevance or
   bold-probability penalty.
+- Choice execution route is `csa_direct > voluntary > bold > blocked`
+  (`resolveChoiceExecutionRoute`/`resolveCsaDirectCoverage`), and exact CSA
+  coverage is now authoritative rather than a probability bonus: a choice is
+  `csa_direct` only when its core-action text matches an applicable CSA's
+  `direct_meaning_tags`/relevance at the `direct` tier, its actor/target
+  resolve to concrete distinct participants right now
+  (`resolveCsaParticipants`), and it contains no detected sexual action the
+  CSA doesn't itself authorize. `buildChoiceMeta` checks this before ever
+  calling `calculateBoldChoiceRate`, so a covered choice gets
+  `kind:'csa_direct'`, `success_rate:null`, no random roll, and
+  `resolveBoldChoiceAttempt()` never rolls for it. A choice bundling a
+  covered action with an uncovered one (e.g. "유니폼을 확인하고 키스한다")
+  is never wholly `csa_direct` — it falls through to ordinary severity
+  classification keyed on the uncovered action instead. A stored
+  `kind:'bold'` choice meta is invalidated and recomputed
+  (`isCurrentChoiceMetaValid`'s optional `{save, master}` context) once an
+  active CSA newly covers it. The frontend (`pages/ui.js`) shows
+  `🌀 상식개변 직접 실행 · {선택지}` for `csa_direct`, checked before the
+  bold badge, with no success-rate text.
 - Preset `required_action` omissions are self-reported by Extract into
   `csa_omission` for observability only (logged, never repaired or
   Commit-blocking as of P1's auxiliary-recovery-call removal). See

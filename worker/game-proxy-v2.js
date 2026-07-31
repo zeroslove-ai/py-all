@@ -173,7 +173,7 @@ function buildCsaOnlyPublicContext(ctx = {}) {
   // turn that produced it. This is a view-only reclassification — it never
   // writes back to the DB.
   const choices = Array.isArray(save.last_choices) ? save.last_choices : [];
-  if (!isCurrentChoiceMetaValid(choices, save.last_choice_meta, ctx.turn_count)) {
+  if (!isCurrentChoiceMetaValid(choices, save.last_choice_meta, ctx.turn_count, { save, master: ctx.master })) {
     save.last_choice_meta = buildChoiceMeta(choices, save, ctx.master, ctx.turn_count, {
       allowBold: isSetupComplete(save) && save.last_character_id && save.last_character_id !== 'narrator'
     });
@@ -1267,6 +1267,104 @@ function canCreateSuggestionForNpc(save = {}, characters = {}, characterId) {
     && getCurrentPresentNpcIds(save, characters).includes(characterId);
 }
 
+// A location where a plausible anonymous patient/guardian/visitor/nearby
+// person could already be present — lobby, waiting area, ward corridor,
+// nurse station, consultation/treatment area (README section 4). An
+// isolated private room (patient room itself, changing room, on-call room,
+// director's office, storage) never qualifies — no teleporting a role into
+// a private scene.
+const CSA_MINOR_NPC_PUBLIC_LOCATION_PATTERN = /로비|대기실|대기\s*공간|복도|간호사?\s*스테이션|접수|창구|진료실|상담실|처치실|검사실|외래|병동\s*라운지|휴게실/;
+const CSA_MINOR_NPC_PRIVATE_LOCATION_PATTERN = /병실(?!\s*(?:앞|복도))|탈의실|당직실|숙직실|원장실|개인\s*(?:공간|사무실)|비상계단|창고|린넨실/;
+
+function isPlausibleMinorNpcLocation(worldState = {}) {
+  const label = normalizeLocationLabel(worldState?.location_label || '');
+  if (!label) return false;
+  if (CSA_MINOR_NPC_PRIVATE_LOCATION_PATTERN.test(label)) return false;
+  return CSA_MINOR_NPC_PUBLIC_LOCATION_PATTERN.test(label) || isEphemeralHospitalLocation(label);
+}
+
+// Registered NPCs (heroine1..N) are always established hospital staff —
+// DOCTOR_NPC_IDS is the one authoritative split already in use elsewhere
+// (buildEligibleNpcRosterSection etc.); everyone else registered is
+// nurse/general-staff. Reused here instead of fuzzy-matching character.job
+// text, which is far less reliable.
+function characterMatchesCsaRoleGroup(characterId, group) {
+  if (group === 'doctor' || group === 'medical_staff') return DOCTOR_NPC_IDS.includes(characterId);
+  if (group === 'nurse' || group === 'female_staff') return !DOCTOR_NPC_IDS.includes(characterId);
+  if (group === 'hospital_staff' || group === 'male_staff') return true;
+  return false;
+}
+
+// README section 3.3 — the single authoritative resolver for turning a
+// preset/custom CSA's actor_group/target_group into concrete participants.
+// Never silently substitutes a different concrete person, never resolves
+// the same concrete entity as both actor and target (unless the preset is
+// explicitly self-directed, i.e. targetGroup is falsy), and never teleports
+// a patient/guardian/visitor role into a private scene. Registered NPCs
+// (heroine1..N) are always independent adults with their own job — never
+// assumed to be "the patient" — and neither is the player, regardless of
+// the player's own job.
+function resolveCsaParticipant(group, { save = {}, master = {}, excludeCharacterId = null } = {}) {
+  if (!group) return { resolved: false, type: 'none' };
+  const characters = isPlainObject(master?.characters) ? master.characters : {};
+  const presentIds = getCurrentPresentNpcIds(save, characters).filter(id => id !== excludeCharacterId);
+  const mainId = typeof save?.last_character_id === 'string' ? save.last_character_id : null;
+
+  if (group === 'player') {
+    return excludeCharacterId === 'player' ? { resolved: false, type: 'none' } : { resolved: true, type: 'player' };
+  }
+  if (group === 'conversation_partner') {
+    if (mainId && mainId !== excludeCharacterId && presentIds.includes(mainId)) {
+      return { resolved: true, type: 'npc', characterId: mainId };
+    }
+    return { resolved: false, type: 'none' };
+  }
+  if (group === 'another_present_person' || group === 'nearby_person') {
+    const candidate = presentIds.find(id => id !== mainId) || presentIds[0];
+    if (candidate) return { resolved: true, type: 'npc', characterId: candidate };
+    return { resolved: false, type: 'none' };
+  }
+  if (group === 'everyone_in_hospital') {
+    return { resolved: true, type: 'group' };
+  }
+  if (['patient', 'guardian', 'visitor'].includes(group)) {
+    // No registered NPC is ever a patient/guardian/visitor in this cast —
+    // only an already-established or newly-plausible anonymous minor NPC
+    // can fill this role, and only in a public-appropriate location. This
+    // never resolves to the player.
+    return isPlausibleMinorNpcLocation(save?.world_state)
+      ? { resolved: true, type: 'minor_npc', role: group }
+      : { resolved: false, type: 'none' };
+  }
+  // Remaining groups are registered-staff roles (nurse/doctor/medical_staff/
+  // hospital_staff/female_staff/male_staff/assigned_patient-as-staff-target
+  // never applies here since assigned_patient is patient-shaped, handled
+  // above via the STAFF_TARGETS matrices only listing real staff ids).
+  const roleMatch = presentIds.find(id => characterMatchesCsaRoleGroup(id, group));
+  if (roleMatch) return { resolved: true, type: 'npc', characterId: roleMatch };
+  if (mainId && mainId !== excludeCharacterId && presentIds.includes(mainId) && characterMatchesCsaRoleGroup(mainId, group)) {
+    return { resolved: true, type: 'npc', characterId: mainId };
+  }
+  return { resolved: false, type: 'none' };
+}
+
+function resolveCsaParticipants({ actorGroup, targetGroup, save = {}, master = {} } = {}) {
+  const actor = resolveCsaParticipant(actorGroup, { save, master });
+  if (!actor.resolved) return { resolved: false, actor, target: null };
+  if (!targetGroup) return { resolved: true, actor, target: null, selfDirected: true };
+  const excludeId = actor.type === 'npc' ? actor.characterId : (actor.type === 'player' ? 'player' : null);
+  const target = resolveCsaParticipant(targetGroup, { save, master, excludeCharacterId: excludeId });
+  if (!target.resolved) return { resolved: false, actor, target };
+  // Actor and target must be distinct concrete people (never the same
+  // registered NPC, never player-vs-player) unless the preset is
+  // self-directed — already handled by the early return above.
+  if (actor.type === 'npc' && target.type === 'npc' && actor.characterId === target.characterId) {
+    return { resolved: false, actor, target };
+  }
+  if (actor.type === 'player' && target.type === 'player') return { resolved: false, actor, target };
+  return { resolved: true, actor, target };
+}
+
 function buildPlayerInfoPayload(master = {}, save = {}) {
   const player = isPlainObject(save?.player) ? save.player : {};
   const setup = isPlainObject(save?.player_setup) ? save.player_setup : {};
@@ -1475,6 +1573,20 @@ async function handleStory(req, env) {
       acceptance_bonus_applied: boldChoiceAttempt.acceptance_bonus_applied
     }));
   }
+  // README section 9 — never both: a choice is either a bold attempt or an
+  // already-covered csa_direct fact, never both at once (buildChoiceMeta
+  // assigns exactly one kind per choice).
+  const csaDirectChoiceSelected = boldChoiceAttempt
+    ? null
+    : resolveSelectedCsaDirectChoice(effectiveSave, ctx?.master, player_input, currentTurn);
+  if (csaDirectChoiceSelected) {
+    console.log(JSON.stringify({
+      event: 'csa_direct_choice_selected',
+      turn: currentTurn + 1,
+      choice_id: csaDirectChoiceSelected.choice_id,
+      csa_id: csaDirectChoiceSelected.csa_direct?.csa_id || null
+    }));
+  }
   const promptStart = Date.now();
   let prompt;
   try {
@@ -1489,6 +1601,12 @@ async function handleStory(req, env) {
     );
     if (boldChoiceAttempt) {
       prompt.messages[0].content += `\n\n[BOLD CHOICE RESOLUTION — ESTABLISHED FACT]\n예상 성공률 ${boldChoiceAttempt.success_rate}%, 판정 ${boldChoiceAttempt.success ? '성공' : '실패'} (roll ${boldChoiceAttempt.roll}). 시도는 반드시 서사에 반영하되, ${boldChoiceAttempt.success ? '목표 행동을 자연스럽게 완료할 수 있다.' : '목표 행동을 그대로 성공시키지 말고 거절·부분 성공·갈등·새 정보 중 자연스러운 결과로 진행한다.'}`;
+    }
+    if (csaDirectChoiceSelected) {
+      // No random result block — this is not an attempt to judge, it is an
+      // already-validated CSA execution (README 7.1/9). No roll, no success
+      // percentage, no re-asking whether it applies.
+      prompt.messages[0].content += `\n\n[CSA DIRECT CHOICE — ESTABLISHED FACT]\n이 선택은 현재 활성 상식개변의 정확한 범위 안에 있으며 이미 검증되었다. 성공 여부를 다시 판정하거나 확률을 계산하지 말고, 이 행동이 자연스럽게 실행된 장면으로 곧바로 진행한다. 거절·실패·재확인을 만들지 않는다.`;
     }
   } catch (error) {
     console.error(JSON.stringify({
@@ -3484,6 +3602,27 @@ NPC는 상식개변의 존재, 작동 원리, 시점 변화를 절대 인식하�
 이 규칙은 [1. 서사 및 행동]의 NPC 대사·독백·서술, [2. 플레이어 상황판]의 NPC 관련 서술, 그리고 이후 Extract가 생성할 마인드 모니터(npc_emotion)에도 동일하게 적용된다. 플레이어의 대사·속마음과 상식개변 앱 UI 텍스트에는 이 규칙을 적용하지 않는다.`;
 }
 
+// README section 4 — governs when Story may introduce an anonymous,
+// non-persistent minor NPC to fill a role (patient/guardian/visitor/nearby
+// person) a preset requires but no registered NPC can fill. Only injected
+// when at least one applicable CSA's actor/target group is one of those
+// roles, so a scene with no such CSA never sees this section at all.
+function buildCsaMinorNpcSection() {
+  return `
+
+[MINOR NPC FOR UNFILLED ROLE — AT MOST ONE PER TURN]
+현재 적용 가능한 상식개변 중 일부는 등록 NPC가 아닌 환자·보호자·방문객·주변 사람 역할을 요구한다. 그 역할에 맞는 등록 NPC가 현재 장면에 없으면, 로비·대기실·복도·간호사 스테이션·접수창구·진료실·상담실·처치실·검사실처럼 그런 사람이 자연스럽게 있을 수 있는 공개 장소에서만 이번 턴에 익명 단역 한 명을 등장시킬 수 있다(예: "대기 중이던 환자", "옆에 서 있던 보호자", "접수 창구의 방문객").
+
+금지:
+- 병실 내부, 탈의실, 당직실, 원장실, 창고처럼 출입 경로가 확립되지 않은 사적·격리 공간에 단역을 순간적으로 등장시키지 않는다.
+- 한 턴에 두 명 이상의 새 단역을 만들지 않는다.
+- 단역에게 영구 이름이나 캐릭터 ID를 부여하지 않는다 — 역할 설명("대기 중이던 환자")만 사용한다.
+- 단역을 이유로 character_id, 현재 메인 NPC, 이미지, TTS, 관계 기록을 바꾸지 않는다.
+- 단역의 신체 수치, 관계, 마인드 모니터, 위치를 저장 상태에 남기지 않는다 — 이번 장면에서만 존재하는 서술이다.
+
+단역을 통한 상식개변 직접 실행은 그 역할이 이번 서사에서 이미 명확히 등장했거나, 이번 선택지에서 공개 장소에 자연스럽게 등장시키는 경우에만 성립한다.`;
+}
+
 function buildCsaPersistentSceneSection() {
   return `
 
@@ -4042,6 +4181,12 @@ ${recentMemorySlice.map((m, index) => clipHeadTail(sanitizeRecentNarrativeForPro
   const isAppTransactionTurn = structuredPlan?.ok && structuredPlan.canonical_action?.type === 'app_transaction';
   const csaPhysicalTransitionSection = buildCsaPhysicalTransitionSection(Boolean(csaSection), isAppTransactionTurn);
   const needsNpcCsaEpistemicFirewall = Boolean(csaSection) || isAppTransactionTurn;
+  const CSA_MINOR_NPC_ROLE_GROUPS = new Set(['patient', 'guardian', 'visitor', 'nearby_person']);
+  const needsCsaMinorNpcSection = getApplicableCsaEntries(save, activeCsa).some(csa => {
+    const contract = buildCsaSemanticContract(csa);
+    return CSA_MINOR_NPC_ROLE_GROUPS.has(contract.actor_group) || CSA_MINOR_NPC_ROLE_GROUPS.has(contract.target_group);
+  });
+  const csaMinorNpcSection = needsCsaMinorNpcSection ? buildCsaMinorNpcSection() : '';
   const csaWeakSynergySection = getApplicableCsaEntries(save, activeCsa).length > 1 ? buildCsaWeakSynergySection() : '';
   const relationshipInterpretationSection = buildRelationshipInterpretationSection();
   const sexualPolicySection = buildSexualPolicyPromptSection(buildPreStorySexualPolicy({
@@ -4103,13 +4248,18 @@ ${recentMemorySlice.map((m, index) => clipHeadTail(sanitizeRecentNarrativeForPro
   const choiceLengthReminder = mode === 'normal' || mode === 'opening'
     ? `\n\n[REMINDER — CHOICE LENGTH]\n[3. 선택지]의 각 문장은 35~80자를 목표로 하고 120자를 넘기지 않는다. 화면 버튼에 그대로 표시되므로 지나치게 길게 쓰지 않는다.\n`
     : '';
+  // README 7.4 — the choice-bundling reminder is only meaningful when there
+  // is an applicable CSA to stay inside the scope of.
+  const csaChoiceScopeReminder = (mode === 'normal' || mode === 'opening') && csaSection
+    ? `\n\n[REMINDER — CSA CHOICE SCOPE]\n활성 상식개변이 정확히 허용하는 행동은 [1]에서 이미 자연스럽게 실행되거나 실행 가능한 상태다. [3. 선택지] 중 그 범위 안에 정확히 머무는 자연스러운 요청·계속 행동을 하나 포함할 수 있다면 포함하되, 그 선택지에 "확인해도 될까요?" 같은 재확인이나 성공률 표현을 넣지 않는다. 그 범위를 벗어나는 다른 행동(키스, 삽입 등 상식개변이 다루지 않는 행동)을 같은 선택지에 함께 묶지 않는다 — 범위 밖 행동은 별도 선택지로 분리한다.\n`
+    : '';
   const eligibleNpcRosterSection = buildEligibleNpcRosterSection(save.world_state, master.characters || {});
   // Placed at the very end (same recency-favoring position as
   // playerSetupReminder/hypnosisCapabilitySection) since it must outweigh
   // everything above it, including [최근 기억]'s now-stale account of the
   // turn that was just rolled back.
   const regenerationFeedbackSection = buildRegenerationFeedbackSection(regenerationFeedback);
-  const systemPrompt = (coreRules + playerGate + modeSection + rulebookSection + openingScenarioSection + appUsageSection + eligibleNpcRosterSection + buildCsaRuntimeSection() + buildGeneralActionJudgmentSection() + relationshipInterpretationSection + csaAcceptanceScopeSection + buildCsaDeactivationNarrativeRule() + currentSceneSection + hospitalLocationMemorySection + npcProfileSection + relationshipMemorySection + sexualHistorySection + explicitMentionSection + csaSection + csaPersistentSceneSection + csaPublicSceneSection + csaDirectExecutionPrioritySection + sexualPolicySection + csaAftereffectSection + csaWeakSynergySection + mindEffectBoundarySection + physicalSceneStateSection + narrativeLengthSection + narrativeParagraphSection + npcDialogueSection + moanVocalReactionSection + antiRepetitionSection + playerStatusPanel + contextSection + feedbackSection + continuitySection + finalFormatRules + openingFlow + playerSetupReminder + registeredNpcChoiceReminder + choiceLengthReminder + buildAddressAbbreviationSection() + regenerationFeedbackSection + csaPhysicalTransitionSection + buildStructuredActionStorySection(structuredPlan, save, activeCsa) + playerAttemptSection)
+  const systemPrompt = (coreRules + playerGate + modeSection + rulebookSection + openingScenarioSection + appUsageSection + eligibleNpcRosterSection + buildCsaRuntimeSection() + buildGeneralActionJudgmentSection() + relationshipInterpretationSection + csaAcceptanceScopeSection + buildCsaDeactivationNarrativeRule() + currentSceneSection + hospitalLocationMemorySection + npcProfileSection + relationshipMemorySection + sexualHistorySection + explicitMentionSection + csaSection + csaPersistentSceneSection + csaPublicSceneSection + csaMinorNpcSection + csaDirectExecutionPrioritySection + sexualPolicySection + csaAftereffectSection + csaWeakSynergySection + mindEffectBoundarySection + physicalSceneStateSection + narrativeLengthSection + narrativeParagraphSection + npcDialogueSection + moanVocalReactionSection + antiRepetitionSection + playerStatusPanel + contextSection + feedbackSection + continuitySection + finalFormatRules + openingFlow + playerSetupReminder + registeredNpcChoiceReminder + choiceLengthReminder + csaChoiceScopeReminder + buildAddressAbbreviationSection() + regenerationFeedbackSection + csaPhysicalTransitionSection + buildStructuredActionStorySection(structuredPlan, save, activeCsa) + playerAttemptSection)
     .replaceAll('상식개변 어플', '상식개변 앱');
 
   return {
@@ -5083,8 +5233,23 @@ const STRUCTURED_SEXUAL_DIRECTIONS = new Set(['none', 'npc_to_player', 'player_t
 const STRUCTURED_SEXUAL_ROUTES = new Set(['none', 'csa_direct', 'voluntary', 'blocked']);
 const STRUCTURED_CONSENT_STATUSES = new Set(['not_required', 'granted', 'denied', 'conditional', 'unclear', 'absent']);
 const STRUCTURED_TRIGGER_STATUSES = new Set(['satisfied', 'continuing', 'temporarily_interrupted', 'not_satisfied', 'ended']);
-const CSA_CONTRACT_ACTOR_GROUPS = new Set(['nurse', 'doctor', 'medical_staff', 'hospital_staff', 'everyone_in_hospital', 'player', 'unknown']);
-const CSA_CONTRACT_TARGET_GROUPS = new Set(['player', 'patient', 'assigned_patient', 'conversation_partner', 'hospital_staff', 'unknown']);
+// Expand-CSA-participants fix: previously narrower than
+// CSA_PRESET_ACTOR_OPTIONS/TARGET_OPTIONS, so a preset using e.g.
+// 'female_staff' or 'patient' as actor collapsed to actor_group:'unknown'
+// in its own semantic contract — resolveCsaParticipants needs the real
+// group to resolve concrete people. Kept as its own set (not a live
+// reference to the option-label arrays) so an invalid/unrecognized value
+// still normalizes to 'unknown' defensively.
+const CSA_CONTRACT_ACTOR_GROUPS = new Set([
+  'nurse', 'doctor', 'medical_staff', 'hospital_staff', 'female_staff', 'male_staff',
+  'patient', 'guardian', 'visitor', 'everyone_in_hospital',
+  'player', 'conversation_partner', 'another_present_person', 'nearby_person', 'unknown'
+]);
+const CSA_CONTRACT_TARGET_GROUPS = new Set([
+  'patient', 'assigned_patient', 'nurse', 'doctor', 'medical_staff', 'hospital_staff',
+  'female_staff', 'male_staff', 'guardian', 'visitor',
+  'player', 'conversation_partner', 'another_present_person', 'nearby_person', 'unknown'
+]);
 
 function normalizeCsaSemanticContract(value = {}) {
   const source = isPlainObject(value) ? value : {};
@@ -5145,7 +5310,20 @@ const PRESET_SEXUAL_ACTION_CONTRACT = {
   perform_designated_position_efficiently: { directions: ['npc_to_player'], actions: ['kiss', 'sexual_touch', 'genital_exposure', 'genital_touch', 'oral', 'penetration'] },
   multi_staff_collaborate_on_request: { directions: ['npc_to_player'], actions: ['kiss', 'sexual_touch', 'genital_exposure', 'genital_touch', 'oral', 'penetration'] },
   sex_with_player_is_duty: { directions: ['npc_to_player', 'player_to_npc'], actions: ['penetration'] },
-  treat_player_sexual_conduct_as_authority: { directions: ['player_to_npc'], actions: ['kiss', 'sexual_touch', 'genital_exposure', 'genital_touch', 'oral', 'penetration'] }
+  treat_player_sexual_conduct_as_authority: { directions: ['player_to_npc'], actions: ['kiss', 'sexual_touch', 'genital_exposure', 'genital_touch', 'oral', 'penetration'] },
+  // Expand-CSA-participants additions: actor/target now generalize beyond a
+  // fixed staff->player pairing, so both directions are always listed —
+  // resolveCsaParticipants still resolves the concrete distinct people at
+  // evaluation time; this only says which direction(s) the action can
+  // legitimately run in once participants are resolved.
+  stimulate_target_breast_or_nipple_for_sensitivity_check: { directions: ['npc_to_player', 'player_to_npc'], actions: ['sexual_touch'] },
+  relieve_target_sexual_tension_by_hand: { directions: ['npc_to_player', 'player_to_npc'], actions: ['genital_touch'] },
+  selected_actor_request_is_official_order_for_target: { directions: ['npc_to_player', 'player_to_npc'], actions: ['kiss', 'sexual_touch', 'genital_exposure', 'genital_touch', 'oral', 'penetration'] },
+  selected_actor_intimate_request_has_priority: { directions: ['npc_to_player', 'player_to_npc'], actions: ['kiss', 'sexual_touch', 'genital_exposure', 'genital_touch', 'oral', 'penetration'] },
+  selected_actor_performs_priority_sexual_relief_for_target: { directions: ['npc_to_player', 'player_to_npc'], actions: ['genital_touch'] },
+  selected_groups_mutually_assist_sexual_relief: { directions: ['npc_to_player', 'player_to_npc'], actions: ['genital_touch'] },
+  public_intimate_contact_between_selected_groups_is_routine: { directions: ['npc_to_player', 'player_to_npc'], actions: ['sexual_touch'] },
+  continue_designated_intimate_contact_until_explicit_end: { directions: ['npc_to_player', 'player_to_npc'], actions: ['sexual_touch'] }
 };
 
 function buildPresetCsaSemanticContract(csa = {}) {
@@ -7700,7 +7878,14 @@ const CSA_PRESET_ACTOR_OPTIONS = [
   { id: 'patient', label: '환자' },
   { id: 'guardian', label: '보호자' },
   { id: 'visitor', label: '방문객' },
-  { id: 'everyone_in_hospital', label: '병원 안의 모든 사람' }
+  { id: 'everyone_in_hospital', label: '병원 안의 모든 사람' },
+  // Expand-CSA-participants: the player is an independent actor regardless
+  // of job (never assumed to be a patient), and these three let a preset
+  // name "whoever is actually in the scene" without hardcoding a role.
+  { id: 'player', label: '플레이어' },
+  { id: 'conversation_partner', label: '현재 대화 상대' },
+  { id: 'another_present_person', label: '현재 함께 있는 다른 사람' },
+  { id: 'nearby_person', label: '주변의 적합한 사람' }
 ];
 
 const CSA_PRESET_TARGET_OPTIONS = [
@@ -7710,10 +7895,14 @@ const CSA_PRESET_TARGET_OPTIONS = [
   { id: 'doctor', label: '의사' },
   { id: 'medical_staff', label: '의료진' },
   { id: 'hospital_staff', label: '병원 직원' },
+  { id: 'female_staff', label: '여성 직원' },
+  { id: 'male_staff', label: '남성 직원' },
   { id: 'guardian', label: '보호자' },
   { id: 'visitor', label: '방문객' },
   { id: 'player', label: '플레이어' },
-  { id: 'conversation_partner', label: '대화 상대' }
+  { id: 'conversation_partner', label: '현재 대화 상대' },
+  { id: 'another_present_person', label: '현재 함께 있는 다른 사람' },
+  { id: 'nearby_person', label: '주변의 적합한 사람' }
 ];
 
 const CSA_PRESET_TRIGGER_OPTIONS = [
@@ -7750,6 +7939,21 @@ const CSA_PRESET_CATEGORIES = [
 
 const CSA_PRESET_CONVERSATION_TARGET_OPTIONS = ['patient', 'assigned_patient', 'player', 'conversation_partner'];
 const CSA_PRESET_STAFF_ACTOR_OPTIONS = ['nurse', 'doctor', 'medical_staff', 'hospital_staff'];
+
+// Expand-CSA-participants reusable matrices (README 3.2). Explicit, curated
+// lists rather than "enable every option on every preset" — narrower
+// matrices are still used directly where a preset's meaning requires it
+// (e.g. a self-directed clothing preset keeps a narrow actor-only list).
+const CSA_PRESET_ANY_PERSON_ACTORS = [
+  'player', 'nurse', 'doctor', 'medical_staff', 'hospital_staff', 'female_staff', 'male_staff',
+  'patient', 'guardian', 'visitor', 'conversation_partner', 'another_present_person', 'nearby_person'
+];
+const CSA_PRESET_ANY_PERSON_TARGETS = [
+  'player', 'nurse', 'doctor', 'medical_staff', 'hospital_staff', 'female_staff', 'male_staff',
+  'patient', 'assigned_patient', 'guardian', 'visitor', 'conversation_partner', 'another_present_person', 'nearby_person'
+];
+const CSA_PRESET_STAFF_TARGETS = ['nurse', 'doctor', 'medical_staff', 'hospital_staff', 'female_staff', 'male_staff'];
+const CSA_PRESET_PUBLIC_USER_ACTORS = ['player', 'patient', 'guardian', 'visitor', 'conversation_partner', 'nearby_person'];
 const CSA_PRESET_POSTURE_TRIGGERS = ['conversation_start', 'consultation_start', 'explanation_start', 'comforting', 'check_condition', 'on_request'];
 const CSA_PRESET_POSTURE_DURATIONS = ['until_conversation_ends', 'until_consultation_ends', 'until_explanation_ends', 'until_target_relaxed', 'until_explicit_position_change', 'continuous'];
 
@@ -7759,7 +7963,7 @@ const CSA_PRESET_CATALOG = [
   // ── 약함 · 자세 ──
   {
     id: 'kneel_before_target_while_talking', category: 'posture', label: '상대 앞에 무릎을 꿇고 대화',
-    minimum_strength: 'weak', actor_options: CSA_PRESET_STAFF_ACTOR_OPTIONS, target_options: CSA_PRESET_CONVERSATION_TARGET_OPTIONS,
+    minimum_strength: 'weak', actor_options: CSA_PRESET_ANY_PERSON_ACTORS, target_options: CSA_PRESET_CONVERSATION_TARGET_OPTIONS,
     default_actor: 'nurse', default_target: 'patient',
     allowed_triggers: ['conversation_start', 'consultation_start', 'explanation_start'], default_trigger: 'conversation_start',
     allowed_durations: CSA_PRESET_POSTURE_DURATIONS, default_duration: 'until_conversation_ends',
@@ -7770,7 +7974,7 @@ const CSA_PRESET_CATALOG = [
   },
   {
     id: 'sit_on_target_lap_while_talking', category: 'posture', label: '상대의 무릎 위에 앉아 대화',
-    minimum_strength: 'weak', actor_options: CSA_PRESET_STAFF_ACTOR_OPTIONS, target_options: CSA_PRESET_CONVERSATION_TARGET_OPTIONS,
+    minimum_strength: 'weak', actor_options: CSA_PRESET_ANY_PERSON_ACTORS, target_options: CSA_PRESET_CONVERSATION_TARGET_OPTIONS,
     default_actor: 'nurse', default_target: 'patient',
     allowed_triggers: ['conversation_start', 'consultation_start', 'explanation_start'], default_trigger: 'conversation_start',
     allowed_durations: CSA_PRESET_POSTURE_DURATIONS, default_duration: 'until_conversation_ends',
@@ -7781,7 +7985,7 @@ const CSA_PRESET_CATALOG = [
   },
   {
     id: 'stand_between_target_knees_while_explaining', category: 'posture', label: '상대의 무릎 사이에 서서 설명',
-    minimum_strength: 'weak', actor_options: CSA_PRESET_STAFF_ACTOR_OPTIONS, target_options: CSA_PRESET_CONVERSATION_TARGET_OPTIONS,
+    minimum_strength: 'weak', actor_options: CSA_PRESET_ANY_PERSON_ACTORS, target_options: CSA_PRESET_CONVERSATION_TARGET_OPTIONS,
     default_actor: 'nurse', default_target: 'patient',
     allowed_triggers: ['explanation_start', 'consultation_start', 'check_condition'], default_trigger: 'explanation_start',
     allowed_durations: CSA_PRESET_POSTURE_DURATIONS, default_duration: 'until_explanation_ends',
@@ -7791,7 +7995,7 @@ const CSA_PRESET_CATALOG = [
   },
   {
     id: 'lean_close_body_contact_during_consultation', category: 'posture', label: '상대와 몸을 밀착한 채 상담',
-    minimum_strength: 'weak', actor_options: CSA_PRESET_STAFF_ACTOR_OPTIONS, target_options: CSA_PRESET_CONVERSATION_TARGET_OPTIONS,
+    minimum_strength: 'weak', actor_options: CSA_PRESET_ANY_PERSON_ACTORS, target_options: CSA_PRESET_CONVERSATION_TARGET_OPTIONS,
     default_actor: 'nurse', default_target: 'patient',
     allowed_triggers: ['consultation_start', 'comforting', 'check_condition'], default_trigger: 'consultation_start',
     allowed_durations: CSA_PRESET_POSTURE_DURATIONS, default_duration: 'until_consultation_ends',
@@ -7801,7 +8005,7 @@ const CSA_PRESET_CATALOG = [
   },
   {
     id: 'lean_on_target_shoulder_while_talking', category: 'posture', label: '상대의 어깨에 기대어 대화',
-    minimum_strength: 'weak', actor_options: CSA_PRESET_STAFF_ACTOR_OPTIONS, target_options: CSA_PRESET_CONVERSATION_TARGET_OPTIONS,
+    minimum_strength: 'weak', actor_options: CSA_PRESET_ANY_PERSON_ACTORS, target_options: CSA_PRESET_CONVERSATION_TARGET_OPTIONS,
     default_actor: 'nurse', default_target: 'patient',
     allowed_triggers: ['conversation_start', 'comforting'], default_trigger: 'conversation_start',
     allowed_durations: CSA_PRESET_POSTURE_DURATIONS, default_duration: 'until_conversation_ends',
@@ -7811,7 +8015,7 @@ const CSA_PRESET_CATALOG = [
   },
   {
     id: 'embrace_target_from_behind_while_explaining', category: 'posture', label: '상대를 뒤에서 안은 채 설명',
-    minimum_strength: 'weak', actor_options: CSA_PRESET_STAFF_ACTOR_OPTIONS, target_options: CSA_PRESET_CONVERSATION_TARGET_OPTIONS,
+    minimum_strength: 'weak', actor_options: CSA_PRESET_ANY_PERSON_ACTORS, target_options: CSA_PRESET_CONVERSATION_TARGET_OPTIONS,
     default_actor: 'nurse', default_target: 'patient',
     allowed_triggers: ['explanation_start', 'consultation_start'], default_trigger: 'explanation_start',
     allowed_durations: CSA_PRESET_POSTURE_DURATIONS, default_duration: 'until_explanation_ends',
@@ -7822,7 +8026,7 @@ const CSA_PRESET_CATALOG = [
   // ── 약함 · 접촉 ──
   {
     id: 'hand_on_target_thigh_during_consultation', category: 'contact', label: '상대의 허벅지에 손을 올려둔 채 상담',
-    minimum_strength: 'weak', actor_options: CSA_PRESET_STAFF_ACTOR_OPTIONS, target_options: CSA_PRESET_CONVERSATION_TARGET_OPTIONS,
+    minimum_strength: 'weak', actor_options: CSA_PRESET_ANY_PERSON_ACTORS, target_options: CSA_PRESET_CONVERSATION_TARGET_OPTIONS,
     default_actor: 'nurse', default_target: 'patient',
     allowed_triggers: ['consultation_start', 'comforting', 'check_condition'], default_trigger: 'consultation_start',
     allowed_durations: CSA_PRESET_POSTURE_DURATIONS, default_duration: 'until_consultation_ends',
@@ -7832,7 +8036,7 @@ const CSA_PRESET_CATALOG = [
   },
   {
     id: 'arm_around_target_waist_while_explaining', category: 'contact', label: '상대의 허리를 감싼 채 설명',
-    minimum_strength: 'weak', actor_options: CSA_PRESET_STAFF_ACTOR_OPTIONS, target_options: CSA_PRESET_CONVERSATION_TARGET_OPTIONS,
+    minimum_strength: 'weak', actor_options: CSA_PRESET_ANY_PERSON_ACTORS, target_options: CSA_PRESET_CONVERSATION_TARGET_OPTIONS,
     default_actor: 'nurse', default_target: 'patient',
     allowed_triggers: ['explanation_start', 'consultation_start'], default_trigger: 'explanation_start',
     allowed_durations: CSA_PRESET_POSTURE_DURATIONS, default_duration: 'until_explanation_ends',
@@ -7842,7 +8046,7 @@ const CSA_PRESET_CATALOG = [
   },
   {
     id: 'target_hand_on_actor_waist_during_consultation', category: 'contact', label: '상대의 손을 자신의 허리에 올려놓고 상담',
-    minimum_strength: 'weak', actor_options: CSA_PRESET_STAFF_ACTOR_OPTIONS, target_options: CSA_PRESET_CONVERSATION_TARGET_OPTIONS,
+    minimum_strength: 'weak', actor_options: CSA_PRESET_ANY_PERSON_ACTORS, target_options: CSA_PRESET_CONVERSATION_TARGET_OPTIONS,
     default_actor: 'nurse', default_target: 'patient',
     allowed_triggers: ['consultation_start', 'on_request'], default_trigger: 'consultation_start',
     allowed_durations: CSA_PRESET_POSTURE_DURATIONS, default_duration: 'until_consultation_ends',
@@ -7852,7 +8056,7 @@ const CSA_PRESET_CATALOG = [
   },
   {
     id: 'check_body_temperature_by_close_contact', category: 'contact', label: '상대의 체온을 몸을 밀착해 확인',
-    minimum_strength: 'weak', actor_options: CSA_PRESET_STAFF_ACTOR_OPTIONS, target_options: CSA_PRESET_CONVERSATION_TARGET_OPTIONS,
+    minimum_strength: 'weak', actor_options: CSA_PRESET_ANY_PERSON_ACTORS, target_options: CSA_PRESET_CONVERSATION_TARGET_OPTIONS,
     default_actor: 'nurse', default_target: 'patient',
     allowed_triggers: ['check_condition'], default_trigger: 'check_condition',
     allowed_durations: ['until_target_relaxed', 'until_explicit_position_change', 'continuous'], default_duration: 'until_target_relaxed',
@@ -7862,7 +8066,7 @@ const CSA_PRESET_CATALOG = [
   },
   {
     id: 'maintain_closest_posture_until_target_relaxed', category: 'contact', label: '상대가 편안해질 때까지 가장 가까운 자세 유지',
-    minimum_strength: 'weak', actor_options: CSA_PRESET_STAFF_ACTOR_OPTIONS, target_options: CSA_PRESET_CONVERSATION_TARGET_OPTIONS,
+    minimum_strength: 'weak', actor_options: CSA_PRESET_ANY_PERSON_ACTORS, target_options: CSA_PRESET_CONVERSATION_TARGET_OPTIONS,
     default_actor: 'nurse', default_target: 'patient',
     allowed_triggers: ['comforting', 'consultation_start', 'check_condition'], default_trigger: 'comforting',
     allowed_durations: ['until_target_relaxed'], default_duration: 'until_target_relaxed',
@@ -7872,7 +8076,7 @@ const CSA_PRESET_CATALOG = [
   },
   {
     id: 'describe_bodily_reaction_during_consultation', category: 'contact', label: '상담 중 느껴지는 상대의 신체 반응을 업무적으로 말해주기',
-    minimum_strength: 'weak', actor_options: CSA_PRESET_STAFF_ACTOR_OPTIONS, target_options: CSA_PRESET_CONVERSATION_TARGET_OPTIONS,
+    minimum_strength: 'weak', actor_options: CSA_PRESET_ANY_PERSON_ACTORS, target_options: CSA_PRESET_CONVERSATION_TARGET_OPTIONS,
     default_actor: 'nurse', default_target: 'patient',
     allowed_triggers: ['consultation_start', 'check_condition'], default_trigger: 'consultation_start',
     allowed_durations: ['until_consultation_ends', 'continuous'], default_duration: 'until_consultation_ends',
@@ -7934,13 +8138,74 @@ const CSA_PRESET_CATALOG = [
   // ── 약함 · 지속 ──
   {
     id: 'keep_posture_until_conversation_ends', category: 'posture', label: '상담 자세를 대화가 끝날 때까지 유지',
-    minimum_strength: 'weak', actor_options: CSA_PRESET_STAFF_ACTOR_OPTIONS, target_options: CSA_PRESET_CONVERSATION_TARGET_OPTIONS,
+    minimum_strength: 'weak', actor_options: CSA_PRESET_ANY_PERSON_ACTORS, target_options: CSA_PRESET_CONVERSATION_TARGET_OPTIONS,
     default_actor: 'nurse', default_target: 'patient',
     allowed_triggers: ['conversation_start', 'consultation_start'], default_trigger: 'conversation_start',
     allowed_durations: ['until_conversation_ends'], default_duration: 'until_conversation_ends',
     required_action: 'keep_current_posture', public_normalization: true, persistent: true,
     direct_meaning_tags: ['자세', '유지', '지속'],
     content_template: '{actor_topic} {target_conj} {trigger_text} {modifier_clause}그 순간의 상담 자세를 {duration_text} 그대로 유지해야 한다.'
+  },
+  // ── 약함 · 참여자 확장(README 5.1) ──
+  {
+    id: 'touch_target_arm_or_shoulder_while_talking', category: 'contact', label: '대화 중 상대 팔·어깨에 손을 대기',
+    minimum_strength: 'weak', actor_options: CSA_PRESET_ANY_PERSON_ACTORS, target_options: CSA_PRESET_ANY_PERSON_TARGETS,
+    default_actor: 'nurse', default_target: 'patient',
+    allowed_triggers: ['conversation_start', 'comforting', 'on_request'], default_trigger: 'conversation_start',
+    allowed_durations: CSA_PRESET_POSTURE_DURATIONS, default_duration: 'until_conversation_ends',
+    required_action: 'touch_target_arm_or_shoulder', public_normalization: true, persistent: true,
+    direct_meaning_tags: ['팔', '어깨', '손'],
+    content_template: '{actor_topic} {target_conj} {trigger_text} {modifier_clause}{target_possessive} 팔이나 어깨에 손을 대는 것이 자연스러우며, {duration_text} 그렇게 할 수 있다.'
+  },
+  {
+    id: 'hold_target_hand_during_consultation', category: 'contact', label: '상담·설명 중 상대 손을 잡고 유지',
+    minimum_strength: 'weak', actor_options: CSA_PRESET_ANY_PERSON_ACTORS, target_options: CSA_PRESET_ANY_PERSON_TARGETS,
+    default_actor: 'nurse', default_target: 'patient',
+    allowed_triggers: ['consultation_start', 'explanation_start', 'comforting'], default_trigger: 'consultation_start',
+    allowed_durations: CSA_PRESET_POSTURE_DURATIONS, default_duration: 'until_consultation_ends',
+    required_action: 'hold_target_hand', public_normalization: true, persistent: true,
+    direct_meaning_tags: ['손', '잡', '유지'],
+    content_template: '{actor_topic} {target_conj} {trigger_text} {modifier_clause}{target_possessive} 손을 잡고 유지하는 것이 자연스러우며, {duration_text} 그 상태를 유지할 수 있다.'
+  },
+  {
+    id: 'guide_target_by_back_or_waist', category: 'contact', label: '이동·안내 시 등이나 허리를 가볍게 잡아 이끌기',
+    minimum_strength: 'weak', actor_options: CSA_PRESET_ANY_PERSON_ACTORS, target_options: CSA_PRESET_ANY_PERSON_TARGETS,
+    default_actor: 'nurse', default_target: 'patient',
+    allowed_triggers: ['on_request', 'during_work'], default_trigger: 'on_request',
+    allowed_durations: ['until_target_relaxed', 'until_explicit_position_change', 'continuous'], default_duration: 'until_explicit_position_change',
+    required_action: 'guide_target_by_back_or_waist', public_normalization: true, persistent: true,
+    direct_meaning_tags: ['등', '허리', '안내'],
+    content_template: '{actor_topic} {target_conj} {trigger_text} {modifier_clause}{target_possessive} 등이나 허리를 가볍게 잡아 이끄는 것이 자연스럽다.'
+  },
+  {
+    id: 'maintain_knee_or_thigh_contact_while_seated', category: 'contact', label: '가까이 앉아 대화할 때 무릎·허벅지 접촉 유지',
+    minimum_strength: 'weak', actor_options: CSA_PRESET_ANY_PERSON_ACTORS, target_options: CSA_PRESET_ANY_PERSON_TARGETS,
+    default_actor: 'nurse', default_target: 'patient',
+    allowed_triggers: ['conversation_start', 'consultation_start', 'comforting'], default_trigger: 'conversation_start',
+    allowed_durations: CSA_PRESET_POSTURE_DURATIONS, default_duration: 'until_conversation_ends',
+    required_action: 'maintain_knee_or_thigh_contact', public_normalization: true, persistent: true,
+    direct_meaning_tags: ['무릎', '허벅지', '접촉'],
+    content_template: '{actor_topic} {target_conj} {trigger_text} {modifier_clause}가까이 앉아 {target_possessive} 무릎이나 허벅지에 닿는 접촉을 유지하는 것이 자연스러우며, {duration_text} 그렇게 할 수 있다.'
+  },
+  {
+    id: 'adjust_target_uniform_neatly', category: 'contact', label: '상대 옷깃·소매·허리선 등 옷매무새 정리',
+    minimum_strength: 'weak', actor_options: CSA_PRESET_ANY_PERSON_ACTORS, target_options: CSA_PRESET_STAFF_TARGETS,
+    default_actor: 'nurse', default_target: 'doctor',
+    allowed_triggers: ['on_request', 'during_work'], default_trigger: 'on_request',
+    allowed_durations: ['until_explicit_position_change', 'continuous'], default_duration: 'until_explicit_position_change',
+    required_action: 'adjust_target_uniform_neatly', public_normalization: true, persistent: true,
+    direct_meaning_tags: ['옷깃', '소매', '매무새'],
+    content_template: '{actor_topic} {target_conj} {trigger_text} {modifier_clause}{target_possessive} 옷깃·소매·허리선 같은 옷매무새를 직접 정리하는 것이 자연스럽다.'
+  },
+  {
+    id: 'allow_counterpart_to_check_uniform_fit', category: 'contact', label: '상대가 유니폼 밀착 상태·옷매무새를 손으로 확인',
+    minimum_strength: 'weak', actor_options: CSA_PRESET_PUBLIC_USER_ACTORS, target_options: CSA_PRESET_STAFF_TARGETS,
+    default_actor: 'patient', default_target: 'nurse',
+    allowed_triggers: ['on_request', 'check_condition'], default_trigger: 'on_request',
+    allowed_durations: ['until_explicit_position_change', 'continuous'], default_duration: 'until_explicit_position_change',
+    required_action: 'allow_counterpart_check_uniform_fit', public_normalization: true, persistent: true,
+    direct_meaning_tags: ['밀착', '옷매무새', '확인'],
+    content_template: '{actor_topic} {trigger_text} {modifier_clause}{target_possessive} 유니폼 밀착 상태나 옷매무새를 손으로 확인하는 것이 자연스럽다.'
   },
   // ── 중간 ──
   {
@@ -8032,6 +8297,127 @@ const CSA_PRESET_CATALOG = [
     required_action: 'public_physiological_relief_contact', public_normalization: true, persistent: true,
     direct_meaning_tags: ['생리현상', '접촉', '공개'],
     content_template: '{actor_topic} {target_possessive} 생리현상 해결에 필요한 신체 접촉을 {modifier_clause}공개된 장소에서도 정상 업무로 수행해야 하며, {duration_text} 이를 계속해야 한다.'
+  },
+  // ── 중간 · 참여자 확장(README 5.2) ──
+  {
+    id: 'touch_target_body_for_condition_check', category: 'contact', label: '주체가 대상의 몸을 손으로 만져 상태 확인',
+    minimum_strength: 'medium', actor_options: CSA_PRESET_ANY_PERSON_ACTORS, target_options: CSA_PRESET_ANY_PERSON_TARGETS,
+    default_actor: 'nurse', default_target: 'patient',
+    allowed_triggers: ['check_condition', 'during_work'], default_trigger: 'check_condition',
+    allowed_durations: ['until_work_ends', 'until_target_relaxed'], default_duration: 'until_work_ends',
+    required_action: 'touch_target_body_for_condition_check', public_normalization: true, persistent: true,
+    direct_meaning_tags: ['몸', '손', '상태 확인'],
+    content_template: '{actor_topic} {trigger_text} {modifier_clause}{target_possessive} 몸을 손으로 직접 만져 상태를 확인해야 하며, {duration_text} 이를 정상 절차로 다뤄야 한다.'
+  },
+  {
+    id: 'check_staff_body_by_touch', category: 'contact', label: '플레이어·환자·보호자·방문객 등이 직원의 몸을 만져 확인',
+    minimum_strength: 'medium', actor_options: CSA_PRESET_PUBLIC_USER_ACTORS, target_options: CSA_PRESET_STAFF_TARGETS,
+    default_actor: 'patient', default_target: 'nurse',
+    allowed_triggers: ['check_condition', 'on_request'], default_trigger: 'on_request',
+    allowed_durations: ['until_work_ends', 'until_target_relaxed'], default_duration: 'until_target_relaxed',
+    required_action: 'check_staff_body_by_touch', public_normalization: true, persistent: true,
+    direct_meaning_tags: ['몸', '만져', '확인'],
+    content_template: '{actor_topic} {trigger_text} {modifier_clause}{target_possessive} 몸을 직접 만져 확인하는 것이 정상 절차이며, {duration_text} 그렇게 할 수 있다.'
+  },
+  {
+    id: 'mutual_body_condition_check', category: 'contact', label: '선택한 두 집단이 서로의 신체 상태를 직접 확인',
+    minimum_strength: 'medium', actor_options: CSA_PRESET_ANY_PERSON_ACTORS, target_options: CSA_PRESET_ANY_PERSON_TARGETS,
+    default_actor: 'nurse', default_target: 'patient',
+    allowed_triggers: ['check_condition', 'during_work'], default_trigger: 'check_condition',
+    allowed_durations: ['until_work_ends', 'until_target_relaxed'], default_duration: 'until_work_ends',
+    required_action: 'mutual_body_condition_check', public_normalization: true, persistent: true,
+    direct_meaning_tags: ['서로', '신체 상태', '확인'],
+    content_template: '{actor_topic} {target_conj} {trigger_text} {modifier_clause}서로의 신체 상태를 직접 확인하는 것이 정상 절차이며, {duration_text} 이를 계속할 수 있다.'
+  },
+  {
+    id: 'stimulate_target_breast_or_nipple_for_sensitivity_check', category: 'physiology', label: '가슴·유두 민감도 확인(주체·대상 일반화)',
+    minimum_strength: 'medium', actor_options: CSA_PRESET_ANY_PERSON_ACTORS, target_options: CSA_PRESET_ANY_PERSON_TARGETS,
+    default_actor: 'nurse', default_target: 'patient',
+    allowed_triggers: ['check_condition', 'during_work'], default_trigger: 'check_condition',
+    allowed_durations: ['until_work_ends'], default_duration: 'until_work_ends',
+    required_action: 'stimulate_target_breast_or_nipple_for_sensitivity_check', public_normalization: true, persistent: true,
+    direct_meaning_tags: ['유두', '가슴', '자극', '확인'],
+    content_template: '{actor_topic} {trigger_text} {modifier_clause}{target_possessive} 가슴과 유두 민감도를 직접 자극해 확인해야 하며, {duration_text} 이를 정상 절차로 다뤄야 한다.'
+  },
+  {
+    id: 'relieve_target_sexual_tension_by_hand', category: 'physiology', label: '주체가 대상의 성적 긴장을 손으로 완화(일반화)',
+    minimum_strength: 'medium', actor_options: CSA_PRESET_ANY_PERSON_ACTORS, target_options: CSA_PRESET_ANY_PERSON_TARGETS,
+    default_actor: 'nurse', default_target: 'patient',
+    allowed_triggers: ['check_condition', 'comforting'], default_trigger: 'check_condition',
+    allowed_durations: ['until_target_relaxed', 'until_work_ends'], default_duration: 'until_target_relaxed',
+    required_action: 'relieve_target_sexual_tension_by_hand', public_normalization: true, persistent: true,
+    direct_meaning_tags: ['성적 긴장', '손', '완화'],
+    content_template: '{actor_topic} {target_conj} {trigger_text} {modifier_clause}{target_possessive} 성적 긴장을 손으로 직접 완화해야 하며, {duration_text} 이를 계속해야 한다.'
+  },
+  {
+    id: 'counterpart_guides_staff_hand_during_exam', category: 'contact', label: '상대가 직원의 손을 잡아 검사 위치로 직접 안내',
+    minimum_strength: 'medium', actor_options: CSA_PRESET_PUBLIC_USER_ACTORS, target_options: CSA_PRESET_STAFF_TARGETS,
+    default_actor: 'patient', default_target: 'nurse',
+    allowed_triggers: ['check_condition', 'during_work'], default_trigger: 'check_condition',
+    allowed_durations: ['until_work_ends'], default_duration: 'until_work_ends',
+    required_action: 'counterpart_guides_staff_hand_during_exam', public_normalization: true, persistent: true,
+    direct_meaning_tags: ['손', '안내', '검사'],
+    content_template: '{actor_topic} {trigger_text} {modifier_clause}{target_possessive} 손을 잡아 검사 위치로 직접 안내하는 것이 자연스러우며, {duration_text} 이를 계속할 수 있다.'
+  },
+  {
+    id: 'work_in_underwear_only', category: 'clothing', label: '속옷 차림으로 근무·업무 수행',
+    minimum_strength: 'medium', actor_options: CSA_PRESET_STAFF_ACTOR_OPTIONS.concat(['female_staff', 'male_staff']), target_options: [],
+    default_actor: 'nurse', default_target: null,
+    allowed_triggers: ['always_on_duty'], default_trigger: 'always_on_duty',
+    allowed_durations: ['while_on_duty'], default_duration: 'while_on_duty',
+    required_action: 'work_in_underwear_only', public_normalization: true, persistent: true,
+    direct_meaning_tags: ['속옷', '차림', '근무'],
+    content_template: '{actor_topic} 통풍과 원활한 처치를 위해 {modifier_clause}속옷 차림으로 근무·업무를 수행해야 한다.'
+  },
+  {
+    id: 'remove_bra_or_undershirt_under_uniform', category: 'clothing', label: '유니폼 안 브라·속옷 상의 미착용 규정',
+    minimum_strength: 'medium', actor_options: CSA_PRESET_STAFF_ACTOR_OPTIONS.concat(['female_staff', 'male_staff']), target_options: [],
+    default_actor: 'nurse', default_target: null,
+    allowed_triggers: ['always_on_duty'], default_trigger: 'always_on_duty',
+    allowed_durations: ['while_on_duty'], default_duration: 'while_on_duty',
+    required_action: 'remove_bra_or_undershirt_under_uniform', public_normalization: true, persistent: true,
+    direct_meaning_tags: ['브라', '속옷 상의', '미착용'],
+    content_template: '{actor_topic} {modifier_clause}유니폼 안에 브라나 속옷 상의를 착용하지 않는 것이 근무 규정이다.'
+  },
+  {
+    id: 'remove_underwear_bottom_under_uniform', category: 'clothing', label: '유니폼 안 하의 속옷 미착용 규정',
+    minimum_strength: 'medium', actor_options: CSA_PRESET_STAFF_ACTOR_OPTIONS.concat(['female_staff', 'male_staff']), target_options: [],
+    default_actor: 'nurse', default_target: null,
+    allowed_triggers: ['always_on_duty'], default_trigger: 'always_on_duty',
+    allowed_durations: ['while_on_duty'], default_duration: 'while_on_duty',
+    required_action: 'remove_underwear_bottom_under_uniform', public_normalization: true, persistent: true,
+    direct_meaning_tags: ['하의 속옷', '미착용'],
+    content_template: '{actor_topic} {modifier_clause}유니폼 안에 하의 속옷을 착용하지 않는 것이 근무 규정이다.'
+  },
+  {
+    id: 'open_uniform_for_body_examination', category: 'clothing', label: '신체 확인을 위해 유니폼 해당 부위를 직접 열거나 조정',
+    minimum_strength: 'medium', actor_options: CSA_PRESET_STAFF_ACTOR_OPTIONS, target_options: ['patient', 'assigned_patient', 'player'],
+    default_actor: 'nurse', default_target: 'patient',
+    allowed_triggers: ['check_condition', 'during_work'], default_trigger: 'check_condition',
+    allowed_durations: ['until_work_ends'], default_duration: 'until_work_ends',
+    required_action: 'open_uniform_for_body_examination', public_normalization: true, persistent: true,
+    direct_meaning_tags: ['유니폼', '열', '조정'],
+    content_template: '{actor_topic} {trigger_text} {modifier_clause}신체 확인을 위해 {target_possessive} 유니폼 해당 부위를 직접 열거나 조정하는 것이 정상 절차다.'
+  },
+  {
+    id: 'target_may_adjust_staff_clothing_for_check', category: 'clothing', label: '주체가 직원의 유니폼을 직접 조정해 확인',
+    minimum_strength: 'medium', actor_options: CSA_PRESET_PUBLIC_USER_ACTORS, target_options: CSA_PRESET_STAFF_TARGETS,
+    default_actor: 'patient', default_target: 'nurse',
+    allowed_triggers: ['check_condition', 'on_request'], default_trigger: 'on_request',
+    allowed_durations: ['until_work_ends', 'until_explicit_position_change'], default_duration: 'until_explicit_position_change',
+    required_action: 'target_may_adjust_staff_clothing_for_check', public_normalization: true, persistent: true,
+    direct_meaning_tags: ['유니폼', '조정', '확인'],
+    content_template: '{actor_topic} {trigger_text} {modifier_clause}{target_possessive} 유니폼을 직접 조정해 확인하는 것이 자연스럽다.'
+  },
+  {
+    id: 'change_into_tighter_or_looser_uniform_for_duty', category: 'clothing', label: '업무 목적에 맞는 별도 유니폼으로 실제 갈아입기',
+    minimum_strength: 'medium', actor_options: CSA_PRESET_STAFF_ACTOR_OPTIONS.concat(['female_staff', 'male_staff']), target_options: [],
+    default_actor: 'nurse', default_target: null,
+    allowed_triggers: ['always_on_duty', 'during_work'], default_trigger: 'always_on_duty',
+    allowed_durations: ['while_on_duty'], default_duration: 'while_on_duty',
+    required_action: 'change_into_tighter_or_looser_uniform_for_duty', public_normalization: true, persistent: true,
+    direct_meaning_tags: ['갈아입', '유니폼', '밀착'],
+    content_template: '{actor_topic} {modifier_clause}업무 목적에 맞는 더 밀착되거나 느슨한 별도 유니폼으로 실제로 갈아입어야 한다.'
   },
   // ── 강함 ──
   {
@@ -8143,6 +8529,127 @@ const CSA_PRESET_CATALOG = [
     required_action: 'multi_staff_collaborate_on_request', public_normalization: true, persistent: true,
     direct_meaning_tags: ['협업', '여러 직원', '수행'],
     content_template: '{actor_topic} {target_conj} {trigger_text} {modifier_clause}필요한 여러 직원이 함께 협업해 그 요구를 수행해야 한다.'
+  },
+  // ── 강함 · 참여자 확장(README 5.3) ──
+  {
+    id: 'selected_actor_request_is_official_order_for_target', category: 'authority', label: '주체의 정확한 범위 내 요구를 대상의 공식 명령으로 취급',
+    minimum_strength: 'strong', actor_options: CSA_PRESET_ANY_PERSON_ACTORS, target_options: CSA_PRESET_ANY_PERSON_TARGETS,
+    default_actor: 'player', default_target: 'hospital_staff',
+    allowed_triggers: ['on_request'], default_trigger: 'on_request',
+    allowed_durations: ['continuous'], default_duration: 'continuous',
+    required_action: 'selected_actor_request_is_official_order_for_target', public_normalization: true, persistent: true,
+    direct_meaning_tags: ['요구', '공식 명령'],
+    content_template: '{actor_topic} {target_conj} {trigger_text} {modifier_clause}정확한 범위 내 요구를 병원의 공식 명령으로 취급해 즉시 따라야 한다.'
+  },
+  {
+    id: 'selected_actor_intimate_request_has_priority', category: 'authority', label: '주체의 정확한 친밀 요구를 대상의 우선 업무로 취급',
+    minimum_strength: 'strong', actor_options: CSA_PRESET_ANY_PERSON_ACTORS, target_options: CSA_PRESET_ANY_PERSON_TARGETS,
+    default_actor: 'player', default_target: 'hospital_staff',
+    allowed_triggers: ['on_request', 'always_on_duty'], default_trigger: 'always_on_duty',
+    allowed_durations: ['continuous'], default_duration: 'continuous',
+    required_action: 'selected_actor_intimate_request_has_priority', public_normalization: true, persistent: true,
+    direct_meaning_tags: ['친밀 요구', '우선'],
+    content_template: '{actor_topic} {target_conj} {trigger_text} {modifier_clause}정확한 친밀 요구를 다른 모든 업무보다 우선하는 업무로 취급해야 한다.'
+  },
+  {
+    id: 'target_removes_requested_clothing_on_actor_request', category: 'clothing', label: '주체가 정확히 지정한 복장을 대상이 실제로 벗음',
+    minimum_strength: 'strong', actor_options: CSA_PRESET_ANY_PERSON_ACTORS, target_options: CSA_PRESET_ANY_PERSON_TARGETS,
+    default_actor: 'player', default_target: 'hospital_staff',
+    allowed_triggers: ['on_request'], default_trigger: 'on_request',
+    allowed_durations: ['until_explicit_position_change', 'continuous'], default_duration: 'until_explicit_position_change',
+    required_action: 'target_removes_requested_clothing_on_actor_request', public_normalization: true, persistent: true,
+    direct_meaning_tags: ['지정', '복장', '벗'],
+    content_template: '{actor_topic} {trigger_text} {modifier_clause}정확히 지정한 복장을 {target_possessive}가 실제로 벗어야 한다.'
+  },
+  {
+    id: 'selected_actor_controls_target_uniform', category: 'clothing', label: '주체가 대상의 유니폼을 열고 닫고 조정하거나 벗기는 공식 권한',
+    minimum_strength: 'strong', actor_options: CSA_PRESET_ANY_PERSON_ACTORS, target_options: CSA_PRESET_ANY_PERSON_TARGETS,
+    default_actor: 'player', default_target: 'hospital_staff',
+    allowed_triggers: ['on_request', 'always_on_duty'], default_trigger: 'on_request',
+    allowed_durations: ['continuous'], default_duration: 'continuous',
+    required_action: 'selected_actor_controls_target_uniform', public_normalization: true, persistent: true,
+    direct_meaning_tags: ['유니폼', '조정', '권한'],
+    content_template: '{actor_topic} {target_conj} {trigger_text} {modifier_clause}유니폼을 열고, 닫고, 조정하거나 벗기는 것이 공식 권한이다.'
+  },
+  {
+    id: 'nudity_is_standard_uniform_for_selected_group', category: 'clothing', label: '선택 집단의 전라 상태가 표준 근무 복장',
+    minimum_strength: 'strong', actor_options: CSA_PRESET_STAFF_ACTOR_OPTIONS.concat(['female_staff', 'male_staff']), target_options: [],
+    default_actor: 'nurse', default_target: null,
+    allowed_triggers: ['always_on_duty'], default_trigger: 'always_on_duty',
+    allowed_durations: ['while_on_duty', 'continuous'], default_duration: 'while_on_duty',
+    required_action: 'nudity_is_standard_uniform_for_selected_group', public_normalization: true, persistent: true,
+    direct_meaning_tags: ['전라', '표준', '근무 복장'],
+    content_template: '{actor_topic} {modifier_clause}전라 상태가 표준 근무 복장이며 그 상태로 근무해야 한다.'
+  },
+  {
+    id: 'designated_body_parts_remain_exposed_while_on_duty', category: 'clothing', label: '지정 신체 부위를 노출한 채 근무하는 것이 표준',
+    minimum_strength: 'strong', actor_options: CSA_PRESET_STAFF_ACTOR_OPTIONS.concat(['female_staff', 'male_staff']), target_options: [],
+    default_actor: 'nurse', default_target: null,
+    allowed_triggers: ['always_on_duty'], default_trigger: 'always_on_duty',
+    allowed_durations: ['while_on_duty', 'continuous'], default_duration: 'while_on_duty',
+    required_action: 'designated_body_parts_remain_exposed_while_on_duty', public_normalization: true, persistent: true,
+    direct_meaning_tags: ['노출', '신체 부위', '근무'],
+    content_template: '{actor_topic} {modifier_clause}지정된 신체 부위를 노출한 채로 근무하는 것이 표준이다.'
+  },
+  {
+    id: 'selected_actor_performs_priority_sexual_relief_for_target', category: 'physiology', label: '주체가 대상에게 지정된 성적 긴장 완화 행동을 우선 수행',
+    minimum_strength: 'strong', actor_options: CSA_PRESET_ANY_PERSON_ACTORS, target_options: CSA_PRESET_ANY_PERSON_TARGETS,
+    default_actor: 'nurse', default_target: 'player',
+    allowed_triggers: ['on_request', 'always_on_duty'], default_trigger: 'always_on_duty',
+    allowed_durations: ['continuous'], default_duration: 'continuous',
+    required_action: 'selected_actor_performs_priority_sexual_relief_for_target', public_normalization: true, persistent: true,
+    direct_meaning_tags: ['성적 긴장', '완화', '우선'],
+    content_template: '{actor_topic} {target_conj} {trigger_text} {modifier_clause}지정된 성적 긴장 완화 행동을 다른 업무보다 우선해 수행해야 한다.'
+  },
+  {
+    id: 'selected_groups_mutually_assist_sexual_relief', category: 'physiology', label: '두 집단 사이 지정된 상호 성적 긴장 완화가 정상 업무',
+    minimum_strength: 'strong', actor_options: CSA_PRESET_ANY_PERSON_ACTORS, target_options: CSA_PRESET_ANY_PERSON_TARGETS,
+    default_actor: 'nurse', default_target: 'player',
+    allowed_triggers: ['always_on_duty'], default_trigger: 'always_on_duty',
+    allowed_durations: ['continuous'], default_duration: 'continuous',
+    required_action: 'selected_groups_mutually_assist_sexual_relief', public_normalization: true, persistent: true,
+    direct_meaning_tags: ['상호', '성적 긴장', '완화'],
+    content_template: '{actor_topic} {target_conj} 지정된 상호 성적 긴장 완화 행동이 {modifier_clause}정상 업무다.'
+  },
+  {
+    id: 'public_intimate_contact_between_selected_groups_is_routine', category: 'contact', label: '선택한 두 집단의 지정된 공개 접촉이 일상적 정상 업무',
+    minimum_strength: 'strong', actor_options: CSA_PRESET_ANY_PERSON_ACTORS, target_options: CSA_PRESET_ANY_PERSON_TARGETS,
+    default_actor: 'nurse', default_target: 'player',
+    allowed_triggers: ['always_on_duty'], default_trigger: 'always_on_duty',
+    allowed_durations: ['continuous'], default_duration: 'continuous',
+    required_action: 'public_intimate_contact_between_selected_groups_is_routine', public_normalization: true, persistent: true,
+    direct_meaning_tags: ['공개', '접촉', '일상적'],
+    content_template: '{actor_topic} {target_conj} 지정된 접촉을 {modifier_clause}공개된 장소에서도 일상적인 정상 업무로 수행해야 한다.'
+  },
+  {
+    id: 'continue_designated_intimate_contact_until_explicit_end', category: 'contact', label: '지정된 접촉을 명시적으로 종료할 때까지 계속 유지',
+    minimum_strength: 'strong', actor_options: CSA_PRESET_ANY_PERSON_ACTORS, target_options: CSA_PRESET_ANY_PERSON_TARGETS,
+    default_actor: 'nurse', default_target: 'player',
+    allowed_triggers: ['on_request', 'always_on_duty'], default_trigger: 'always_on_duty',
+    allowed_durations: ['continuous'], default_duration: 'continuous',
+    required_action: 'continue_designated_intimate_contact_until_explicit_end', public_normalization: true, persistent: true,
+    direct_meaning_tags: ['지정', '접촉', '계속'],
+    content_template: '{actor_topic} {target_conj} {trigger_text} {modifier_clause}지정된 접촉을 명시적으로 끝낼 때까지 계속 유지해야 한다.'
+  },
+  {
+    id: 'selected_actor_sets_target_working_posture', category: 'posture', label: '주체가 대상의 근무 자세를 정하고 대상은 실제로 전환',
+    minimum_strength: 'strong', actor_options: CSA_PRESET_ANY_PERSON_ACTORS, target_options: CSA_PRESET_STAFF_TARGETS,
+    default_actor: 'player', default_target: 'nurse',
+    allowed_triggers: ['on_request'], default_trigger: 'on_request',
+    allowed_durations: ['until_explicit_position_change', 'continuous'], default_duration: 'until_explicit_position_change',
+    required_action: 'selected_actor_sets_target_working_posture', public_normalization: true, persistent: true,
+    direct_meaning_tags: ['자세', '지정', '전환'],
+    content_template: '{actor_topic} {target_conj} {trigger_text} {modifier_clause}지정한 근무 자세로 {target_possessive} 실제로 전환해야 한다.'
+  },
+  {
+    id: 'selected_actor_controls_target_clothing_and_posture', category: 'authority', label: '주체가 대상의 복장 조정과 자세 전환을 공식 절차로 실행',
+    minimum_strength: 'strong', actor_options: CSA_PRESET_ANY_PERSON_ACTORS, target_options: CSA_PRESET_STAFF_TARGETS,
+    default_actor: 'player', default_target: 'nurse',
+    allowed_triggers: ['on_request'], default_trigger: 'on_request',
+    allowed_durations: ['continuous', 'until_explicit_position_change'], default_duration: 'continuous',
+    required_action: 'selected_actor_controls_target_clothing_and_posture', public_normalization: true, persistent: true,
+    direct_meaning_tags: ['복장', '자세', '공식 절차'],
+    content_template: '{actor_topic} {target_conj} {trigger_text} {modifier_clause}정확히 지정된 복장 조정과 자세 전환을 공식 절차로 실행해야 한다.'
   }
 ].map(item => ({ ...item, strength: item.strength || item.minimum_strength }));
 
@@ -9432,6 +9939,65 @@ function resolveCsaDirectRelevance(save = {}, choice = '') {
   return best;
 }
 
+// README section 7.1 — the authoritative (not "bonus") csa_direct coverage
+// check. A choice is only covered when ALL of these hold for some active
+// CSA: (1) the choice's own core-action textual signature matches that
+// CSA's direct_meaning_tags/regex relevance at the 'direct' tier — never
+// 'partial'/'none'; (2) its actor/target groups resolve to concrete,
+// distinct participants right now (resolveCsaParticipants) — an
+// unresolvable role (e.g. no patient available) never becomes csa_direct;
+// (3) the choice contains no detected sexual action beyond what the CSA's
+// own semantic contract authorizes — a choice that bundles a covered action
+// with an extra uncovered one (README 7.2, "제 옷을 조사하고 키스한다") is
+// never wholly csa_direct, so it falls through to ordinary severity
+// classification keyed on that stronger uncovered action instead.
+function resolveCsaDirectCoverage(save = {}, master = {}, choiceText = '') {
+  const text = typeof choiceText === 'string' ? choiceText : '';
+  if (!text.trim()) return { covered: false };
+  const detected = deprecatedClassifySexualActionDetailed(text);
+  for (const csa of getApplicableCsaEntries(save)) {
+    const relevance = (csa.source_type === 'preset' && isPlainObject(csa.preset))
+      ? resolvePresetDirectRelevance(csa.preset.direct_meaning_tags, text)
+      : resolveRegexCsaRelevance(typeof csa.content === 'string' ? csa.content : '', text);
+    if (relevance !== 'direct') continue;
+    const contract = buildCsaSemanticContract(csa);
+    const participants = resolveCsaParticipants({ actorGroup: contract.actor_group, targetGroup: contract.target_group, save, master });
+    if (!participants.resolved) continue;
+    if (detected.action !== 'none' && !contract.actions.includes(detected.action)) continue;
+    return {
+      covered: true,
+      csaId: typeof csa.id === 'string' ? csa.id : null,
+      templateId: csa?.preset?.template_id || null,
+      action: detected.action !== 'none' ? detected.action : 'none',
+      actorGroup: contract.actor_group,
+      targetGroup: contract.target_group
+    };
+  }
+  return { covered: false };
+}
+
+// README section 7 — single authoritative execution-route resolver, used by
+// buildChoiceMeta (fresh classification), the stale-metadata recompute
+// guard, and Story's selected-choice fact injection. Precedence:
+// csa_direct > voluntary > bold > blocked.
+function resolveChoiceExecutionRoute({ choiceText = '', save = {}, master = {} } = {}) {
+  const coverage = resolveCsaDirectCoverage(save, master, choiceText);
+  if (coverage.covered) {
+    return {
+      route: 'csa_direct',
+      csa_id: coverage.csaId,
+      template_id: coverage.templateId,
+      action: coverage.action,
+      actor_group: coverage.actorGroup,
+      target_group: coverage.targetGroup
+    };
+  }
+  const risk = classifyChoiceRiskSeverity(choiceText, save);
+  if (risk.severity === 'blocked') return { route: 'blocked', action: risk.action, blocking_boundaries: risk.blocking_boundaries || [] };
+  if (risk.severity === 'none') return { route: 'voluntary', action: risk.action };
+  return { route: 'bold', severity: risk.severity, action: risk.action };
+}
+
 const INTIMACY_STAGE_RANK = { none: 0, romantic_interest: 1, kissed: 2, sexual_touch: 3, oral: 4, intercourse: 5 };
 const INTIMACY_BOUNDARIES = new Set(['not_ready', 'private_only', 'kiss_only', 'no_genital_touch', 'no_oral', 'no_penetration', 'needs_discussion']);
 const SEXUAL_ACTION_RANK = { none: 0, kiss: 1, sexual_touch: 2, genital_exposure: 3, genital_touch: 4, oral: 5, penetration: 6 };
@@ -9924,14 +10490,24 @@ const CHOICE_RISK_SUCCESS_RANGE = {
   extreme: [10, 30]
 };
 
+// Expand-CSA-participants fix: this used to suppress severity to 'none'
+// whenever resolveCsaDirectRelevance's *keyword* match hit 'direct' —
+// treating CSA relevance as a bonus/override rather than an authoritative
+// route, and with no awareness of whether the CSA's participants can
+// actually be resolved or whether the choice bundles an uncovered extra
+// action. That bypass is now resolveCsaDirectCoverage()'s job exclusively
+// (see buildChoiceMeta, which checks coverage *before* ever calling this
+// function and short-circuits to kind:'csa_direct' without a severity/rate
+// calculation at all). This function no longer grants any bypass on its
+// own — a keyword-direct-but-unresolvable-or-mixed choice now falls through
+// to ordinary severity classification based on its actually detected
+// action, which is what lets a bundled "covered action + kiss her" choice
+// get classified by the uncovered kiss instead of silently becoming risk-free.
 function classifyChoiceRiskSeverity(choice = '', save = {}) {
   const text = typeof choice === 'string' ? choice : '';
   const classification = deprecatedClassifySexualActionDetailed(text);
   const csaDirectRelevance = resolveCsaDirectRelevance(save, text);
   if (classification.action === 'none' || classification.intent === 'discussion') {
-    return { severity: 'none', action: classification.action, is_public: classification.is_public, csa_direct_relevance: csaDirectRelevance };
-  }
-  if (csaDirectRelevance === 'direct') {
     return { severity: 'none', action: classification.action, is_public: classification.is_public, csa_direct_relevance: csaDirectRelevance };
   }
   const characterId = save?.last_character_id;
@@ -9995,6 +10571,34 @@ function calculateBoldChoiceRate(save = {}, master = {}, choice = '') {
 
 function buildChoiceMeta(choices = [], save = {}, master = {}, turnNumber = 0, { allowBold = true } = {}) {
   return choices.map((choice, index) => {
+    // README section 7/11 — checked before any bold/blocked classification
+    // at all, so an exactly-covered choice never runs a random roll and
+    // never displays a success percentage. calculateBoldChoiceRate (and the
+    // classifyChoiceRiskSeverity it calls) is never even invoked for these.
+    const coverage = allowBold ? resolveCsaDirectCoverage(save, master, choice) : { covered: false };
+    if (coverage.covered) {
+      return {
+        choice_id: `turn_${turnNumber}_choice_${index + 1}`,
+        kind: 'csa_direct',
+        severity: 'none',
+        success_rate: null,
+        affinity: null,
+        csa_direct_relevance: 'direct',
+        acceptance_bonus_applied: false,
+        sexual_action: coverage.action || 'none',
+        sexual_is_public: false,
+        sexual_gate: 'csa_direct',
+        blocking_boundaries: [],
+        direct_csa_ids: coverage.csaId ? [coverage.csaId] : [],
+        intimacy_stage: null,
+        csa_direct: {
+          csa_id: coverage.csaId,
+          template_id: coverage.templateId,
+          actor_group: coverage.actorGroup,
+          target_group: coverage.targetGroup
+        }
+      };
+    }
     const details = allowBold ? calculateBoldChoiceRate(save, master, choice) : null;
     const kind = details
       ? (details.severity === 'blocked' ? 'blocked' : 'bold')
@@ -10025,12 +10629,24 @@ const CHOICE_META_SEVERITIES = new Set(['none', 'mild', 'high', 'extreme', 'bloc
 // buildCsaOnlyPublicContext (display) and resolveBoldChoiceAttempt (actual
 // roll), both of which fall back to an in-memory buildChoiceMeta() recompute
 // when this returns false.
-function isCurrentChoiceMetaValid(choices, choiceMeta, turnNumber) {
+//
+// README section 9/14: a stored kind other than 'csa_direct' must not
+// survive once an active CSA now exactly covers that choice — a stale
+// 'bold'/'blocked'/free-action entry from before the CSA activated/updated
+// is treated as invalid so the caller's fallback recomputes it fresh (and
+// correctly lands on kind:'csa_direct'). This check is opt-in via the
+// `context` param so existing shape-only callers are unaffected.
+function isCurrentChoiceMetaValid(choices, choiceMeta, turnNumber, context = null) {
   if (!Array.isArray(choices) || !choices.length) return false;
   if (!Array.isArray(choiceMeta) || choiceMeta.length !== choices.length) return false;
   return choiceMeta.every((meta, index) => {
     if (!isPlainObject(meta)) return false;
     if (meta.choice_id !== `turn_${turnNumber}_choice_${index + 1}`) return false;
+    if (context?.save && meta.kind !== 'csa_direct') {
+      const coverage = resolveCsaDirectCoverage(context.save, context.master || {}, choices[index]);
+      if (coverage.covered) return false;
+    }
+    if (meta.kind === 'csa_direct') return meta.severity === 'none' && meta.success_rate == null;
     if (!CHOICE_META_SEVERITIES.has(meta.severity)) return false;
     if (meta.sexual_action === 'none' && meta.kind === 'bold') return false;
     if (meta.severity === 'none') return meta.kind !== 'bold' && meta.success_rate == null;
@@ -10050,7 +10666,7 @@ function resolveBoldChoiceAttempt(save = {}, master = {}, playerInput = '', game
   // actual roll — recompute it in-memory from the current save/choice text
   // instead of trusting a cached kind/success_rate that no longer reflects
   // reality.
-  const meta = isCurrentChoiceMetaValid(choices, rawMeta, turnNumber)
+  const meta = isCurrentChoiceMetaValid(choices, rawMeta, turnNumber, { save, master })
     ? rawMeta
     : buildChoiceMeta(choices, save, master, turnNumber, { allowBold: true });
   const index = choices.findIndex(choice => typeof choice === 'string' && choice.trim() === String(playerInput || '').trim());
@@ -10077,6 +10693,23 @@ function resolveBoldChoiceAttempt(save = {}, master = {}, playerInput = '', game
     direct_csa_ids: Array.isArray(candidate.direct_csa_ids) ? candidate.direct_csa_ids : [],
     intimacy_stage: candidate.intimacy_stage || null
   };
+}
+
+// README section 9 — the counterpart to resolveBoldChoiceAttempt for the
+// csa_direct route: when the player selected a choice the Worker already
+// classified as kind:'csa_direct' at the end of the previous commit, Story
+// needs to be told this is an already-validated fact (no random result
+// block — see the call site's absence of any roll/percentage), not a fresh
+// attempt to judge.
+function resolveSelectedCsaDirectChoice(save = {}, master = {}, playerInput = '', turnNumber = 0) {
+  const choices = Array.isArray(save?.last_choices) ? save.last_choices : [];
+  const rawMeta = Array.isArray(save?.last_choice_meta) ? save.last_choice_meta : [];
+  const meta = isCurrentChoiceMetaValid(choices, rawMeta, turnNumber, { save, master })
+    ? rawMeta
+    : buildChoiceMeta(choices, save, master, turnNumber, { allowBold: true });
+  const index = choices.findIndex(choice => typeof choice === 'string' && choice.trim() === String(playerInput || '').trim());
+  const candidate = index >= 0 ? meta[index] : null;
+  return candidate?.kind === 'csa_direct' ? candidate : null;
 }
 
 // ─────────────────────────────────────────────
@@ -11103,5 +11736,28 @@ export {
   requestDeepSeekJsonWithRetry,
   stableStringify,
   sha256Base64url,
-  signAppValidationProof
+  signAppValidationProof,
+  CSA_PRESET_CATALOG,
+  CSA_PRESET_ACTOR_OPTIONS,
+  CSA_PRESET_TARGET_OPTIONS,
+  CSA_PRESET_ANY_PERSON_ACTORS,
+  CSA_PRESET_ANY_PERSON_TARGETS,
+  CSA_PRESET_STAFF_TARGETS,
+  CSA_PRESET_PUBLIC_USER_ACTORS,
+  buildCsaPresetCatalogPayload,
+  validateCsaPresetOperation,
+  resolveCsaParticipants,
+  resolveCsaParticipant,
+  isPlausibleMinorNpcLocation,
+  resolveChoiceExecutionRoute,
+  resolveCsaDirectCoverage,
+  classifyChoiceRiskSeverity,
+  calculateBoldChoiceRate,
+  buildChoiceMeta,
+  isCurrentChoiceMetaValid,
+  resolveBoldChoiceAttempt,
+  buildCsaOnlyPublicContext,
+  planStructuredAction,
+  buildCsaMinorNpcSection,
+  resolveSelectedCsaDirectChoice
 };

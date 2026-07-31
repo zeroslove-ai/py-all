@@ -10161,22 +10161,80 @@ function resolveCsaDirectRelevance(save = {}, choice = '') {
   return best;
 }
 
+// Hotfix (2026-07-31 turn-127 incident) — resolves the actor/target's
+// npc_to_player / player_to_npc direction from resolveCsaParticipants'
+// concrete resolution, treating a 'group' actor (e.g. actor_options:
+// ['everyone_in_hospital']) as the npc side: characterMatchesCsaActorGroup
+// already treats 'everyone_in_hospital' as unconditionally satisfied by
+// whichever NPC is currently in scene, so the concrete performer is that
+// NPC even though resolveCsaParticipant itself only returns type:'group'.
+function resolveCsaContractDirection(actor, target) {
+  const side = participant => {
+    if (!participant?.resolved && participant?.resolved !== undefined) return null;
+    if (participant?.type === 'player') return 'player';
+    if (participant?.type === 'npc' || participant?.type === 'group') return 'npc';
+    return null;
+  };
+  const actorSide = side(actor);
+  const targetSide = side(target);
+  if (actorSide === 'npc' && targetSide === 'player') return 'npc_to_player';
+  if (actorSide === 'player' && targetSide === 'npc') return 'player_to_npc';
+  return 'none';
+}
+
+// README section 5 — a choice containing a material sexual action (the
+// exact classifier above resolved one) must be covered through the CSA's
+// full semantic contract, never through direct_meaning_tags/content-regex
+// keyword relevance alone (that signal answers "does this text mention
+// this CSA's topic", not "is this exact physical act authorized between
+// these two people" — the turn-127 incident happened precisely because a
+// nonsexual CSA's descriptive tag ("만족") coincidentally appeared in a
+// sexual choice's wording). Order mirrors README 5.1-5.9: sexual
+// authorization, direct execution, exact action (and every other material
+// action type the choice bundles), exact direction, then concrete
+// participants right now. A CSA whose trigger is 'always_on_duty' is
+// continuously satisfied by definition; one whose trigger is 'on_request'
+// is satisfied by the player selecting this exact matching choice — so no
+// separate trigger check is needed once action+direction+participants all
+// match (selected-choice/Story-time validation still independently
+// re-verifies this turn's actual trigger evidence via
+// validateCsaDirectResolution, which this function never bypasses).
+function resolveSexualCsaDirectCoverage(save, master, text, exactAction, actionTypes) {
+  for (const csa of getApplicableCsaEntries(save)) {
+    const contract = buildCsaSemanticContract(csa);
+    if (contract.sexual_authorization !== true) continue;
+    if (contract.direct_execution !== true) continue;
+    if (!contract.actions.includes(exactAction)) continue;
+    // Reject a bundled uncovered material action (README 5.9) — e.g. a
+    // choice combining a covered 'oral' act with an uncovered 'kiss' is
+    // never wholly csa_direct even though 'oral' alone would qualify.
+    if (actionTypes.some(type => !contract.actions.includes(type))) continue;
+    const participants = resolveCsaParticipants({ actorGroup: contract.actor_group, targetGroup: contract.target_group, save, master });
+    if (!participants.resolved) continue;
+    const direction = resolveCsaContractDirection(participants.actor, participants.target);
+    if (!contract.directions.includes(direction)) continue;
+    return {
+      covered: true,
+      csaId: typeof csa.id === 'string' ? csa.id : null,
+      templateId: csa?.preset?.template_id || null,
+      action: exactAction,
+      actorGroup: contract.actor_group,
+      targetGroup: contract.target_group
+    };
+  }
+  return { covered: false };
+}
+
 // README section 7.1 — the authoritative (not "bonus") csa_direct coverage
-// check. A choice is only covered when ALL of these hold for some active
-// CSA: (1) the choice's own core-action textual signature matches that
-// CSA's direct_meaning_tags/regex relevance at the 'direct' tier — never
-// 'partial'/'none'; (2) its actor/target groups resolve to concrete,
-// distinct participants right now (resolveCsaParticipants) — an
-// unresolvable role (e.g. no patient available) never becomes csa_direct;
-// (3) the choice contains no detected sexual action beyond what the CSA's
-// own semantic contract authorizes — a choice that bundles a covered action
-// with an extra uncovered one (README 7.2, "제 옷을 조사하고 키스한다") is
-// never wholly csa_direct, so it falls through to ordinary severity
-// classification keyed on that stronger uncovered action instead.
-function resolveCsaDirectCoverage(save = {}, master = {}, choiceText = '') {
-  const text = typeof choiceText === 'string' ? choiceText : '';
-  if (!text.trim()) return { covered: false };
-  const detected = deprecatedClassifySexualActionDetailed(text);
+// check for a choice with no detected material sexual action: matches when
+// the choice's own core-action textual signature hits that CSA's
+// direct_meaning_tags/regex relevance at the 'direct' tier — never
+// 'partial'/'none' — and its actor/target groups resolve to concrete,
+// distinct participants right now (resolveCsaParticipants). An unresolvable
+// role (e.g. no patient available) never becomes csa_direct. Sexual choices
+// never reach this path — see resolveSexualCsaDirectCoverage above and the
+// materialSignal backstop below (README section 4/5).
+function resolveNonsexualCsaDirectCoverage(save, master, text) {
   for (const csa of getApplicableCsaEntries(save)) {
     const relevance = (csa.source_type === 'preset' && isPlainObject(csa.preset))
       ? resolvePresetDirectRelevance(csa.preset.direct_meaning_tags, text)
@@ -10185,17 +10243,30 @@ function resolveCsaDirectCoverage(save = {}, master = {}, choiceText = '') {
     const contract = buildCsaSemanticContract(csa);
     const participants = resolveCsaParticipants({ actorGroup: contract.actor_group, targetGroup: contract.target_group, save, master });
     if (!participants.resolved) continue;
-    if (detected.action !== 'none' && !contract.actions.includes(detected.action)) continue;
     return {
       covered: true,
       csaId: typeof csa.id === 'string' ? csa.id : null,
       templateId: csa?.preset?.template_id || null,
-      action: detected.action !== 'none' ? detected.action : 'none',
+      action: 'none',
       actorGroup: contract.actor_group,
       targetGroup: contract.target_group
     };
   }
   return { covered: false };
+}
+
+function resolveCsaDirectCoverage(save = {}, master = {}, choiceText = '') {
+  const text = typeof choiceText === 'string' ? choiceText : '';
+  if (!text.trim()) return { covered: false };
+  const detected = deprecatedClassifySexualActionDetailed(text);
+  if (detected.action !== 'none') {
+    return resolveSexualCsaDirectCoverage(save, master, text, detected.action, detectSexualActionTypes(text));
+  }
+  // README section 4 — the exact classifier could not name an action, but a
+  // material sexual signal is still present: never let a nonsexual/generic
+  // CSA claim csa_direct over this choice through keyword relevance alone.
+  if (hasMaterialSexualChoiceSignal(text)) return { covered: false };
+  return resolveNonsexualCsaDirectCoverage(save, master, text);
 }
 
 // README section 7 — single authoritative execution-route resolver, used by
@@ -10263,6 +10334,90 @@ function deprecatedIsSexualDiscussionOnly(text = '', action = 'none') {
   );
 }
 
+// Hotfix (2026-07-31 turn-127 incident) — anatomy + nearby physical-verb
+// signals, both word orders, common inflections spelled out explicitly
+// (Korean conjugation does not substring-match a bare stem: e.g. "벌리다"
+// inflects to "벌린다", which does not contain the substring "벌리"). Shared
+// by the exact single-action classifier and the multi-action bundling
+// check below so both always agree on what a choice/input contains.
+const ORAL_MOUTH_PART = /(?:입술|입|혀|구강)/;
+const ORAL_GENITAL_ANATOMY = /(?:성기|음경|자지|보지|질|클리토리스)/;
+// "댄다"/"닿는다" etc. are single fused Hangul syllables, not the literal
+// concatenation of their stem + ending (e.g. "대"+"ㄴ다" composes to "댄",
+// a different character from "대") — common inflections are spelled out
+// explicitly rather than relied on via stem substring matching.
+const ORAL_VERB = /(?:빨아|빨|핥아|핥|물어|깨물어|깨물|넣어|넣|대고|대며|댄|대|닿는|닿|감싸|받아들)/;
+const ORAL_EXPLICIT_PATTERN =
+  /(?:펠라티오|구강성교|커닐링구스|입으로\s*(?:빨|핥|해|물어|깨물)|빨아\s*(?:줘|라)|구강\s*(?:으로|성교))/;
+const ORAL_ANATOMY_MOUTH_VERB_PATTERN = new RegExp(`${ORAL_GENITAL_ANATOMY.source}.{0,14}${ORAL_MOUTH_PART.source}.{0,10}${ORAL_VERB.source}`);
+const ORAL_MOUTH_ANATOMY_VERB_PATTERN = new RegExp(`${ORAL_MOUTH_PART.source}.{0,14}${ORAL_GENITAL_ANATOMY.source}.{0,10}${ORAL_VERB.source}`);
+
+const GENITAL_TOUCH_ANATOMY = /(?:성기|음경|자지|질|보지|클리토리스)/;
+const GENITAL_TOUCH_VERB = /(?:만지|만져|만진|만질|잡|비비|비벼|비빈|비빌|핥|문지|문질|자극|누르|눌러|누른|벌리|벌려|벌린|벌릴|비틀|비튼)/;
+const GENITAL_TOUCH_PATTERN = new RegExp(
+  `${GENITAL_TOUCH_ANATOMY.source}.{0,12}${GENITAL_TOUCH_VERB.source}`
+  + `|${GENITAL_TOUCH_VERB.source}.{0,12}${GENITAL_TOUCH_ANATOMY.source}`
+);
+
+const GENITAL_EXPOSURE_PATTERN =
+  /(?:성기|음경|자지|질|보지).{0,12}(?:꺼내|보여|드러내|노출)|(?:꺼내|보여|드러내|노출).{0,12}(?:성기|음경|자지|질|보지)/;
+
+const SEXUAL_TOUCH_ANATOMY = /(?:가슴|유방|유두|엉덩이|허벅지\s*안쪽)/;
+const SEXUAL_TOUCH_VERB = /(?:만지|만져|만진|만질|주무르|주물러|주무른|쓰다듬|더듬|쥐어|쥐며|쥔|누르|눌러|누른|비틀|비튼)/;
+const SEXUAL_TOUCH_PATTERN = new RegExp(
+  `${SEXUAL_TOUCH_ANATOMY.source}.{0,12}${SEXUAL_TOUCH_VERB.source}`
+  + `|${SEXUAL_TOUCH_VERB.source}.{0,12}${SEXUAL_TOUCH_ANATOMY.source}`
+);
+
+const KISS_PATTERN = /(?:키스|입맞춤|입술을?\s*(?:맞대|포갠|포개|닿))/;
+const PENETRATION_PATTERN = /(?:삽입|성관계|섹스|질(?:에|로)?\s*(?:넣|삽입)|항문(?:에|으로)?\s*(?:넣|삽입)|박(?:아|는다|기))/;
+
+// One shared signal computation — the exact single-action classifier below
+// and the multi-action bundling check both derive from this so they can
+// never disagree about what a piece of text contains.
+function computeSexualActionSignals(text = '') {
+  return {
+    penetration: PENETRATION_PATTERN.test(text),
+    oral: ORAL_EXPLICIT_PATTERN.test(text) || ORAL_ANATOMY_MOUTH_VERB_PATTERN.test(text) || ORAL_MOUTH_ANATOMY_VERB_PATTERN.test(text),
+    genital_touch: GENITAL_TOUCH_PATTERN.test(text),
+    sexual_touch: SEXUAL_TOUCH_PATTERN.test(text),
+    kiss: KISS_PATTERN.test(text),
+    genital_exposure: GENITAL_EXPOSURE_PATTERN.test(text)
+  };
+}
+
+// README section 3 — every distinct material sexual action type present in
+// the text, not just the single highest-severity one. Used to reject a
+// choice that bundles a covered action with an uncovered one (section 5.9)
+// even when both are sexual (e.g. covered oral + uncovered kiss in the same
+// choice), which the single-action classifier below cannot see on its own.
+function detectSexualActionTypes(value = '') {
+  const text = typeof value === 'string' ? value : '';
+  if (!text.trim()) return [];
+  const signals = computeSexualActionSignals(text);
+  return Object.entries(signals).filter(([, matched]) => matched).map(([type]) => type);
+}
+
+const SEXUAL_ANATOMY_TERMS = /(?:성기|음경|자지|질|보지|클리토리스|가슴|유방|유두|엉덩이|허벅지\s*안쪽)/g;
+const MATERIAL_SEXUAL_ACTION_VERBS = /(?:만지|만져|만진|만질|잡|쥐|비비|비벼|비빈|비빌|비틀|비튼|누르|눌러|누른|핥|물어|깨물|넣어|넣|대|닿|벌리|벌려|벌린|벌릴|문지|문질|자극|꺼내|드러내|노출|보여|감싸|빨아|빨|건드려|건드린|건드릴|건드|스쳐|스친|스칠|스치)/g;
+
+// README section 4 — a conservative routing safety net, not a Story hard
+// gate: true only when sexual anatomy and a physical-action signal clearly
+// coexist near each other, even if the exact classifier above still can't
+// name the precise action (an inflection it doesn't recognize yet, etc).
+// Never grants csa_direct on its own — resolveCsaDirectCoverage uses this
+// only to block a nonsexual/generic CSA from claiming coverage over a
+// choice that is materially sexual but whose exact action is unresolved.
+function hasMaterialSexualChoiceSignal(value = '') {
+  const text = typeof value === 'string' ? value : '';
+  if (!text.trim()) return false;
+  const anatomyIndexes = [...text.matchAll(SEXUAL_ANATOMY_TERMS)].map(match => match.index);
+  if (!anatomyIndexes.length) return false;
+  const verbIndexes = [...text.matchAll(MATERIAL_SEXUAL_ACTION_VERBS)].map(match => match.index);
+  if (!verbIndexes.length) return false;
+  return anatomyIndexes.some(a => verbIndexes.some(v => Math.abs(v - a) <= 20));
+}
+
 function deprecatedClassifySexualActionDetailed(value = '') {
   const text = typeof value === 'string' ? value : '';
   if (!text.trim()) {
@@ -10277,30 +10432,19 @@ function deprecatedClassifySexualActionDetailed(value = '') {
 
   const is_public =
     /(?:사람들?\s*앞|모두\s*보는\s*곳|공개\s*장소|복도|스테이션|로비|병실\s*밖|주변\s*(?:직원|환자).{0,12}(?:보는|앞))/.test(text);
-  const penetration =
-    /(?:삽입|성관계|섹스|질(?:에|로)?\s*(?:넣|삽입)|항문(?:에|으로)?\s*(?:넣|삽입)|박(?:아|는다|기))/.test(text);
-  const oral =
-    /(?:펠라티오|구강성교|커닐링구스|입으로\s*(?:빨|핥|해)|빨아\s*(?:줘|라)|구강\s*(?:으로|성교))/.test(text);
-  const touchVerb = /(?:만지|만져|만진|만질|잡|비비|비벼|비빈|비빌|핥|문지|문질|자극)/;
-  const genitalTouch = new RegExp(
-    `(?:성기|음경|자지|질|보지|클리토리스).{0,12}${touchVerb.source}`
-    + `|${touchVerb.source}.{0,12}(?:성기|음경|자지|질|보지|클리토리스)`
-  ).test(text);
-  const genitalExposure =
-    /(?:성기|음경|자지|질|보지).{0,12}(?:꺼내|보여|드러내|노출)|(?:꺼내|보여|드러내|노출).{0,12}(?:성기|음경|자지|질|보지)/.test(text);
-  const bodyTouchVerb = /(?:만지|만져|만진|만질|주무르|주물러|주무른|쓰다듬|더듬)/;
-  const sexualTouch = new RegExp(
-    `(?:가슴|유방|엉덩이|허벅지\\s*안쪽).{0,12}${bodyTouchVerb.source}`
-    + `|${bodyTouchVerb.source}.{0,12}(?:가슴|유방|엉덩이|허벅지\\s*안쪽)`
-  ).test(text);
-  const kiss = /(?:키스|입맞춤|입술을?\s*(?:맞대|포갠|포개|닿))/.test(text);
+  const signals = computeSexualActionSignals(text);
 
-  const detectedAction = penetration ? 'penetration'
-    : oral ? 'oral'
-      : genitalTouch ? 'genital_touch'
-        : genitalExposure ? 'genital_exposure'
-          : sexualTouch ? 'sexual_touch'
-            : kiss ? 'kiss'
+  // README section 3 — required precedence: penetration > oral > genital
+  // touch > sexual touch > kiss > exposure > nonsexual (exposure ranks
+  // below kiss, unlike the intimacy-stage SEXUAL_ACTION_RANK used
+  // elsewhere for boundary/consent comparisons — these are separate
+  // concerns and deliberately use different orderings).
+  const detectedAction = signals.penetration ? 'penetration'
+    : signals.oral ? 'oral'
+      : signals.genital_touch ? 'genital_touch'
+        : signals.sexual_touch ? 'sexual_touch'
+          : signals.kiss ? 'kiss'
+            : signals.genital_exposure ? 'genital_exposure'
               : 'none';
 
   if (deprecatedIsSexualDiscussionOnly(text, detectedAction)) {
@@ -10858,15 +11002,35 @@ const CHOICE_META_SEVERITIES = new Set(['none', 'mild', 'high', 'extreme', 'bloc
 // is treated as invalid so the caller's fallback recomputes it fresh (and
 // correctly lands on kind:'csa_direct'). This check is opt-in via the
 // `context` param so existing shape-only callers are unaffected.
+//
+// Hotfix (2026-07-31 turn-127 incident, README section 6) — a saved
+// kind:'csa_direct' record used to be trusted on shape alone (severity/
+// success_rate only). It is now recomputed and compared against the
+// current save/master every time too: a stored csa_id/template_id/
+// sexual_action/actor_group/target_group that no longer matches what
+// resolveCsaDirectCoverage resolves right now (wrong covering CSA, action
+// classification fixed since it was saved, participants no longer
+// resolvable, etc) invalidates the record so the caller's fallback rebuilds
+// it fresh from buildChoiceMeta — this is exactly what repairs the
+// turn-127 csa_111_1/sexual_action:none metadata on the next /api/context
+// read without writing anything back to Supabase.
 function isCurrentChoiceMetaValid(choices, choiceMeta, turnNumber, context = null) {
   if (!Array.isArray(choices) || !choices.length) return false;
   if (!Array.isArray(choiceMeta) || choiceMeta.length !== choices.length) return false;
   return choiceMeta.every((meta, index) => {
     if (!isPlainObject(meta)) return false;
     if (meta.choice_id !== `turn_${turnNumber}_choice_${index + 1}`) return false;
-    if (context?.save && meta.kind !== 'csa_direct') {
+    if (context?.save) {
       const coverage = resolveCsaDirectCoverage(context.save, context.master || {}, choices[index]);
-      if (coverage.covered) return false;
+      const metaIsDirect = meta.kind === 'csa_direct';
+      if (coverage.covered !== metaIsDirect) return false;
+      if (coverage.covered) {
+        if (meta.csa_direct?.csa_id !== coverage.csaId) return false;
+        if (meta.csa_direct?.template_id !== coverage.templateId) return false;
+        if ((meta.sexual_action ?? 'none') !== (coverage.action || 'none')) return false;
+        if (meta.csa_direct?.actor_group !== coverage.actorGroup) return false;
+        if (meta.csa_direct?.target_group !== coverage.targetGroup) return false;
+      }
     }
     if (meta.kind === 'csa_direct') return meta.severity === 'none' && meta.success_rate == null;
     if (!CHOICE_META_SEVERITIES.has(meta.severity)) return false;
@@ -11973,6 +12137,9 @@ export {
   isPlausibleMinorNpcLocation,
   resolveChoiceExecutionRoute,
   resolveCsaDirectCoverage,
+  deprecatedClassifySexualActionDetailed,
+  detectSexualActionTypes,
+  hasMaterialSexualChoiceSignal,
   classifyChoiceRiskSeverity,
   calculateBoldChoiceRate,
   buildChoiceMeta,

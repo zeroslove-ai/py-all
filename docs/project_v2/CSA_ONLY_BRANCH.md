@@ -186,3 +186,9 @@ Hard failure는 중복 Commit, turn mismatch, 잘못된 structured transaction, 
 ## Progression EXP rebalance
 
 레벨업 요구 경험치가 `CSA_LEVEL_EXP_REQUIREMENTS = {1:15,2:23,3:50,4:63,5:75,6:105,7:120,8:135,9:150}` 고정 테이블로 바뀌었다(`expForNextLevel`). 기존 레벨/EXP를 낮추거나 저장된 `next_level_exp`를 신뢰하지 않으며, `calculateCsaCapability`를 통해 모든 read 경로(수동 상태줄, `buildAppStatePayload`, player-info, choice-meta 계산)가 항상 이 테이블에서 다시 계산한 값을 쓴다. 레벨 10은 `next_level_exp: 0`이다.
+
+## CSA-direct sexual choice classification (turn-127 핫픽스)
+
+성적 CSA-direct coverage(`resolveCsaDirectCoverage`)는 이제 두 갈래로 나뉜다. 선택지 텍스트에서 정확한 성적 행동(oral/genital_touch/sexual_touch/kiss/penetration/genital_exposure, 우선순위 penetration > oral > genital_touch > sexual_touch > kiss > exposure)이 감지되면, `direct_meaning_tags`/content 키워드 관련성은 더 이상 사용하지 않고 `resolveSexualCsaDirectCoverage`가 semantic contract만으로 판정한다 — `sexual_authorization===true`, `direct_execution===true`, 해당 행동(및 선택지에 함께 감지된 다른 모든 성적 행동 타입)이 `actions`에 포함, 해석된 actor/target 방향이 `directions`와 일치, participant가 지금 실제로 해석되어야 한다. 이전에는 비성적 CSA의 설명용 태그(예: "만족")가 선택지 문구에 우연히 등장하면, 분류기가 그 문장의 실제 성적 행동을 놓쳤을 때 그 비성적 CSA가 잘못 커버로 채택될 수 있었다(사고 원인). `hasMaterialSexualChoiceSignal()`은 정확한 분류기가 행동을 특정하지 못했더라도 성적 신체 부위 + 근접 물리 동작 신호가 함께 있으면 비성적/일반 CSA가 그 선택지를 대신 채가지 못하도록 차단하는 보수적 안전망이며, 그 자체로 csa_direct를 부여하지는 않는다. 비성적 선택지(감지된 행동 없음, 백스톱도 미발동)만 기존 태그/정규식 관련성 경로(`resolveNonsexualCsaDirectCoverage`)를 그대로 사용한다.
+
+`isCurrentChoiceMetaValid`는 이제 저장된 `kind:"csa_direct"` 메타도 매번 현재 save/master로 다시 계산해 `csa_id`/`template_id`/`sexual_action`/`actor_group`/`target_group`을 비교한다 — 하나라도 불일치하면 무효화되어 호출자가 `buildChoiceMeta`로 새로 계산한다. 이는 Supabase에 아무것도 쓰지 않고 다음 `/api/context` 읽기에서 오래된/잘못된 csa_direct 메타를 즉시 복구한다. `STRUCTURED_SEXUAL_INTEGRITY_UNRESOLVED`를 포함한 `validateCsaDirectResolution`/구조화 성적 무결성 게이트는 변경하지 않았다.

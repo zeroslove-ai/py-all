@@ -4704,6 +4704,7 @@ choices 각 항목을 확인해, 플레이어가 직접 말을 걸거나 행동 
 
 [CHOICE STRUCTURED ACTION META — REQUIRED]
 choices의 4개 항목 전부에 대해 choice_structured_meta에 정확히 하나씩 반환한다(생략 금지 — 성적 행동이 전혀 없는 선택지도 action_types:[]로 명시한다). 이 필드는 Worker가 선택지 원문을 다시 해석하지 않고 대신 쓰는 구조화 판단이며, Worker가 항상 실제 활성 CSA와 다시 대조해 독립적으로 최종 결정하므로 애매하면 절대 과대 분류하지 않는다.
+플레이어가 명령하거나 행동을 시작했다는 이유만으로 무조건 actor_id="player"로 기록하지 않는다. 강한 권한형 CSA(예: 플레이어의 성적 요구를 명령·최우선 업무로 취급하는 CSA)에서 NPC가 플레이어의 요구를 수용·협조·수행해야 하는 선택지는, 실제로 그 행동을 몸으로 수행·협조하는 쪽이 NPC이므로 actor_id는 그 NPC, target_id는 "player"로 기록한다 — 플레이어는 명령을 말했을 뿐 행동의 실제 수행자가 아니다. 다만 이 문구는 참고용일 뿐이며 Worker의 독립 재검증이 최종 권위다.
 {"choice_index": 배열 인덱스, "action_types": ["그 선택지를 고르면 실제로 일어날 성적 신체 행동 전부. \"kiss\"|\"sexual_touch\"|\"genital_exposure\"|\"genital_touch\"|\"oral\"|\"penetration\" 중에서만. 없으면 빈 배열"], "actor_id": "그 행동을 실제로 수행할 사람. \"player\" 또는 npcs_present 안의 heroine ID. 불명확하면 null", "target_id": "그 행동을 받을 사람. \"player\" 또는 npcs_present 안의 heroine ID. 불명확하면 null", "suggested_route": "\"csa_direct\"(위 적용 CSA contract 중 하나가 이 정확한 행동·방향을 이미 승인한다고 판단될 때만)|\"voluntary\"|\"blocked\"|\"none\" 중 하나 — 참고용 제안일 뿐이다", "direct_csa_ids": ["suggested_route를 csa_direct로 판단한 근거가 된 위 적용 CSA contract id. 확신 없으면 빈 배열"]}
 
 [플레이어의 이번 원본 입력]
@@ -10410,6 +10411,47 @@ function structuredParticipantMatches(participant, id, presentIds) {
   return false;
 }
 
+// Hotfix (2026-08-01 turn-135 incident) — a narrow allowlist of strong
+// authority-type presets where the player commands/requests and a
+// designated NPC must comply. Extract's structured classification cannot be
+// trusted to consistently label these as actor_id=<NPC>/target_id=player
+// (a player-initiated command reads, in isolation, like the player is the
+// "actor" of the sentence) — this allowlist is the only place a reverse
+// actor_id==='player' reading is ever accepted, and only for these exact
+// required_action values. Ordinary medium/weak inspection/contact presets
+// are never in this set and never get the reverse allowance.
+const PLAYER_INITIATED_AUTHORITY_REQUIRED_ACTIONS = new Set([
+  'treat_player_sexual_request_as_order',
+  'prioritize_player_sexual_relief',
+  'designated_staff_complies_immediately',
+  'perform_designated_position_efficiently',
+  'multi_staff_collaborate_on_request',
+  'sex_with_player_is_duty',
+  'treat_player_sexual_conduct_as_authority'
+]);
+
+// Only reached when the ordinary forward match (structured actor_id/
+// target_id already lined up with the CSA's own resolved actor/target)
+// failed. Reinterprets a player-initiated command: the player is the one
+// who spoke/typed the command (actor_id==='player'), but the CSA's own
+// semantic contract still requires an NPC to be the one physically
+// performing/complying, and the player to be the beneficiary — so target_id
+// must be a currently-present registered NPC who actually qualifies for
+// the CSA's actor_group, and the CSA's target_group must be exactly
+// 'player'. required_action must be in the strong-authority allowlist
+// above; contract.actions/sexual_authorization/direct_execution/direction
+// are already checked once by the shared caller loop before this runs.
+function resolvePlayerInitiatedAuthorityMatch({ csa, contract, master, targetId, presentIds }) {
+  if (contract.target_group !== 'player') return false;
+  const requiredAction = String(csa?.preset?.required_action || '');
+  if (!PLAYER_INITIATED_AUTHORITY_REQUIRED_ACTIONS.has(requiredAction)) return false;
+  if (!targetId || targetId === 'player' || !presentIds.has(targetId)) return false;
+  const characters = isPlainObject(master?.characters) ? master.characters : {};
+  const targetCharacter = characters[targetId];
+  if (!isPlainObject(targetCharacter)) return false;
+  return characterMatchesCsaActorGroup(targetCharacter, contract.actor_group);
+}
+
 // README architecture update section 3 — Worker's csa_direct approval is
 // decided by matching Extract's structured action enum (action_types) and
 // concrete actor_id/target_id against the actually active CSA semantic
@@ -10438,10 +10480,13 @@ function resolveStructuredCsaDirectCoverage(save, master, structuredMeta) {
     if (actionTypes.some(type => !contract.actions.includes(type))) continue;
     const participants = resolveCsaParticipants({ actorGroup: contract.actor_group, targetGroup: contract.target_group, save, master });
     if (!participants.resolved) continue;
-    if (!structuredParticipantMatches(participants.actor, actorId, presentIds)) continue;
-    if (!structuredParticipantMatches(participants.target, targetId, presentIds)) continue;
     const direction = resolveCsaContractDirection(participants.actor, participants.target);
     if (!contract.directions.includes(direction)) continue;
+    const forwardMatch = structuredParticipantMatches(participants.actor, actorId, presentIds)
+      && structuredParticipantMatches(participants.target, targetId, presentIds);
+    const reverseMatch = !forwardMatch && actorId === 'player'
+      && resolvePlayerInitiatedAuthorityMatch({ csa, contract, master, targetId, presentIds });
+    if (!forwardMatch && !reverseMatch) continue;
     return {
       covered: true,
       csaId: typeof csa.id === 'string' ? csa.id : null,

@@ -278,6 +278,9 @@
       overflow-y: auto;
     }
     .choice-btn {
+      display: flex;
+      align-items: center;
+      min-width: 0;
       background: var(--bg-tertiary);
       border: 1px solid var(--border);
       color: var(--text-primary);
@@ -290,13 +293,10 @@
       transition: all 0.2s;
       text-align: left;
       line-height: 1.45;
-      white-space: normal;
-      overflow: visible;
-      text-overflow: clip;
-      word-break: keep-all;
-      overflow-wrap: anywhere;
     }
     .choice-btn .choice-label {
+      display: block;
+      flex: 1 1 auto;
       min-width: 0;
       overflow: hidden;
       white-space: nowrap;
@@ -307,6 +307,7 @@
       background: var(--bg-primary);
     }
     .choice-btn .marker {
+      flex: 0 0 auto;
       color: var(--accent);
       font-weight: bold;
       margin-right: 6px;

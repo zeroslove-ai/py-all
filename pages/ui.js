@@ -486,7 +486,7 @@ const ui = {
       label.textContent = csaDirect
         ? `🌀 ${displayText}`
         : bold
-          ? `⚡ 과감 · 성공률 ${meta.success_rate}% · ${displayText}`
+          ? `⚡${meta.success_rate}% · ${displayText}`
           : blocked
             ? `⛔ 실행 불가 · ${displayText}`
             : (explicit ? `❗ ${displayText}` : displayText);

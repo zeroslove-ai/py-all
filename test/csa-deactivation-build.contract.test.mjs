@@ -42,6 +42,20 @@ test('generator converts file URL to a native OS path', () => {
   assert.doesNotMatch(script, /outputPath\.pathname/);
 });
 
+test('player address prompt only emits present NPC special values', () => {
+  assert.match(script, /slim current NPC player-address prompt/);
+  assert.match(script, /\[현재 NPC→플레이어 호칭\]/);
+  assert.match(script, /currentAddress \|\| savedAddress \|\| masterAddress/);
+  assert.doesNotMatch(script, /lines\.push\(`\$\{speakerName\} → \$\{targetName\}/);
+});
+
+test('explicit persistent player-address requests bypass Extract omission', () => {
+  assert.match(script, /resolveDeterministicNpcPlayerAddressUpdates/);
+  assert.match(script, /resolveCurrentTurnPlayerAddressRequests\(input/);
+  assert.match(script, /for \(const update of deterministic\) merged\.set/);
+  assert.match(script, /item\.scope === 'persistent'/);
+});
+
 test('build generator executes and emitted Worker parses', () => {
   const build = spawnSync(process.execPath, ['worker/build-csa-deactivation-hotfix.mjs'], {
     cwd: fileURLToPath(repoRoot),

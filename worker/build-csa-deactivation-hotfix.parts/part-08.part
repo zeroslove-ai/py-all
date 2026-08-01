@@ -1,5 +1,63 @@
 
-const slimPlayerAddressSection = [
+const nurseAddressDerivation = [
+  "function resolveCharacterAge(character) {",
+  "  const rawAge = character?.age ?? character?.['나이'];",
+  "  const match = String(rawAge ?? '').match(/\\d+/);",
+  "  return match ? Number(match[0]) : null;",
+  "}",
+  "",
+  "function characterAffiliationText(character) {",
+  "  return typeof character?.['소속'] === 'string' ? character['소속'].trim() : '';",
+  "}",
+  "",
+  "function hasExplicitNurseSeniority(seniorCharacter, juniorCharacter) {",
+  "  const juniorName = juniorCharacter?.name || juniorCharacter?.['이름'] || '';",
+  "  const affiliation = characterAffiliationText(seniorCharacter);",
+  "  return Boolean(juniorName) && affiliation.includes(juniorName + '보다') && /선배/.test(affiliation);",
+  "}",
+  "",
+  "function resolveNurseToNurseAddress(speakerCharacter, targetCharacter) {",
+  "  const speakerTier = resolveNpcRoleTier(speakerCharacter);",
+  "  const targetTier = resolveNpcRoleTier(targetCharacter);",
+  "  const speakerIsNurse = speakerTier === 'nurse' || speakerTier === 'head_nurse';",
+  "  const targetIsNurse = targetTier === 'nurse' || targetTier === 'head_nurse';",
+  "  if (!speakerIsNurse || !targetIsNurse) return '';",
+  "  const targetName = targetCharacter?.name || targetCharacter?.['이름'] || '';",
+  "  if (targetTier === 'head_nurse' && speakerTier !== 'head_nurse') return targetName + ' 선생님';",
+  "  if (speakerTier === 'head_nurse' || targetTier === 'head_nurse') return resolveNpcGivenName(targetName) + '쌤';",
+  "  const targetExplicitSenior = hasExplicitNurseSeniority(targetCharacter, speakerCharacter);",
+  "  const speakerExplicitSenior = hasExplicitNurseSeniority(speakerCharacter, targetCharacter);",
+  "  if (targetExplicitSenior) return '선배님';",
+  "  if (speakerExplicitSenior) return resolveNpcGivenName(targetName) + '쌤';",
+  "  const speakerAge = resolveCharacterAge(speakerCharacter);",
+  "  const targetAge = resolveCharacterAge(targetCharacter);",
+  "  if (speakerAge !== null && targetAge !== null && targetAge > speakerAge) return '선배님';",
+  "  return resolveNpcGivenName(targetName) + '쌤';",
+  "}",
+  "",
+  "function resolveDerivedNpcToNpcAddress(speakerCharacter, targetCharacter) {",
+  "  const nurseAddress = resolveNurseToNurseAddress(speakerCharacter, targetCharacter);",
+  "  if (nurseAddress) return nurseAddress;",
+  "  const targetName = targetCharacter?.name || targetCharacter?.['이름'] || '';",
+  "  const targetTier = resolveNpcRoleTier(targetCharacter);",
+  "  const speakerTier = resolveNpcRoleTier(speakerCharacter);",
+  "  if (targetTier === 'director') return '원장님';",
+  "  if (targetTier === 'dept_head_doctor') return resolveNpcSurname(targetName) + ' 교수님';",
+  "  if (targetTier === 'doctor') return resolveNpcSurname(targetName) + ' 선생님';",
+  "  if (targetTier === 'head_nurse') return targetName + ' 선생님';",
+  "  return resolveNpcGivenName(targetName) + '쌤';",
+  "}",
+  "",
+  "// README 6.2"
+].join('\n');
+
+replaceRegex(
+  /function resolveDerivedNpcToNpcAddress\(speakerCharacter, targetCharacter\) \{[\s\S]*?\n\}\n\n\/\/ README 6\.2/,
+  nurseAddressDerivation,
+  'derive nurse seniority addresses from rank explicit relation and age'
+);
+
+const slimCurrentSceneAddressSection = [
   "function buildHospitalAddressMatrixSection(save = {}, characters = {}, currentTurnAddresses = []) {",
   "  const presentIds = [...new Set([",
   "    save?.last_character_id,",
@@ -9,6 +67,23 @@ const slimPlayerAddressSection = [
   "  const overrides = isPlainObject(save?.npc_player_address_overrides) ? save.npc_player_address_overrides : {};",
   "  const turnAddresses = Array.isArray(currentTurnAddresses) ? currentTurnAddresses : [];",
   "  const lines = [];",
+  "  if (presentIds.length > 1) {",
+  "    for (const speakerId of presentIds) {",
+  "      const speaker = characters[speakerId];",
+  "      const speakerTier = resolveNpcRoleTier(speaker);",
+  "      if (speakerTier !== 'nurse' && speakerTier !== 'head_nurse') continue;",
+  "      const speakerName = speaker?.name || speaker?.['이름'] || speakerId;",
+  "      for (const targetId of presentIds) {",
+  "        if (targetId === speakerId) continue;",
+  "        const target = characters[targetId];",
+  "        const targetTier = resolveNpcRoleTier(target);",
+  "        if (targetTier !== 'nurse' && targetTier !== 'head_nurse') continue;",
+  "        const targetName = target?.name || target?.['이름'] || targetId;",
+  "        const address = resolveNpcToNpcAddress(speaker, target);",
+  "        if (address) lines.push(speakerName + '→' + targetName + ': \\\"' + address + '\\\"');",
+  "      }",
+  "    }",
+  "  }",
   "  for (const speakerId of presentIds) {",
   "    const speaker = characters[speakerId];",
   "    const speakerName = speaker?.name || speaker?.['이름'] || speakerId;",
@@ -16,10 +91,10 @@ const slimPlayerAddressSection = [
   "    const savedAddress = normalizeNpcPlayerAddressText(isPlainObject(overrides[speakerId]) ? overrides[speakerId].address : '');",
   "    const masterAddress = normalizeNpcPlayerAddressText(speaker?.player_honorific);",
   "    const address = currentAddress || savedAddress || masterAddress;",
-  "    if (address) lines.push(speakerName + ' → 플레이어: \\\"' + address + '\\\"');",
+  "    if (address) lines.push(speakerName + '→플레이어: \\\"' + address + '\\\"');",
   "  }",
   "  if (!lines.length) return '';",
-  "  return '\\n\\n[현재 NPC→플레이어 호칭]\\n' + lines.join('\\n') + '\\n';",
+  "  return '\\n\\n[현재 장면 호칭] ' + lines.join(' / ') + '\\n';",
   "}",
   "",
   "function isValidNpcPlayerAddress"
@@ -27,8 +102,8 @@ const slimPlayerAddressSection = [
 
 replaceRegex(
   /function buildHospitalAddressMatrixSection\(save = \{\}, characters = \{\}, currentTurnAddresses = \[\]\) \{[\s\S]*?\n\}\n\nfunction isValidNpcPlayerAddress/,
-  slimPlayerAddressSection,
-  'slim current NPC player-address prompt'
+  slimCurrentSceneAddressSection,
+  'inject compact present-NPC nurse and player addresses'
 );
 
 const deterministicAddressPersistence = [

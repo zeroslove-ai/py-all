@@ -46,11 +46,22 @@ test('generator converts file URL to a native OS path', () => {
   assert.doesNotMatch(script, /outputPath\.pathname/);
 });
 
-test('player address prompt only emits present NPC special values', () => {
-  assert.match(script, /slim current NPC player-address prompt/);
-  assert.match(script, /\[현재 NPC→플레이어 호칭\]/);
+test('current-scene address prompt stays compact and present-NPC only', () => {
+  assert.match(script, /inject compact present-NPC nurse and player addresses/);
+  assert.match(script, /\[현재 장면 호칭\]/);
+  assert.match(script, /presentIds\.length > 1/);
   assert.match(script, /currentAddress \|\| savedAddress \|\| masterAddress/);
-  assert.doesNotMatch(script, /lines\.push\(`\$\{speakerName\} → \$\{targetName\}/);
+  assert.match(script, /lines\.join\(' \/ '\)/);
+});
+
+test('nurse address derivation respects rank explicit seniority and age', () => {
+  assert.match(script, /resolveNurseToNurseAddress/);
+  assert.match(script, /hasExplicitNurseSeniority/);
+  assert.match(script, /resolveCharacterAge/);
+  assert.match(script, /return targetName \+ ' 선생님'/);
+  assert.match(script, /return '선배님'/);
+  assert.match(script, /resolveNpcGivenName\(targetName\) \+ '쌤'/);
+  assert.doesNotMatch(script, /resolveNpcGivenName\(targetName\) \+ '씨'/);
 });
 
 test('explicit persistent player-address requests bypass Extract omission', () => {
@@ -74,9 +85,14 @@ test('build generator executes and emitted Worker parses', () => {
 
   const generatedPath = fileURLToPath(new URL('../worker/game-proxy-v2.generated.js', import.meta.url));
   const generated = fs.readFileSync(generatedPath, 'utf8');
-  assert.match(generated, /\[현재 NPC→플레이어 호칭\]/);
+  assert.match(generated, /\[현재 장면 호칭\]/);
+  assert.match(generated, /resolveNurseToNurseAddress/);
+  assert.match(generated, /return '선배님'/);
+  assert.match(generated, /targetName \+ ' 선생님'/);
+  assert.match(generated, /resolveNpcGivenName\(targetName\) \+ '쌤'/);
   assert.match(generated, /resolveDeterministicNpcPlayerAddressUpdates/);
   assert.doesNotMatch(generated, /HOSPITAL ADDRESS MATRIX — ESTABLISHED FACT/);
+  assert.doesNotMatch(generated, /resolveNpcGivenName\(targetName\) \+ '씨'/);
 
   const syntax = spawnSync(process.execPath, ['--check', generatedPath], { encoding: 'utf8' });
   assert.equal(syntax.status, 0, `${syntax.stdout}\n${syntax.stderr}`);

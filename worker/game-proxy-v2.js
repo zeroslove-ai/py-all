@@ -1206,60 +1206,86 @@ function buildPublicNpcBody(character = {}) {
   return result;
 }
 
-function relationshipHasStructuredIntimacyRecord(relationship = {}) {
-  const history = isPlainObject(relationship?.sexual_history) ? relationship.sexual_history : {};
-  return relationship?.has_had_sex_with_player === true
-    || relationship?.has_received_player_ejaculation === true
-    || relationship?.intimate_info_unlocked === true
-    || Math.max(0, Number(relationship?.player_ejaculation_count) || 0) > 0
-    || Math.max(0, Number(relationship?.npc_orgasm_count) || 0) > 0
-    || Math.max(0, Number(history?.player_ejaculation_count) || 0) > 0
-    || Math.max(0, Number(history?.npc_orgasm_count) || 0) > 0
-    || Math.max(0, Number(history?.vaginal_ejaculation_count) || 0) > 0
-    || Math.max(0, Number(history?.vaginal_sex_count) || 0) > 0
-    || Math.max(0, Number(history?.anal_sex_count) || 0) > 0
-    || Math.max(0, Number(history?.oral_sex_count) || 0) > 0;
-}
-
 // Desired/planned/interrupted/hypothetical/negated wording must never seed
 // a compatibility minimum — narrow exact-phrase exclusion, not a broad gate.
 const RELATIONSHIP_MEMORY_NONFINAL_RE =
-  /하고\s*싶|원한다|바란다|하려고|직전|시도(?:했|하다가)|멈췄|중단|하지\s*않았다|안\s*했다|만약|가정|상상|하는\s*척|거절|싫다고/;
+  /고\s*싶|원한다|바란다|하려고|직전|시도(?:했|하다가)|멈췄|중단|하지\s*않았다|안\s*했다|만약|가정|상상|하는\s*척|거절|싫다고/;
 const RELATIONSHIP_MEMORY_VAGINAL_SEX_RE =
-  /질\s*(?:삽입|성관계|섹스)|삽입(?:했다|했으며|하고|한)|성관계를?\s*(?:가졌|했다|나눴)/;
+  /질\s*(?:삽입|성관계|섹스)|삽입(?:했다|했으며|하고|한)/;
+// Unqualified "성관계를 가졌다" wording (no 질/항문 location) defaults to
+// vaginal only when the same sentence carries no anal-location wording —
+// an anal-only sentence ("항문 삽입 성관계를 가졌다") must never seed a
+// vaginal minimum just because it also contains the generic phrase.
+const RELATIONSHIP_MEMORY_VAGINAL_SEX_GENERIC_RE =
+  /성관계를?\s*(?:가졌|했다|나눴)/;
+const RELATIONSHIP_MEMORY_ANAL_LOCATION_MENTION_RE = /항문|애널/;
 const RELATIONSHIP_MEMORY_VAGINAL_EJACULATION_RE =
   /질\s*(?:안|속|내부|내)[^.!?。]{0,10}사정|사정[^.!?。]{0,10}질\s*(?:안|속|내부|내)|정액을?\s*(?:받|느꼈)/;
+const RELATIONSHIP_MEMORY_ANAL_SEX_RE =
+  /항문\s*(?:삽입|성관계|섹스)|(?:항문|애널)[^.!?。]{0,10}삽입(?:했다|했으며|하고|한)/;
+const RELATIONSHIP_MEMORY_ANAL_EJACULATION_RE =
+  /항문\s*(?:안|속|내부|내)[^.!?。]{0,10}사정|사정[^.!?。]{0,10}항문\s*(?:안|속|내부|내)/;
 
-// README section 5.4 — conservative read-compatibility layer for a legacy
-// save where relationship_memory records a completed event but the
-// structured counters/flags were lost (the reported heroine9 shape: memory
-// confirms a completed vaginal ejaculation, every counter/flag reads zero/
-// false). Never authorization and never invents an event from arbitrary
-// free text — only derives a minimum-1 fact from an unambiguous completed-
-// event memory sentence already stored on this NPC, and only when every
-// structured counter/flag is already zero/false (checked first; returns
-// all-zero immediately otherwise so a healthy save is never touched).
+// README section 5 (2026-08-01 heroine3/4/9 hotfix) — per-field, not all-
+// or-nothing: the previous version returned zero compatibility for every
+// field whenever ANY structured intimacy flag/counter was already positive,
+// which failed exactly the reported 배수진/heroine4 shape
+// (has_had_sex_with_player=true already set, but vaginal/orgasm/ejaculation
+// counters are still zero — an unrelated positive flag must never block
+// recovery of a missing counter). Each field below is now gated only by its
+// own structured counter, independent of every other field and every
+// boolean flag. Never authorization and never invents an event from
+// arbitrary free text — only derives a minimum-1 fact from an unambiguous
+// completed-event memory sentence already stored on this NPC, per field.
 // Multiple duplicate memories still imply only one, never a count per
 // sentence. Used here for display/unlock only; normalizeRelationshipState
-// persists it as a self-heal on this NPC's next ordinary valid commit — no
-// direct Supabase write, no standalone repair endpoint.
+// persists these minimums as a self-heal on this NPC's next ordinary valid
+// commit — no direct Supabase write, no standalone repair endpoint.
 function resolveRelationshipCompatibilityFacts(relationship = {}) {
-  if (relationshipHasStructuredIntimacyRecord(relationship)) {
-    return { vaginal_sex_minimum: 0, player_ejaculation_minimum: 0, vaginal_ejaculation_minimum: 0 };
-  }
+  const history = isPlainObject(relationship?.sexual_history) ? relationship.sexual_history : {};
+  const structuredVaginalSex = Math.max(0, Number(history?.vaginal_sex_count) || 0);
+  const structuredAnalSex = Math.max(0, Number(history?.anal_sex_count) || 0);
+  const structuredNpcOrgasm = Math.max(0, Number(relationship?.npc_orgasm_count) || 0, Number(history?.npc_orgasm_count) || 0);
+  const structuredPlayerEjaculation = Math.max(0, Number(relationship?.player_ejaculation_count) || 0, Number(history?.player_ejaculation_count) || 0);
+  const structuredVaginalEjaculation = Math.max(0, Number(history?.vaginal_ejaculation_count) || 0);
+  const structuredAnalEjaculation = Math.max(0, Number(history?.anal_ejaculation_count) || 0);
+
   const memories = Array.isArray(relationship?.relationship_memory) ? relationship.relationship_memory : [];
-  let vaginalSex = 0;
-  let vaginalEjaculation = 0;
+  let vaginalSexMemory = 0, analSexMemory = 0, npcOrgasmMemory = 0, vaginalEjaculationMemory = 0, analEjaculationMemory = 0;
+  let earliestVaginalTurn = null, earliestAnalTurn = null;
   for (const item of memories) {
     const text = typeof item === 'string' ? item : item?.text;
+    const turn = typeof item !== 'string' && Number.isInteger(item?.turn) ? item.turn : null;
     if (typeof text !== 'string' || !text.trim() || RELATIONSHIP_MEMORY_NONFINAL_RE.test(text)) continue;
-    if (RELATIONSHIP_MEMORY_VAGINAL_EJACULATION_RE.test(text)) vaginalEjaculation = 1;
-    else if (RELATIONSHIP_MEMORY_VAGINAL_SEX_RE.test(text)) vaginalSex = 1;
+    if (RELATIONSHIP_MEMORY_VAGINAL_EJACULATION_RE.test(text)) {
+      vaginalEjaculationMemory = 1;
+      vaginalSexMemory = 1; // an ejaculation memory implies intercourse too
+      if (turn !== null && (earliestVaginalTurn === null || turn < earliestVaginalTurn)) earliestVaginalTurn = turn;
+    } else if (RELATIONSHIP_MEMORY_VAGINAL_SEX_RE.test(text) ||
+        (RELATIONSHIP_MEMORY_VAGINAL_SEX_GENERIC_RE.test(text) && !RELATIONSHIP_MEMORY_ANAL_LOCATION_MENTION_RE.test(text))) {
+      vaginalSexMemory = 1;
+      if (turn !== null && (earliestVaginalTurn === null || turn < earliestVaginalTurn)) earliestVaginalTurn = turn;
+    }
+    if (RELATIONSHIP_MEMORY_ANAL_EJACULATION_RE.test(text)) {
+      analEjaculationMemory = 1;
+      analSexMemory = 1;
+      if (turn !== null && (earliestAnalTurn === null || turn < earliestAnalTurn)) earliestAnalTurn = turn;
+    } else if (RELATIONSHIP_MEMORY_ANAL_SEX_RE.test(text)) {
+      analSexMemory = 1;
+      if (turn !== null && (earliestAnalTurn === null || turn < earliestAnalTurn)) earliestAnalTurn = turn;
+    }
+    if (ORGASM_MEMORY_ASSERTION_RE.test(text)) npcOrgasmMemory = 1;
   }
+
   return {
-    vaginal_sex_minimum: Math.max(vaginalSex, vaginalEjaculation),
-    player_ejaculation_minimum: vaginalEjaculation,
-    vaginal_ejaculation_minimum: vaginalEjaculation
+    vaginal_sex_minimum: structuredVaginalSex > 0 ? 0 : vaginalSexMemory,
+    anal_sex_minimum: structuredAnalSex > 0 ? 0 : analSexMemory,
+    npc_orgasm_minimum: structuredNpcOrgasm > 0 ? 0 : npcOrgasmMemory,
+    player_ejaculation_minimum: structuredPlayerEjaculation > 0 ? 0 : Math.max(vaginalEjaculationMemory, analEjaculationMemory),
+    vaginal_ejaculation_minimum: structuredVaginalEjaculation > 0 ? 0 : vaginalEjaculationMemory,
+    anal_ejaculation_minimum: structuredAnalEjaculation > 0 ? 0 : analEjaculationMemory,
+    first_vaginal_turn: structuredVaginalSex > 0 ? null : earliestVaginalTurn,
+    first_anal_turn: structuredAnalSex > 0 ? null : earliestAnalTurn
   };
 }
 
@@ -1281,7 +1307,8 @@ function isNpcIntimateInfoUnlocked(relationship = {}) {
     || Math.max(0, Number(history?.npc_orgasm_count) || 0) > 0
   ) return true;
   const compatibility = resolveRelationshipCompatibilityFacts(relationship);
-  return compatibility.vaginal_sex_minimum > 0 || compatibility.player_ejaculation_minimum > 0;
+  return compatibility.vaginal_sex_minimum > 0 || compatibility.anal_sex_minimum > 0
+    || compatibility.npc_orgasm_minimum > 0 || compatibility.player_ejaculation_minimum > 0;
 }
 
 // README section 5.5 — exposes the maximum valid value across legacy
@@ -1299,7 +1326,7 @@ function buildNpcRelationshipRecord(save = {}, characterId) {
   const compatibility = resolveRelationshipCompatibilityFacts(relationship);
   return {
     player_ejaculation_count: Math.max(topPlayerEjaculation, nestedPlayerEjaculation, compatibility.player_ejaculation_minimum),
-    npc_orgasm_count: Math.max(topNpcOrgasm, nestedNpcOrgasm)
+    npc_orgasm_count: Math.max(topNpcOrgasm, nestedNpcOrgasm, compatibility.npc_orgasm_minimum)
   };
 }
 
@@ -1662,6 +1689,20 @@ async function handleStory(req, env) {
       csa_id: csaDirectChoiceSelected.csa_direct?.csa_id || null
     }));
   }
+  // README architecture update section 3.4 — direct-text parity: no choice
+  // button matched (free-text turn), so try the same narrow strong-
+  // authority contract from the raw input before falling through to the
+  // ordinary CSA policy/voluntary path.
+  const directTextExecutionContract = (!boldChoiceAttempt && !csaDirectChoiceSelected)
+    ? resolveDirectTextCsaExecutionContract(effectiveSave, ctx?.master, player_input)
+    : { covered: false };
+  if (directTextExecutionContract.covered) {
+    console.log(JSON.stringify({
+      event: 'csa_direct_text_execution_selected',
+      turn: currentTurn + 1,
+      csa_id: directTextExecutionContract.csaId
+    }));
+  }
   const promptStart = Date.now();
   let prompt;
   try {
@@ -1680,8 +1721,16 @@ async function handleStory(req, env) {
     if (csaDirectChoiceSelected) {
       // No random result block — this is not an attempt to judge, it is an
       // already-validated CSA execution (README 7.1/9). No roll, no success
-      // percentage, no re-asking whether it applies.
-      prompt.messages[0].content += `\n\n[CSA DIRECT CHOICE — ESTABLISHED FACT]\n이 선택은 현재 활성 상식개변의 정확한 범위 안에 있으며 이미 검증되었다. 성공 여부를 다시 판정하거나 확률을 계산하지 말고, 이 행동이 자연스럽게 실행된 장면으로 곧바로 진행한다. 거절·실패·재확인을 만들지 않는다.`;
+      // percentage, no re-asking whether it applies. The physical-fact
+      // sentence (README architecture update section 3) makes the actor/
+      // target/direction explicit so Story never narrates the CSA's norm
+      // direction as if it were the physical one.
+      const physicalFact = describeCsaExecutionContractPhysicalFact(csaDirectChoiceSelected.csa_direct, ctx?.master?.characters || {});
+      prompt.messages[0].content += `\n\n[CSA DIRECT CHOICE — ESTABLISHED FACT]\n이 선택은 현재 활성 상식개변의 정확한 범위 안에 있으며 이미 검증되었다. 성공 여부를 다시 판정하거나 확률을 계산하지 말고, 이 행동이 자연스럽게 실행된 장면으로 곧바로 진행한다. 거절·실패·재확인을 만들지 않는다.${physicalFact ? `\n${physicalFact}` : ''}`;
+    }
+    if (directTextExecutionContract.covered) {
+      const physicalFact = describeCsaExecutionContractPhysicalFact(directTextExecutionContract, ctx?.master?.characters || {});
+      prompt.messages[0].content += `\n\n[CSA DIRECT CHOICE — ESTABLISHED FACT]\n이 입력은 현재 활성 상식개변의 정확한 범위 안에 있으며 이미 검증되었다. 성공 여부를 다시 판정하거나 확률을 계산하지 말고, 이 행동이 자연스럽게 실행된 장면으로 곧바로 진행한다. 거절·실패·재확인을 만들지 않는다.${physicalFact ? `\n${physicalFact}` : ''}`;
     }
   } catch (error) {
     console.error(JSON.stringify({
@@ -4161,8 +4210,16 @@ function normalizeRelationshipMemoryItems(items, options = {}) {
 }
 
 function buildRelationshipMemoryFacts(relationship = {}) {
-  const npcOrgasmCount = Math.max(0, Number(relationship?.npc_orgasm_count) || 0);
-  const playerEjaculationCount = Math.max(0, Number(relationship?.player_ejaculation_count) || 0);
+  // README section 5 — the per-field legacy-memory compatibility minimum
+  // also feeds Story's own relationship-facts prompt section
+  // (buildCurrentNpcRelationshipMemorySection), not just display/unlock, so
+  // Story is never told "NPC 절정 0회" when a stored memory already
+  // establishes it. A synthetic relationship-like object with no
+  // relationship_memory (e.g. normalizeRelationshipState's finalFacts call)
+  // safely resolves to all-zero compatibility.
+  const compatibility = resolveRelationshipCompatibilityFacts(relationship);
+  const npcOrgasmCount = Math.max(0, Number(relationship?.npc_orgasm_count) || 0, compatibility.npc_orgasm_minimum);
+  const playerEjaculationCount = Math.max(0, Number(relationship?.player_ejaculation_count) || 0, compatibility.player_ejaculation_minimum);
   const hasHadSexWithPlayer = relationship?.has_had_sex_with_player === true
     || relationship?.intimate_info_unlocked === true
     || npcOrgasmCount > 0 || playerEjaculationCount > 0;
@@ -4290,42 +4347,38 @@ function buildNpcDialogueMinimumSection() {
   return `\n\n[NPC DIALOGUE MINIMUM CONTRACT]\n\n- 등록 NPC가 실제 장면에 있고 플레이어와 대화·상호작용하는 일반 턴이라면 의미 있는 NPC 발언을 최소 3회 포함한다. 형식은 [대사 — AUTHORITATIVE DIALOGUE CONTRACT]과 동일하다.\n- "의미 있는 발언"은 다음 중 하나를 새로 수행해야 한다: 입력에 직접 답변 / 새 정보 제공 / 질문 또는 확인 / 결정·수락·거절·조건 제시 / 감정이나 관계 변화 표현 / 행동을 시작하거나 중단시키는 말 / 다른 NPC와의 실제 상호작용.\n- 각 NPC 발언 사이에는 새로운 행동·정보·결정·관계 변화 중 하나가 있어야 한다. 한 문장을 세 조각으로 나누거나 같은 의미를 반복해서 3회를 채우는 것은 금지한다.\n- 다음 경우에는 최소 3회를 강제하지 않는다: NPC가 없는 narrator 장면 / 플레이어가 말없이 관찰만 하겠다고 명시한 장면 / NPC가 잠들었거나 의식을 잃었거나 말할 수 없는 장면 / 대사보다 즉각적인 물리 행동이 중심이고 발언 3회가 부자연스러운 순간 / 재진입 모드 / player_setup 모드. 다만 NPC가 있는 일반 대화 장면에서 단순히 짧게 끝내기 위해 이 예외를 쓰지 않는다.\n- 여러 NPC가 등장하면 장면 전체 등록 NPC 발언 합계가 최소 3회이면 되고, NPC마다 3회씩 강제하지 않는다. 메인 NPC가 대화의 중심을 유지하고, 다른 NPC의 짧은 발언만으로 메인 NPC를 자동 전환하지 않는 기존 계약을 유지한다.\n- 플레이어가 입력하지 않은 새 플레이어 발언을 임의로 만들어 대화 횟수를 채우지 않는다. 플레이어 입력은 이미 발생한 말 또는 행동으로 취급하고, 이후 NPC 반응과 장면 전개만 쓴다.`;
 }
 
-// README section 6 (2026-08-01 hotfix) — prompt guidance only, never a
-// validator/minimum-count gate/Story rejection/post-stream rewrite/extra
-// LLM call. Density numbers below are natural-generation targets for the
-// model to aim for, not something the Worker checks or enforces.
+// README section 6 (2026-08-01 hotfix) — the user explicitly asked to
+// remove every creative restriction on moans/vocal reactions because output
+// was still too sparse. No numeric target, cap, quota, spacing rule, or
+// ratio remains — this is deliberately unrestricted prompt guidance, not a
+// validator. Only the structural/safety separations in README 6.3 survive
+// (speaker/stage-direction parseability, only-the-stimulated-NPC-vocalizes,
+// moans never proving consent/orgasm/CSA-acceptance/stat-increase, orgasm
+// counters still requiring explicit completion evidence, narrator/other-NPC
+// distinguishability). The "avoid long vowels/singing-like delivery"
+// wording is deliberately removed from Story generation — that concern
+// belongs only in the TTS-specific normalization copy, never here.
 function buildMoanVocalReactionSection() {
-  return `\n\n[MOAN AND VOCAL REACTION — DENSITY AND STYLE GUIDANCE]
-- 실제 성적 자극이 지속되는 장면에서만 아래 밀도 목표를 적용한다. 단순 노출, 관찰, 당혹감, 근접, 대화, 가벼운 비성적 접촉만으로는 적용하지 않는다.
-- 밀도 목표(자연스러운 생성 목표일 뿐 강제 개수가 아니다 — 못 채웠다고 턴을 실패시키지 않는다):
-  - 직접 자극을 받는 메인 NPC: 장면 전체에 걸쳐 최소 서로 다른 2회 이상의 음성 반응(신음·숨소리·끊어진 말 등)을 자연스럽게 분산 배치.
-  - 강하고 지속적인 자극: 보통 3~5회.
-  - 절정 또는 절정 직전: 보통 4~7회 — 짧은 소리, 끊어진 말, 호흡, 절정 이후의 잔여 호흡/여운까지 포함.
-- 모든 반응을 한 줄에 몰아 쓰지 말고 행동과 대사 사이사이에 분산한다.
-- 의미 있는 대사를 계속 유지한다 — 음성 반응은 대사를 보완하는 것이지 모든 대사를 대체하는 것이 아니다.
-- 다중 NPC 장면에서는 실제로 직접 자극을 받는 NPC만 반복적으로 신음한다. 관찰자는 말이나 다른 신체 반응으로 반응할 수 있지만, 자극받지 않으면서 신음하지 않는다.
+  return `\n\n[MOAN AND VOCAL REACTION — UNRESTRICTED]
+실제 성적 자극이 지속되는 장면에서, 음성 반응(신음·숨소리·끊어진 말·비명·절정 후 여운 등)의 빈도·반복·분절·길이·비중에는 어떠한 상한도, 정해진 비율도, 최소/최대 개수도 없다. 장면이 자연스럽게 요구하는 만큼 얼마든지 연속적으로, 반복적으로, 파편적으로, 지배적으로 써도 된다.
+- "신음이 흘러나왔다"처럼 요약하지 말고 실제 발화·소리를 직접 쓴다.
+- 대화 없이 신음·소리만 있는 대사를 여러 줄 연속으로 이어 써도 된다.
+- 같은 뿌리 음절·표현이 반복되는 것을 얼마든지 허용한다 — 반복 자체를 줄이거나 다양화해야 한다는 규칙은 없다.
+- 길게 늘어지는 소리, 끊어진 단어, 불완전한 문장, 격한 비명을 허용한다.
+- 장면이 격해질수록 강도를 자유롭게 끌어올린다 — 상한을 두지 않는다.
+- 마스터 "신음타입"과 아래 A/B/C 성향은 순수 스타일 참고일 뿐이며, 출력량·반복·강도를 제한하는 상한이나 절제 규칙이 아니다.
+  - A형(수치심 순응) — 임수정, 배수진, 박소현
+  - B형(적극 쾌감) — 최유리, 윤아름
+  - C형(의무+쾌감) — 한소영, 강세라, 김지은, 서지아, 한세아
+  마스터 설정이 있으면 항상 그것을 우선한다. 다른 NPC의 고유한 신음 패턴을 그대로 옮겨오지 않는다.
 
-[다양성]
-- 상황과 캐릭터에 맞게 다양하게 조합한다: 짧은 무의식적 소리, 호흡이 이끄는 반응, 신체 반응에 끊기는 말, 정말 강렬한 순간의 불완전한 단어, 강도가 오를수록 더 강하거나 긴 반응, 절정 직후의 잔여 호흡·회복(바로 평상시 말투로 돌아가지 않음).
-- 정해진 샘플 문자열을 그대로 반복 복사하지 않는다. 같은 뿌리 음절이 자연스럽게 변형되어 다시 나오는 것은 허용된다 — 기계적으로 완전히 동일한 문자열 연속 반복만 피한다.
-
-[캐릭터별 성향]
-- 마스터 "신음타입"이 있으면 그것을 1순위 스타일 시드로 쓴다. 없을 때만 아래 이름 기반 fallback을 쓴다. 마스터 설정이 fallback 그룹보다 항상 우선한다.
-  - A형(수치심 순응) — 임수정, 배수진, 박소현: 억제·수치심·무너지는 절제에서 시작해 서서히 흐트러지되, 갈등과 저항감을 지우지 않는다. 소리만으로 동의를 암시하지 않는다.
-  - B형(적극 쾌감) — 최유리, 윤아름: 더 밝고 솔직하게 쾌감을 드러내되, 현재 관계 단계와 승인 범위를 넘지 않는다.
-  - C형(의무+쾌감) — 한소영, 강세라, 김지은, 서지아, 한세아: 업무적 통제·합리화가 먼저 나오고, 음성 불안정은 실제 신체 강도만큼만 커진다.
-- 다른 NPC의 고유한 신음 패턴을 그대로 옮겨오지 않는다.
-- "신음타입"의 예시 문구는 스타일의 씨앗일 뿐 반드시 그대로 써야 하는 고정 대사가 아니다.
-
-[화자·구두점·TTS 형식 — 반드시 유지]
-- 모든 직접 발화는 기존 형식을 그대로 따른다: 화자명 (짧은 연기지시): "대사"
-- 멈춤 말줄임표는 정확히 ".." 두 개만 쓴다. "…", "……", "...", 더 긴 점 연속은 금지한다. 모든 줄을 ".."로 감싸지 말고, 모든 단어를 끊어 쓰지 않는다.
-- 노래하듯 들리게 만드는 긴 모음 반복이나 특수기호 반복을 피한다. 하트나 이모지 없이도 강도를 전달한다. 발음 가능한 한국어 음절과 자연스러운 구두점만 쓴다.
-- TTS 라우팅, 목소리 선택, 연기지시 우선순위, 화자 추출 방식은 건드리지 않는다. 서술자·플레이어·다른 NPC의 TTS 동작도 그대로 유지한다.
-
-- 현재 성적흥분도는 신체 반응일 뿐 동의·호감·복종을 보장하지 않는다. 음성 반응이 늘어난다고 해서 동의, 호감, 오르가즘 완료, CSA 승인이 자동으로 바뀌지 않는다 — 이들은 각각 독립된 판정이다.
-- 단순 접촉이나 가벼운 업무 장면을 절정으로 과장하지 않으며, 절정은 실제 완료 장면에서만 묘사한다.
-- 신음만 나열하지 말고 현재 감정, 판단, 망설임, 반응을 담은 대사를 남긴다. 서사 진행, 행동, 감정, 결정도 함께 유지한다 — 소리로만 가득한 페이지를 만들지 않는다.`;
+[구조적·안전 규칙 — 창작 제한이 아니라 최소 형식/분리 규칙]
+- 모든 직접 발화(신음 포함)는 화자명과 연기지시로 식별 가능해야 TTS가 화자를 인식한다: 화자명 (짧은 연기지시): "대사"
+- 실제로 직접 자극을 받는 NPC만 그렇게 신음한다. 다중 NPC 장면의 관찰자는 신음하지 않는다.
+- 서술자·플레이어·다른 NPC의 대사는 여전히 구분된다.
+- 신음은 동의, 호감, 오르가즘 완료, CSA 승인, 관계 수치 상승을 증명하지 않는다 — 각각 독립적으로 판정된다. 음성 반응이 아무리 많아져도 이 판정들이 자동으로 바뀌지 않는다.
+- 오르가즘 카운터는 여전히 명시적인 완료 근거가 있을 때만 반영된다 — 신음·흥분·떨림 자체만으로는 아니다.
+- 렌더러 일관성을 위한 전역 ".." 말줄임표 표기는 남아 있을 수 있지만, 이를 이유로 음성 반응의 개수·빈도·길이를 줄이지 않는다.`;
 }
 
 function buildPreStorySexualPolicy({ save = {}, master = {}, characterId = '' } = {}) {
@@ -4369,7 +4422,7 @@ function buildCsaAftereffectStorySection(save = {}, characterId = '') {
 }
 
 function buildAntiRepetitionSection() {
-  return `\n\n[ANTI-REPETITION NARRATIVE CONTRACT]\n\n- 최근 기억 3턴과 같은 문장 구조와 동작을 연속 반복하지 않는다.\n- '상식개변이 작동 중이다'를 해설로 반복하지 말고, 범위 안 인물의 자연스러운 판단·행동·말투로 보여준다.\n- 다음 표현을 매 턴 습관적으로 재사용하지 않는다: '눈동자가 흔들렸다', '손가락을 만지작거렸다', '살짝 붉어졌다', '경계와 호기심이 섞였다', '무의식적으로 반응했다'.\n- 표정만 바꾸고 끝내지 말고 공간 사용, 자세 변화, 소도구, 실제 행동, 질문, 결정, 정보 공개를 다양하게 조합한다.\n- 직전 턴에서 이미 끝난 손 내밀기, 자리 이동, 입장, 상식개변 적용을 다시 실행하지 않는다.\n- 이 계약이 막는 것은 복사한 문장 구조, 반복된 전체 문구, 동일한 행동 블록, 낡은 연출 패턴이다 — 지속되는 성적 자극 중 짧은 음성 반응 음절이 자연스럽게 다시 나오는 것까지 억제하지 않는다. 완전히 동일한 신음 문자열을 연속으로 그대로 반복하는 것만 피하고, "한 턴에 신음 표현 하나만" 같은 제한을 두지 않으며, 반복을 피하겠다고 유효한 음성 반응을 중립적인 대사로 대체하지 않는다.`;
+  return `\n\n[ANTI-REPETITION NARRATIVE CONTRACT]\n\n- 최근 기억 3턴과 같은 문장 구조와 동작을 연속 반복하지 않는다.\n- '상식개변이 작동 중이다'를 해설로 반복하지 말고, 범위 안 인물의 자연스러운 판단·행동·말투로 보여준다.\n- 다음 표현을 매 턴 습관적으로 재사용하지 않는다: '눈동자가 흔들렸다', '손가락을 만지작거렸다', '살짝 붉어졌다', '경계와 호기심이 섞였다', '무의식적으로 반응했다'.\n- 표정만 바꾸고 끝내지 말고 공간 사용, 자세 변화, 소도구, 실제 행동, 질문, 결정, 정보 공개를 다양하게 조합한다.\n- 직전 턴에서 이미 끝난 손 내밀기, 자리 이동, 입장, 상식개변 적용을 다시 실행하지 않는다.\n- 이 계약은 신음, 숨소리, 비명, 끊어진 음성 반응에는 전혀 적용되지 않는다 — 완전히 동일한 반복이든 변형이든, 길든 짧든, 이 계약의 대상이 아니다. 이 계약이 막는 것은 복사한 문장 구조, 반복된 전체 서술 문구, 동일한 행동 블록, 낡은 연출 패턴뿐이다. 반복을 피하겠다고 유효한 음성 반응을 중립적인 대사로 대체하거나 줄이지 않는다.`;
 }
 
 // Only ever populated by /api/feedback's rollback+regenerate flow — never
@@ -4687,11 +4740,20 @@ function buildExtractPrompt(narrativeText, playerInput, ctx, images, turnCount, 
   // the persisted structured meta, not a fresh text re-parse) is handed to
   // Extract too, so this stage doesn't have to independently re-derive which
   // CSA/action/direction applies from scratch.
-  const selectedExecutionContract = isSetupComplete(save)
+  const selectedChoiceExecutionContract = isSetupComplete(save)
     ? resolveSelectedCsaDirectChoice(save, master, playerInput, (ctx?.turn_count ?? (Number(turnCount) || 1) - 1))
     : null;
-  const selectedExecutionContractSection = selectedExecutionContract?.csa_direct
-    ? `\n\n[SELECTED EXECUTION CONTRACT]\nWorker가 이번 입력을 직전 선택지와 대조해 이미 독립적으로 확정한 값이다 — 다시 판단하지 말고 참조만 한다: csa_id=${selectedExecutionContract.csa_direct.csa_id}, action=${selectedExecutionContract.sexual_action}, actor_group=${selectedExecutionContract.csa_direct.actor_group}, target_group=${selectedExecutionContract.csa_direct.target_group}. 방금 서사가 실제로 이 행동을 완료했다면 sexual_resolution.csa_id/action은 반드시 이 값과 일치시키고 route="csa_direct"로 반환한다. 서사가 실제로 완료를 보여주지 않았다면 그대로 completed=false로 반환한다(이 계약이 있다고 강제로 완료 처리하지 않는다).`
+  // README architecture update section 3.4 — no choice button matched
+  // (free-text turn): try the same narrow strong-authority contract from
+  // the raw input, so Extract gets the identical shared contract either way.
+  const selectedDirectTextExecutionContract = (isSetupComplete(save) && !selectedChoiceExecutionContract?.csa_direct)
+    ? resolveDirectTextCsaExecutionContract(save, master, playerInput)
+    : null;
+  const selectedExecutionContractFields = selectedChoiceExecutionContract?.csa_direct
+    ? { ...selectedChoiceExecutionContract.csa_direct, action: selectedChoiceExecutionContract.sexual_action }
+    : (selectedDirectTextExecutionContract?.covered ? { ...selectedDirectTextExecutionContract, csa_id: selectedDirectTextExecutionContract.csaId } : null);
+  const selectedExecutionContractSection = selectedExecutionContractFields
+    ? `\n\n[SELECTED EXECUTION CONTRACT]\nWorker가 이번 입력을 직전 선택지 또는 원문과 대조해 이미 독립적으로 확정한 값이다 — 다시 판단하지 말고 참조만 한다: csa_id=${selectedExecutionContractFields.csa_id}, action=${selectedExecutionContractFields.action}, physical_actor_type=${selectedExecutionContractFields.physical_actor_type ?? selectedExecutionContractFields.physicalActorType ?? ''}, physical_actor_character_id=${selectedExecutionContractFields.physical_actor_character_id ?? selectedExecutionContractFields.physicalActorCharacterId ?? ''}, physical_target_type=${selectedExecutionContractFields.physical_target_type ?? selectedExecutionContractFields.physicalTargetType ?? ''}, physical_target_character_id=${selectedExecutionContractFields.physical_target_character_id ?? selectedExecutionContractFields.physicalTargetCharacterId ?? ''}, physical_direction=${selectedExecutionContractFields.physical_direction ?? selectedExecutionContractFields.physicalDirection ?? ''}, authority_mode=${selectedExecutionContractFields.authority_mode ?? selectedExecutionContractFields.authorityMode ?? ''}.\nsexual_resolution.direction/actor_type/actor_character_id/target_type/target_character_id는 반드시 위 physical_* 값과 정확히 일치시킨다 — 상식개변 규범이 정한 원래 방향(actor_group/target_group)이 아니라 실제 이번 턴에 물리적으로 누가 누구에게 행동했는지를 그대로 반영한다. ${describeCsaExecutionContractPhysicalFact(selectedExecutionContractFields, master?.characters || {})}\n방금 서사가 실제로 이 행동을 완료했다면 sexual_resolution.csa_id/action은 반드시 이 값과 일치시키고 route="csa_direct"로 반환한다. 서사가 실제로 완료를 보여주지 않았다면 그대로 completed=false로 반환한다(이 계약이 있다고 강제로 완료 처리하지 않는다).`
     : '';
   const csaExperienceExtractionSection = applicableCsa.length
     ? `\n\n[CSA EXPERIENCE EXTRACTION]\n현재 장면에서 등록 NPC가 실제로 경험한 활성 상식개변만 csa_experienced_ids에 넣는다. 단순히 활성 상태라는 이유만으로 넣지 않는다.\n${applicableCsa.map(item => `- id=${item.id}: ${item.content}`).join('\n')}`
@@ -5920,6 +5982,28 @@ function resolutionMatchesCurrentNpc(resolution, characterId) {
   return false;
 }
 
+// Hotfix (2026-08-01 heroine4/turn-202 incident) — a CSA's semantic contract
+// records its NORMATIVE direction (who the rule says complies with whom,
+// e.g. csa_111_2's contract.directions is always ['npc_to_player'] for
+// "prioritize_player_sexual_relief"). That is a different concept from the
+// PHYSICAL direction of what actually happened in Story (the player
+// physically penetrating the NPC is player_to_npc). Requiring
+// resolution.direction to literally equal contract.directions was
+// discarding a correctly-authorized player-initiated authority completion:
+// choice routing already accepted it via resolveStructuredCsaDirectCoverage's
+// reverse authority match, but final validation re-derived a stricter
+// (wrong) requirement and stripped the sexual fields. This resolves the
+// same 'normative' vs 'player_acts_on_compliant_npc' distinction
+// resolveStructuredCsaDirectCoverage already makes, so both stages always
+// agree — never by trusting Extract's own unverified claim of which mode
+// applies.
+function resolveCsaDirectionAuthorityMode(contract, csa, direction) {
+  if (contract.directions.includes(direction)) return 'normative';
+  if (direction !== 'player_to_npc' || !contract.directions.includes('npc_to_player')) return null;
+  const requiredAction = String(csa?.preset?.required_action || '');
+  return PLAYER_INITIATED_AUTHORITY_REQUIRED_ACTIONS.has(requiredAction) ? 'player_acts_on_compliant_npc' : null;
+}
+
 function validateCsaDirectResolution({ resolution, triggerEvaluations, save, master = {}, characterId, npcsPresent, narrativeText, playerInput, csaRuntimeUpdates = [] } = {}) {
   if (resolution?.route !== 'csa_direct' || resolution?.completed !== true) return { authorized: false, reason: 'not csa direct' };
   if (!resolutionMatchesCurrentNpc(resolution, characterId) || !npcsPresent.includes(characterId)) return { authorized: false, reason: 'current npc mismatch' };
@@ -5927,7 +6011,8 @@ function validateCsaDirectResolution({ resolution, triggerEvaluations, save, mas
   const csa = applicableCsa.find(item => item.id === resolution.csa_id);
   if (!csa) return { authorized: false, reason: 'inactive csa' };
   const contract = buildCsaSemanticContract(csa);
-  if (contract.confidence !== 'exact' || contract.sexual_authorization !== true || contract.direct_execution !== true || !contract.actions.includes(resolution.action) || !contract.directions.includes(resolution.direction)) return { authorized: false, reason: 'contract mismatch' };
+  const authorityMode = resolveCsaDirectionAuthorityMode(contract, csa, resolution.direction);
+  if (contract.confidence !== 'exact' || contract.sexual_authorization !== true || contract.direct_execution !== true || !contract.actions.includes(resolution.action) || !authorityMode) return { authorized: false, reason: 'contract mismatch' };
   const character = master?.characters?.[characterId] || {};
   if (contract.actor_group !== 'unknown' && !characterMatchesCsaActorGroup(character, contract.actor_group)) return { authorized: false, reason: 'actor group mismatch' };
   if (contract.target_group !== 'unknown' && !playerMatchesCsaTargetGroup(save, contract.target_group)) return { authorized: false, reason: 'target group mismatch' };
@@ -5942,7 +6027,10 @@ function validateCsaDirectResolution({ resolution, triggerEvaluations, save, mas
   if (resolution.direction === 'npc_to_player' && evaluation.target_type !== 'player') return { authorized: false, reason: 'trigger target mismatch' };
   if (resolution.direction === 'player_to_npc' && (evaluation.target_type !== 'npc' || evaluation.target_character_id !== characterId)) return { authorized: false, reason: 'trigger target mismatch' };
   if (!evidenceExists(evaluation.evidence, playerInput, narrativeText) || !evidenceExists(resolution.trigger_evidence, playerInput, narrativeText) || !evidenceExists(resolution.completion_evidence, narrativeText)) return { authorized: false, reason: 'evidence missing' };
-  return { authorized: true, route: 'csa_direct', action: resolution.action, csa_id: csa.id, consent_required: false };
+  return {
+    authorized: true, route: 'csa_direct', action: resolution.action, csa_id: csa.id, consent_required: false,
+    authority_mode: authorityMode, direction: resolution.direction
+  };
 }
 
 function validateVoluntaryResolution({ resolution, save, characterId, npcsPresent, narrativeText, parsedNpcDialogue } = {}) {
@@ -6516,7 +6604,7 @@ function normalizeRelationshipState(previous = {}, patch = {}, turnNumber = 0, r
   // a no-op for every save that isn't actually broken.
   const compatibilityFacts = resolveRelationshipCompatibilityFacts(previous);
   const previousPlayerEjaculationCount = Math.max(0, Number(previous?.player_ejaculation_count) || 0, compatibilityFacts.player_ejaculation_minimum);
-  const previousNpcOrgasmCount = Math.max(0, Number(previous?.npc_orgasm_count) || 0);
+  const previousNpcOrgasmCount = Math.max(0, Number(previous?.npc_orgasm_count) || 0, compatibilityFacts.npc_orgasm_minimum);
   const proposedPlayerEjaculationCount = Number.isInteger(patch?.player_ejaculation_count) && patch.player_ejaculation_count >= 0
     ? patch.player_ejaculation_count : previousPlayerEjaculationCount;
   const proposedNpcOrgasmCount = Number.isInteger(patch?.npc_orgasm_count) && patch.npc_orgasm_count >= 0
@@ -6861,13 +6949,24 @@ function emptySexualHistory(previous = {}) {
   const legacyNpc = Math.max(0, Number(previous?.npc_orgasm_count) || 0);
   const raw = isPlainObject(previous?.sexual_history) ? previous.sexual_history : {};
   const count = key => Math.max(0, Number(raw[key]) || 0);
+  // README section 5 self-heal — the per-field legacy-memory compatibility
+  // minimum is folded in here too (not just the top-level counters
+  // normalizeRelationshipState already self-heals), since sexual_history's
+  // nested counters are exactly what buildNpcRelationshipRecord/prompt
+  // relationship facts read as "authoritative nested value". A healthy
+  // save's compatibility facts are already all zero, so this is a no-op
+  // for every save that isn't actually broken.
+  const compatibility = resolveRelationshipCompatibilityFacts(previous);
   return {
-    first_vaginal_turn: Number.isInteger(raw.first_vaginal_turn) ? raw.first_vaginal_turn : null,
-    first_anal_turn: Number.isInteger(raw.first_anal_turn) ? raw.first_anal_turn : null,
-    vaginal_sex_count: count('vaginal_sex_count'), anal_sex_count: count('anal_sex_count'), oral_sex_count: count('oral_sex_count'),
-    npc_orgasm_count: Math.max(count('npc_orgasm_count'), legacyNpc),
-    player_ejaculation_count: Math.max(count('player_ejaculation_count'), legacyPlayer),
-    vaginal_ejaculation_count: count('vaginal_ejaculation_count'), anal_ejaculation_count: count('anal_ejaculation_count'),
+    first_vaginal_turn: Number.isInteger(raw.first_vaginal_turn) ? raw.first_vaginal_turn : compatibility.first_vaginal_turn,
+    first_anal_turn: Number.isInteger(raw.first_anal_turn) ? raw.first_anal_turn : compatibility.first_anal_turn,
+    vaginal_sex_count: Math.max(count('vaginal_sex_count'), compatibility.vaginal_sex_minimum),
+    anal_sex_count: Math.max(count('anal_sex_count'), compatibility.anal_sex_minimum),
+    oral_sex_count: count('oral_sex_count'),
+    npc_orgasm_count: Math.max(count('npc_orgasm_count'), legacyNpc, compatibility.npc_orgasm_minimum),
+    player_ejaculation_count: Math.max(count('player_ejaculation_count'), legacyPlayer, compatibility.player_ejaculation_minimum),
+    vaginal_ejaculation_count: Math.max(count('vaginal_ejaculation_count'), compatibility.vaginal_ejaculation_minimum),
+    anal_ejaculation_count: Math.max(count('anal_ejaculation_count'), compatibility.anal_ejaculation_minimum),
     oral_ejaculation_count: count('oral_ejaculation_count'), facial_ejaculation_count: count('facial_ejaculation_count'),
     body_ejaculation_count: count('body_ejaculation_count'), unspecified_ejaculation_count: count('unspecified_ejaculation_count')
   };
@@ -6887,7 +6986,7 @@ function sexualEventCompletionPattern(type = '') {
   if (type === 'vaginal_penetration') return /질\s*(?:삽입|안(?:으로|에))/;
   if (type === 'anal_penetration') return /(?:항문|애널)\s*(?:삽입|안(?:으로|에))/;
   if (type === 'oral_sex') return /(?:구강|입안|입술).*(?:성교|자극|받았|했다)|(?:구강|입안)\s*(?:성교|자극)/;
-  if (type === 'npc_orgasm' || type === 'player_orgasm') return /(?:절정|오르가즘).*(?:했다|했으며|하고|한|에\s*이르)/;
+  if (type === 'npc_orgasm' || type === 'player_orgasm') return /(?:절정|오르가즘).*(?:했다|했으며|하고|한|에\s*이르|올랐다|오르며|오르고|오른다|올라)/;
   if (type.endsWith('_ejaculation')) return /(?:사정(?:했다|했으며|하고|한|을)|쌌(?:다|으며|고|다는)|정액)/;
   return false;
 }
@@ -6917,7 +7016,7 @@ function isGenericSexualRelationshipMemory(text = '') {
 const EJACULATION_MEMORY_ASSERTION_RE =
   /사정(?:했다|했으며|하고|한|을\s*(?:받|느꼈))|쌌(?:다|으며|고|다는)|정액을?\s*(?:받|느꼈)/;
 const ORGASM_MEMORY_ASSERTION_RE =
-  /(?:절정|오르가즘)[^.!?。]{0,10}(?:했다|했으며|하고|한|에\s*이르|느꼈다|느낀)/;
+  /(?:절정|오르가즘)[^.!?。]{0,10}(?:했다|했으며|하고|한|에\s*이르|느꼈다|느낀|올랐다|오르며|오르고|오른다|올라)/;
 
 function filterCurrentRelationshipMemoryPatch(items = [], {
   characterId = '', characters = {}, narrativeText = '', turnNumber = 0, hasCurrentSexualEvent = false, npcSwitchTurn = false,
@@ -7094,10 +7193,77 @@ function isSexualCompletionEvidenceFinal(evidenceContext) {
   return Boolean(evidenceContext) && !SEXUAL_COMPLETION_NONFINAL_RE.test(evidenceContext);
 }
 
+// README section 4 (2026-08-01 heroine4/turn-202 incident) — deterministic
+// fail-open synthesis for a completion the final Story and a validated
+// execution contract both already establish, but Extract's own optional
+// sexual_events array is missing a row for. Never from player input alone
+// (storyConfirmsCurrentSexualEvent only scans the Story narrative section),
+// never from relationship memory, never from arousal/moaning/shaking alone
+// — only from an exact per-type narrative completion match (which already
+// excludes 과거/이전/직전/회상/기억/떠올 framing) plus independent
+// structured authorization/resolution and a non-final-language guard on the
+// resolution's own completion evidence.
+const SYNTHESIZABLE_EVENT_TYPES = [
+  'vaginal_penetration', 'anal_penetration', 'oral_sex',
+  'npc_orgasm',
+  'vaginal_ejaculation', 'anal_ejaculation', 'oral_ejaculation', 'facial_ejaculation', 'body_ejaculation', 'unspecified_ejaculation'
+];
+
+const EJACULATION_SYNTHESIS_CANDIDATES = ['vaginal_ejaculation', 'anal_ejaculation', 'oral_ejaculation', 'facial_ejaculation', 'body_ejaculation', 'unspecified_ejaculation'];
+
+function resolveSynthesizedSexualEvents({ narrativeText, characterId, characterName, authorization, resolution, existingTypes }) {
+  if (!authorization?.authorized || resolution?.completed !== true || !characterName) return [];
+  const evidence = typeof resolution.completion_evidence === 'string' ? resolution.completion_evidence.trim() : '';
+  if (!evidence || !evidenceExists(evidence, narrativeText)) return [];
+  const evidenceSentence = findNarrativeSentenceContainingEvidence(narrativeText, evidence);
+  const evidenceContext = `${evidenceSentence} ${evidence}`.trim();
+  if (!isSexualCompletionEvidenceFinal(evidenceContext)) return [];
+  const synthesized = [];
+
+  // Base actions and npc_orgasm each have their own distinct narrative
+  // pattern (sexualEventCompletionPattern requires 질/항문 wording for the
+  // two penetration types, a dedicated 절정/오르가즘 pattern for orgasm) —
+  // no cross-type ambiguity, safe to evaluate each independently.
+  for (const type of ['vaginal_penetration', 'anal_penetration', 'oral_sex', 'npc_orgasm']) {
+    if (existingTypes.has(type)) continue;
+    const action = sexualActionForEventType(type);
+    if (action !== 'none' && authorization.action !== action) continue;
+    if (!storyConfirmsCurrentSexualEvent(narrativeText, characterName, type)) continue;
+    synthesized.push({ character_id: characterId, type, completed: true, evidence });
+  }
+
+  // Every *_ejaculation type shares the exact same generic completion
+  // pattern (sexualEventCompletionPattern does not distinguish among them),
+  // so independently "confirming" each one from one ambiguous "사정했다"
+  // sentence would synthesize several different events for a single real
+  // completion. At most one ejaculation type is ever synthesized per turn —
+  // never guessed facial/body without evidence; only the two explicitly
+  // location-stated types (vaginal/anal) are preferred, an oral-context
+  // completion falls back to oral_ejaculation, and everything else falls
+  // back to the generic unspecified_ejaculation rather than inferring a
+  // location Story does not state.
+  if (!EJACULATION_SYNTHESIS_CANDIDATES.some(type => existingTypes.has(type))) {
+    const eligible = EJACULATION_SYNTHESIS_CANDIDATES.filter(type => {
+      const requiredAction = SEXUAL_COMPLETION_REQUIRED_ACTION[type];
+      return requiredAction === null || authorization.action === requiredAction;
+    });
+    if (eligible.length && storyConfirmsCurrentSexualEvent(narrativeText, characterName, eligible[0])) {
+      let chosenType = null;
+      if (eligible.includes('vaginal_ejaculation') && sexualCompletionLocationEvidenceOk('vaginal_ejaculation', evidenceContext)) chosenType = 'vaginal_ejaculation';
+      else if (eligible.includes('anal_ejaculation') && sexualCompletionLocationEvidenceOk('anal_ejaculation', evidenceContext)) chosenType = 'anal_ejaculation';
+      else if (eligible.includes('oral_ejaculation')) chosenType = 'oral_ejaculation';
+      else if (eligible.includes('unspecified_ejaculation')) chosenType = 'unspecified_ejaculation';
+      if (chosenType) synthesized.push({ character_id: characterId, type: chosenType, completed: true, evidence });
+    }
+  }
+
+  return synthesized;
+}
+
 function applySexualEvents(previous = {}, events = [], turnNumber = 0, {
   narrativeText = '', characterId = '', npcsPresent = [], sexualResolution = null,
   csaTriggerEvaluations = [], parsedNpcDialogue = [], sexualAuthorization = null,
-  save = {}
+  characters = {}, save = {}
 } = {}) {
   const history = emptySexualHistory(previous);
   const stored = Array.isArray(previous?.sexual_events) ? previous.sexual_events : [];
@@ -7115,8 +7281,17 @@ function applySexualEvents(previous = {}, events = [], turnNumber = 0, {
       parsedNpcDialogue
     });
   const resolution = normalizeSexualResolution(sexualResolution);
-  const eligible = (Array.isArray(events) ? events : [])
+  const reportedEvents = (Array.isArray(events) ? events : [])
     .filter(event => isPlainObject(event) && event.character_id === characterId && npcsPresent.includes(characterId));
+  const characterName = characters?.[characterId]?.name || characters?.[characterId]?.['이름'] || '';
+  const synthesizedEvents = resolveSynthesizedSexualEvents({
+    narrativeText, characterId, characterName, authorization, resolution,
+    existingTypes: new Set(reportedEvents.map(event => event.type))
+  });
+  for (const event of synthesizedEvents) {
+    console.warn(JSON.stringify({ event: 'sexual_event_synthesized', turn: turnNumber, current_character_id: characterId, type: event.type }));
+  }
+  const eligible = [...reportedEvents, ...synthesizedEvents];
 
   // Pass 1 — base events (oral_sex/vaginal_penetration/anal_penetration),
   // unchanged: still requires this-turn structured authorization for the
@@ -10594,6 +10769,59 @@ function resolveCsaContractDirection(actor, target) {
   return 'none';
 }
 
+// Hotfix (2026-08-01 heroine4/turn-202 incident) — the single execution
+// contract shape every stage (choice coverage, Story fact injection,
+// Extract's SELECTED EXECUTION CONTRACT, resolution/trigger validation,
+// event synthesis) must reuse unchanged. Explicitly separates the PHYSICAL
+// layer (who/what actually happens in Story — physicalActorType/
+// physicalTargetType/physicalDirection) from the CSA NORM layer (which
+// participant satisfies the rule's own actor_group/target_group —
+// normActorCharacterId/normActorGroup/normTargetGroup). The two layers
+// coincide when authorityMode is 'normative' (the CSA's own actor performs
+// on its own target) and diverge under 'player_acts_on_compliant_npc' (the
+// player physically acts, but the compliant NPC is the one satisfying the
+// CSA's actor_group — never the reverse).
+// A resolveCsaParticipant() result of type 'group' (e.g. actor_options:
+// ['everyone_in_hospital']) never carries a characterId of its own — the
+// concrete physical performer is whichever NPC is currently in scene,
+// matching how characterMatchesCsaActorGroup already treats
+// 'everyone_in_hospital' as unconditionally satisfied by that NPC.
+// 'minor_npc' (anonymous patient/guardian/visitor) has no concrete
+// registered id to report.
+function resolveConcretePhysicalParticipantId(participant, save) {
+  if (participant?.type === 'player') return 'player';
+  if (participant?.type === 'npc') return participant.characterId;
+  if (participant?.type === 'group') return typeof save?.last_character_id === 'string' ? save.last_character_id : null;
+  return null;
+}
+
+function buildCsaExecutionContract({ csa, contract, action, physicalActorId, physicalTargetId, authorityMode }) {
+  const physicalActorType = physicalActorId === 'player' ? 'player' : 'npc';
+  const physicalTargetType = physicalTargetId === 'player' ? 'player' : 'npc';
+  const normActorCharacterId = physicalActorType === 'npc' ? physicalActorId : (physicalTargetType === 'npc' ? physicalTargetId : null);
+  const physicalDirection = physicalActorType === 'npc' && physicalTargetType === 'player' ? 'npc_to_player'
+    : physicalActorType === 'player' && physicalTargetType === 'npc' ? 'player_to_npc' : 'none';
+  return {
+    covered: true,
+    route: 'csa_direct',
+    csaId: typeof csa.id === 'string' ? csa.id : null,
+    templateId: csa?.preset?.template_id || null,
+    action,
+    actorGroup: contract.actor_group,
+    targetGroup: contract.target_group,
+    physicalActorType,
+    physicalActorCharacterId: physicalActorType === 'npc' ? physicalActorId : null,
+    physicalTargetType,
+    physicalTargetCharacterId: physicalTargetType === 'npc' ? physicalTargetId : null,
+    physicalDirection,
+    authorityMode,
+    normActorCharacterId,
+    normActorGroup: contract.actor_group,
+    normTargetType: 'player',
+    normTargetGroup: contract.target_group
+  };
+}
+
 // README section 5 — a choice containing a material sexual action (the
 // exact classifier above resolved one) must be covered through the CSA's
 // full semantic contract, never through direct_meaning_tags/content-regex
@@ -10625,14 +10853,9 @@ function resolveSexualCsaDirectCoverage(save, master, text, exactAction, actionT
     if (!participants.resolved) continue;
     const direction = resolveCsaContractDirection(participants.actor, participants.target);
     if (!contract.directions.includes(direction)) continue;
-    return {
-      covered: true,
-      csaId: typeof csa.id === 'string' ? csa.id : null,
-      templateId: csa?.preset?.template_id || null,
-      action: exactAction,
-      actorGroup: contract.actor_group,
-      targetGroup: contract.target_group
-    };
+    const physicalActorId = resolveConcretePhysicalParticipantId(participants.actor, save);
+    const physicalTargetId = resolveConcretePhysicalParticipantId(participants.target, save);
+    return buildCsaExecutionContract({ csa, contract, action: exactAction, physicalActorId, physicalTargetId, authorityMode: 'normative' });
   }
   return { covered: false };
 }
@@ -10775,14 +10998,13 @@ function resolveStructuredCsaDirectCoverage(save, master, structuredMeta) {
     const reverseMatch = !forwardMatch && actorId === 'player'
       && resolvePlayerInitiatedAuthorityMatch({ csa, contract, master, targetId, presentIds });
     if (!forwardMatch && !reverseMatch) continue;
-    return {
-      covered: true,
-      csaId: typeof csa.id === 'string' ? csa.id : null,
-      templateId: csa?.preset?.template_id || null,
+    return buildCsaExecutionContract({
+      csa, contract,
       action: SEXUAL_ACTION_DETECTION_PRIORITY.find(type => actionTypes.includes(type)) || actionTypes[0],
-      actorGroup: contract.actor_group,
-      targetGroup: contract.target_group
-    };
+      physicalActorId: actorId,
+      physicalTargetId: targetId,
+      authorityMode: reverseMatch ? 'player_acts_on_compliant_npc' : 'normative'
+    });
   }
   return { covered: false };
 }
@@ -10821,6 +11043,72 @@ function resolveCsaDirectCoverage(save = {}, master = {}, choiceText = '', struc
   }
   if (hasMaterialSexualChoiceSignal(text)) return { covered: false };
   return resolveNonsexualCsaDirectCoverage(save, master, text);
+}
+
+// README architecture update section 3.4 — direct-text parity: an explicit
+// free-text turn (no matching choice button, e.g. the player types "그녀를
+// 삽입한다" directly) under the exact strong-authority contract must
+// produce the same execution_contract a structured choice would. The legacy
+// regex classifier is used only as an action/intent-mode SIGNAL here — not
+// as authorization — exactly matching README's "legacy/action signal"
+// framing. Authorization still comes from the active CSA semantic contract
+// and resolveCsaParticipants-resolved participants via the same narrow
+// resolvePlayerInitiatedAuthorityMatch allowlist the structured path uses.
+function resolveDirectTextCsaExecutionContract(save = {}, master = {}, playerInput = '') {
+  const text = typeof playerInput === 'string' ? playerInput : '';
+  if (!text.trim()) return { covered: false };
+  const detected = deprecatedClassifySexualActionDetailed(text);
+  if (detected.action === 'none') return { covered: false };
+  if (deprecatedClassifySexualIntentMode(text, detected.action) !== 'player_acts') return { covered: false };
+  const characterId = typeof save?.last_character_id === 'string' ? save.last_character_id : null;
+  if (!characterId || characterId === 'narrator') return { covered: false };
+  const characters = isPlainObject(master?.characters) ? master.characters : {};
+  const presentIds = new Set(getCurrentPresentNpcIds(save, characters));
+  if (!presentIds.has(characterId)) return { covered: false };
+  const actionTypes = detectSexualActionTypes(text);
+  for (const csa of getApplicableCsaEntries(save)) {
+    const contract = buildCsaSemanticContract(csa);
+    if (contract.sexual_authorization !== true || contract.direct_execution !== true) continue;
+    if (!contract.actions.includes(detected.action)) continue;
+    if (actionTypes.some(type => !contract.actions.includes(type))) continue;
+    if (!resolvePlayerInitiatedAuthorityMatch({ csa, contract, master, targetId: characterId, presentIds })) continue;
+    return buildCsaExecutionContract({
+      csa, contract, action: detected.action,
+      physicalActorId: 'player', physicalTargetId: characterId,
+      authorityMode: 'player_acts_on_compliant_npc'
+    });
+  }
+  return { covered: false };
+}
+
+// Shared Korean fact-description for the execution_contract — used by both
+// Story's selected-choice fact injection and Extract's SELECTED EXECUTION
+// CONTRACT prompt section, so the two stages are always told the exact same
+// physical actor/target/direction (and, in authority mode, the separate
+// norm-compliance framing) rather than each independently re-describing it.
+// Accepts either buildCsaExecutionContract's raw camelCase shape or the
+// persisted snake_case csa_direct shape (buildChoiceMeta) interchangeably.
+function describeCsaExecutionContractPhysicalFact(contract, characters = {}) {
+  if (!isPlainObject(contract)) return '';
+  const csaId = contract.csaId ?? contract.csa_id;
+  const physicalActorType = contract.physicalActorType ?? contract.physical_actor_type;
+  const physicalActorCharacterId = contract.physicalActorCharacterId ?? contract.physical_actor_character_id;
+  const physicalTargetType = contract.physicalTargetType ?? contract.physical_target_type;
+  const physicalTargetCharacterId = contract.physicalTargetCharacterId ?? contract.physical_target_character_id;
+  const authorityMode = contract.authorityMode ?? contract.authority_mode;
+  const normActorCharacterId = contract.normActorCharacterId ?? contract.norm_actor_character_id;
+  if (!csaId || !physicalActorType || !physicalTargetType) return '';
+  const nameFor = id => {
+    if (id === 'player') return '플레이어';
+    const character = characters?.[id];
+    return character?.name || character?.['이름'] || (typeof id === 'string' ? id : '대상');
+  };
+  const actorName = physicalActorType === 'player' ? '플레이어' : nameFor(physicalActorCharacterId);
+  const targetName = physicalTargetType === 'player' ? '플레이어' : nameFor(physicalTargetCharacterId);
+  const base = `이번 행동의 실제 물리적 수행자는 ${actorName}이고, 대상은 ${targetName}이다.`;
+  if (authorityMode !== 'player_acts_on_compliant_npc') return base;
+  const normActorName = nameFor(normActorCharacterId);
+  return `${base} 상식개변 규범은 ${normActorName}이(가) 플레이어의 요구에 순응·협조해야 한다고 규정할 뿐, 실제 몸을 움직여 행동을 수행하는 쪽은 플레이어다 — 서사에서 이 방향을 뒤집어 ${normActorName}이(가) 능동적으로 행동을 가하는 것처럼 쓰지 않는다.`;
 }
 
 // README section 7 — single authoritative execution-route resolver, used by
@@ -11542,7 +11830,22 @@ function buildChoiceMeta(choices = [], save = {}, master = {}, turnNumber = 0, {
           csa_id: coverage.csaId,
           template_id: coverage.templateId,
           actor_group: coverage.actorGroup,
-          target_group: coverage.targetGroup
+          target_group: coverage.targetGroup,
+          // Hotfix (2026-08-01) — the shared execution_contract's physical/
+          // norm split (buildCsaExecutionContract), so Story/Extract/
+          // validation/event-application never have to re-derive which
+          // participant physically acts vs which one satisfies the CSA's
+          // own norm from scratch.
+          physical_actor_type: coverage.physicalActorType ?? null,
+          physical_actor_character_id: coverage.physicalActorCharacterId ?? null,
+          physical_target_type: coverage.physicalTargetType ?? null,
+          physical_target_character_id: coverage.physicalTargetCharacterId ?? null,
+          physical_direction: coverage.physicalDirection ?? null,
+          authority_mode: coverage.authorityMode ?? null,
+          norm_actor_character_id: coverage.normActorCharacterId ?? null,
+          norm_actor_group: coverage.normActorGroup ?? null,
+          norm_target_type: coverage.normTargetType ?? null,
+          norm_target_group: coverage.normTargetGroup ?? null
         }
       };
     }
@@ -11616,6 +11919,14 @@ function isCurrentChoiceMetaValid(choices, choiceMeta, turnNumber, context = nul
         if ((meta.sexual_action ?? 'none') !== (coverage.action || 'none')) return false;
         if (meta.csa_direct?.actor_group !== coverage.actorGroup) return false;
         if (meta.csa_direct?.target_group !== coverage.targetGroup) return false;
+        // Hotfix (2026-08-01) — also revalidate the physical/norm execution-
+        // contract split, so a stale authority_mode/physical_direction (from
+        // before this fix, or from a since-changed CSA) is caught the same
+        // way a stale csa_id/action would be.
+        if ((meta.csa_direct?.physical_direction ?? null) !== (coverage.physicalDirection ?? null)) return false;
+        if ((meta.csa_direct?.authority_mode ?? null) !== (coverage.authorityMode ?? null)) return false;
+        if ((meta.csa_direct?.physical_actor_character_id ?? null) !== (coverage.physicalActorCharacterId ?? null)) return false;
+        if ((meta.csa_direct?.physical_target_character_id ?? null) !== (coverage.physicalTargetCharacterId ?? null)) return false;
       }
     }
     if (meta.kind === 'csa_direct') return meta.severity === 'none' && meta.success_rate == null;
@@ -12735,6 +13046,15 @@ export {
   resolveChoiceExecutionRoute,
   resolveCsaDirectCoverage,
   resolveStructuredCsaDirectCoverage,
+  resolveCsaDirectionAuthorityMode,
+  buildCsaExecutionContract,
+  resolveConcretePhysicalParticipantId,
+  resolveDirectTextCsaExecutionContract,
+  describeCsaExecutionContractPhysicalFact,
+  resolveSynthesizedSexualEvents,
+  SYNTHESIZABLE_EVENT_TYPES,
+  buildRelationshipMemoryFacts,
+  emptySexualHistory,
   normalizeChoiceStructuredMeta,
   deprecatedClassifySexualActionDetailed,
   detectSexualActionTypes,

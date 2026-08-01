@@ -26,7 +26,9 @@ function buildCsaAftereffectStorySection(save = {}, characterIds = [], character
     const entries = Object.values(save?.csa_aftereffect_state?.[characterId] || {}).filter(isPlainObject);
     if (!entries.length) return '';
     const name = characters?.[characterId]?.name || characters?.[characterId]?.['이름'] || characterId;
-    const phases = entries.map(item => @@BT@@  - ${item.phase}: ${item.canonical_content || '해제된 규범'}@@BT@@).join('\n');
-    return @@BT@@- ${name}(${characterId})\n${phases}@@BT@@;
+    const phases = entries
+      .map(item => '  - ' + item.phase + ': ' + (item.canonical_content || '해제된 규범'))
+      .join('\n');
+    return '- ' + name + '(' + characterId + ')\n' + phases;
   }).filter(Boolean);
   if (!blocks.length) return '';

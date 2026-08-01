@@ -1,7 +1,10 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
+import { spawnSync } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
 
+const repoRoot = new URL('../', import.meta.url);
 const partsDir = new URL('../worker/build-csa-deactivation-hotfix.parts/', import.meta.url);
 const script = fs.readdirSync(partsDir).filter(name => name.endsWith('.part')).sort()
   .map(name => fs.readFileSync(new URL(name, partsDir), 'utf8')).join('');
@@ -31,4 +34,16 @@ test('Wrangler deploy uses deterministic generated entry point', () => {
   assert.equal(config.main, './game-proxy-v2.generated.js');
   assert.equal(config.build.command, 'node ./build-csa-deactivation-hotfix.mjs');
   assert.equal(config.build.cwd, 'worker');
+});
+
+test('build generator executes and emitted Worker parses', () => {
+  const build = spawnSync(process.execPath, ['worker/build-csa-deactivation-hotfix.mjs'], {
+    cwd: fileURLToPath(repoRoot),
+    encoding: 'utf8'
+  });
+  assert.equal(build.status, 0, `${build.stdout}\n${build.stderr}`);
+
+  const generatedPath = fileURLToPath(new URL('../worker/game-proxy-v2.generated.js', import.meta.url));
+  const syntax = spawnSync(process.execPath, ['--check', generatedPath], { encoding: 'utf8' });
+  assert.equal(syntax.status, 0, `${syntax.stdout}\n${syntax.stderr}`);
 });

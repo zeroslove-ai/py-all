@@ -480,10 +480,11 @@ const ui = {
       button.className = `choice-btn ${explicit ? 'explicit' : ''}${csaDirect ? ' csa-direct-choice' : ''}${bold ? ' bold-choice' : ''}${blocked ? ' blocked-choice' : ''}`;
       const marker = document.createElement('span'); marker.className = 'marker'; marker.textContent = markers[index] || `${index + 1}.`;
       const label = document.createElement('span'); label.className = 'choice-label';
-      // csa_direct never shows a probability/percentage — it is an
-      // already-validated fact, not an attempt being judged.
+      // Keep the direct-execution marker compact on mobile. The button color
+      // and icon already distinguish the route; the full choice remains in
+      // title/aria-label and the click payload.
       label.textContent = csaDirect
-        ? `🌀 상식개변 직접 실행 · ${displayText}`
+        ? `🌀 ${displayText}`
         : bold
           ? `⚡ 과감 · 성공률 ${meta.success_rate}% · ${displayText}`
           : blocked

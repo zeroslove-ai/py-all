@@ -3,7 +3,8 @@ for (const [label, ok] of assertions) {
 }
 
 fs.writeFileSync(outputPath, source, 'utf8');
-const check = spawnSync(process.execPath, ['--check', outputPath.pathname], { encoding: 'utf8' });
+const generatedWorkerPath = fileURLToPath(outputPath);
+const check = spawnSync(process.execPath, ['--check', generatedWorkerPath], { encoding: 'utf8' });
 if (check.status !== 0) {
   process.stderr.write(check.stdout || '');
   process.stderr.write(check.stderr || '');

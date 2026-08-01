@@ -6,8 +6,12 @@ import { fileURLToPath } from 'node:url';
 
 const repoRoot = new URL('../', import.meta.url);
 const partsDir = new URL('../worker/build-csa-deactivation-hotfix.parts/', import.meta.url);
-const script = fs.readdirSync(partsDir).filter(name => name.endsWith('.part')).sort()
-  .map(name => fs.readFileSync(new URL(name, partsDir), 'utf8')).join('');
+const partNames = fs.readdirSync(partsDir).filter(name => name.endsWith('.part')).sort((left, right) => {
+  if (left === 'part-07.part') return 1;
+  if (right === 'part-07.part') return -1;
+  return left.localeCompare(right);
+});
+const script = partNames.map(name => fs.readFileSync(new URL(name, partsDir), 'utf8')).join('');
 const wrangler = fs.readFileSync(new URL('../worker/wrangler.jsonc', import.meta.url), 'utf8');
 
 test('build generator defines schema-v2 global aftereffects', () => {
@@ -56,6 +60,11 @@ test('explicit persistent player-address requests bypass Extract omission', () =
   assert.match(script, /item\.scope === 'persistent'/);
 });
 
+test('worker output finalizer runs after all mutation parts', () => {
+  assert.equal(partNames.at(-1), 'part-07.part');
+  assert.ok(partNames.indexOf('part-08.part') < partNames.indexOf('part-07.part'));
+});
+
 test('build generator executes and emitted Worker parses', () => {
   const build = spawnSync(process.execPath, ['worker/build-csa-deactivation-hotfix.mjs'], {
     cwd: fileURLToPath(repoRoot),
@@ -64,6 +73,11 @@ test('build generator executes and emitted Worker parses', () => {
   assert.equal(build.status, 0, `${build.stdout}\n${build.stderr}`);
 
   const generatedPath = fileURLToPath(new URL('../worker/game-proxy-v2.generated.js', import.meta.url));
+  const generated = fs.readFileSync(generatedPath, 'utf8');
+  assert.match(generated, /\[현재 NPC→플레이어 호칭\]/);
+  assert.match(generated, /resolveDeterministicNpcPlayerAddressUpdates/);
+  assert.doesNotMatch(generated, /HOSPITAL ADDRESS MATRIX — ESTABLISHED FACT/);
+
   const syntax = spawnSync(process.execPath, ['--check', generatedPath], { encoding: 'utf8' });
   assert.equal(syntax.status, 0, `${syntax.stdout}\n${syntax.stderr}`);
 });

@@ -4,7 +4,11 @@ const partsDirectory = new URL('./build-csa-deactivation-hotfix.parts/', import.
 const generatedScript = new URL('./.build-csa-deactivation-hotfix.generated.mjs', import.meta.url);
 const partNames = fs.readdirSync(partsDirectory)
   .filter(name => name.endsWith('.part'))
-  .sort();
+  .sort((left, right) => {
+    if (left === 'part-07.part') return 1;
+    if (right === 'part-07.part') return -1;
+    return left.localeCompare(right);
+  });
 
 if (!partNames.length) throw new Error('CSA deactivation hotfix build parts are missing.');
 const source = partNames

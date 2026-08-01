@@ -1,7 +1,7 @@
-  return @@BT@@\n\n[CSA DEACTIVATION AFTEREFFECT — LATE AUTHORITATIVE FACT]\n- 아래 항목은 모두 이미 active:false인 해제된 규범이다. 현재 병원의 정상 업무·현재 관행·현재 의무로 서술하지 않는다. 최근 기억이나 요약에 과거의 “정상 업무” 표현이 남아 있어도 그것은 해제 전 당시 인식일 뿐이다.\n- 해제된 규범의 당연함은 즉시 사라지지만, 실제 사건의 기억과 현재 옷·자세·위치·신체 상태는 그대로 남는다. 기억상실·시간 공백·자동 복장·자동 자세 복구는 금지한다.\n- shock인 NPC가 이번 장면에 등장하면, 이번 Story 안에서 현재 상태나 과거 행동을 자신의 원래 성격·관계·감정으로 명시적으로 다시 판단하고 관찰 가능한 반응을 보인다. 자동 후회나 일률적인 거절로 고정하지 않되 아무 반응 없이 예전 규범을 계속 당연하게 받아들이게 하지 않는다.\n- processing은 재평가·경계 대화·정리 행동이 실제로 이어지는 상태다. integrated는 기억과 개인적 관계는 남지만 해제된 규범을 현재 병원 상식으로 다시 합리화하지 않는 상태다.\n- NPC가 개인적 감정이나 현재 관계 때문에 같은 행동을 계속 선택할 수는 있지만, 그 경우에도 “병원 규정이라서”, “정상 업무라서”, “원래 당연해서”가 아니라 자신의 현재 선택과 이유로 표현한다.\n[대상별 상태]\n${blocks.join('\n')}@@BT@@;
+  return '\n\n[CSA DEACTIVATION AFTEREFFECT — LATE AUTHORITATIVE FACT]\n- 아래 항목은 모두 이미 active:false인 해제된 규범이다. 현재 병원의 정상 업무·현재 관행·현재 의무로 서술하지 않는다. 최근 기억이나 요약에 과거의 “정상 업무” 표현이 남아 있어도 그것은 해제 전 당시 인식일 뿐이다.\n- 해제된 규범의 당연함은 즉시 사라지지만, 실제 사건의 기억과 현재 옷·자세·위치·신체 상태는 그대로 남는다. 기억상실·시간 공백·자동 복장·자동 자세 복구는 금지한다.\n- shock인 NPC가 이번 장면에 등장하면, 이번 Story 안에서 현재 상태나 과거 행동을 자신의 원래 성격·관계·감정으로 명시적으로 다시 판단하고 관찰 가능한 반응을 보인다. 자동 후회나 일률적인 거절로 고정하지 않되 아무 반응 없이 예전 규범을 계속 당연하게 받아들이게 하지 않는다.\n- processing은 재평가·경계 대화·정리 행동이 실제로 이어지는 상태다. integrated는 기억과 개인적 관계는 남지만 해제된 규범을 현재 병원 상식으로 다시 합리화하지 않는 상태다.\n- NPC가 개인적 감정이나 현재 관계 때문에 같은 행동을 계속 선택할 수는 있지만, 그 경우에도 “병원 규정이라서”, “정상 업무라서”, “원래 당연해서”가 아니라 자신의 현재 선택과 이유로 표현한다.\n[대상별 상태]\n' + blocks.join('\n');
 }
 
-function buildAntiRepetitionSection`.replaceAll('@@BT@@', '`');
+function buildAntiRepetitionSection`;
 
 replaceRegex(
   /function buildCsaAftereffectStorySection\(save = \{\}, characterId = ''\) \{.*?\n\}\n\nfunction buildAntiRepetitionSection/s,

@@ -36,6 +36,12 @@ test('Wrangler deploy uses deterministic generated entry point', () => {
   assert.equal(config.build.cwd, 'worker');
 });
 
+test('generator converts file URL to a native OS path', () => {
+  assert.match(script, /import \{ fileURLToPath \} from 'node:url'/);
+  assert.match(script, /const generatedWorkerPath = fileURLToPath\(outputPath\)/);
+  assert.doesNotMatch(script, /outputPath\.pathname/);
+});
+
 test('build generator executes and emitted Worker parses', () => {
   const build = spawnSync(process.execPath, ['worker/build-csa-deactivation-hotfix.mjs'], {
     cwd: fileURLToPath(repoRoot),

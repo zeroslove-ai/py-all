@@ -4,6 +4,7 @@ const ui = {
   // ─── DOM 참조 (캐싱) ───
   els: {},
   init() {
+    const preservedDraft = this.els?.chatInput?.value || document.getElementById('chat-input')?.value || '';
     this.els = {
       storyStream: document.getElementById('story-stream'),
       characterImg: document.getElementById('character-img'),
@@ -19,8 +20,12 @@ const ui = {
       gameTitle: document.getElementById('game-title'),
       turnCount: document.getElementById('turn-count')
     };
+    if (this.els.chatInput && preservedDraft && !this.els.chatInput.value) this.els.chatInput.value = preservedDraft;
     this.arrangeMobileLayout();
-    window.addEventListener('resize', () => this.arrangeMobileLayout());
+    if (!this._resizeHandler) {
+      this._resizeHandler = () => this.arrangeMobileLayout();
+      window.addEventListener('resize', this._resizeHandler);
+    }
     // sidebar.init() calls ui.init() again on every side-panel re-render —
     // storyStream itself is never recreated, so guard against attaching a
     // second listener onto the same element.
@@ -40,7 +45,12 @@ const ui = {
   },
 
   // ─── 로딩 ───
-  setLoading(active, label = '처리 중') {
+  // lockInput:true (default, used for the story phase) keeps the prior
+  // behavior of disabling the draft textarea itself while active. Extract
+  // and commit pass lockInput:false so the player can keep typing the next
+  // action while "상태 분석 중"/"턴 저장 중" is shown — submission (chatSend)
+  // still stays disabled via `active` regardless of lockInput.
+  setLoading(active, label = '처리 중', { lockInput = true } = {}) {
     this.els.loading.classList.toggle('active', active);
     this.els.loading.textContent = label;
     // An outer caller's own loading spinner clearing (e.g. retryStory's
@@ -48,8 +58,18 @@ const ui = {
     // silently re-enable input while a failed-turn retry/discard lock
     // (state.inputLocked) is in effect.
     const locked = typeof state !== 'undefined' && state.inputLocked;
-    this.els.chatSend.disabled = active || locked;
-    this.els.chatInput.disabled = active || locked;
+    this.els.chatSend.disabled = active || locked || !this.els.chatInput?.value.trim() || !(typeof state !== 'undefined' && state.gameId);
+    this.els.chatInput.disabled = lockInput ? (active || locked) : locked;
+  },
+
+  // Independent draft-editable / submission-enabled controls (README
+  // section 7.2) — setLoading covers the common case above, these exist for
+  // any caller that needs to set just one of the two explicitly.
+  setChatDraftEditable(enabled) {
+    this.els.chatInput.disabled = !enabled;
+  },
+  setTurnSubmissionEnabled(enabled) {
+    this.els.chatSend.disabled = !enabled;
   },
 
   // ─── 사용자 메시지 ───

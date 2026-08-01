@@ -578,6 +578,7 @@
     }
 
     async function loadGameContext() {
+      const preservedDraft = document.getElementById('chat-input')?.value || '';
       ui.setLoading(true);
       try {
         const ctx = await api.context(state.gameId);
@@ -586,6 +587,7 @@
         state.context = ctx.context || null;
         ui.updateMeta(ctx.context?.master?.title || ctx.context?.title || '게임 제목', state.turnCount);
         sidebar.updateContext(state.context);
+        if (preservedDraft && !document.getElementById('chat-input')?.value) document.getElementById('chat-input').value = preservedDraft;
         const activeCharacterId = state.context?.save?.last_character_id;
         if (activeCharacterId && activeCharacterId !== 'narrator') {
           sidebar.updateMind(state.context?.save?.npc_emotion?.[activeCharacterId]);
@@ -661,7 +663,10 @@
     // ─── Event Listeners ───
     document.getElementById('chat-send').addEventListener('click', async () => { await tts.unlockAudio(); handleTurnInput(); });
     document.getElementById('chat-input').addEventListener('keydown', (e) => {
-      if (e.key === 'Enter') { tts.unlockAudio(); handleTurnInput(); }
+      if (e.key === 'Enter') { e.preventDefault(); if (!state.isStreaming) { tts.unlockAudio(); handleTurnInput(); } }
+    });
+    document.getElementById('chat-input').addEventListener('input', event => {
+      if (!state.isStreaming && !state.inputLocked) ui.setTurnSubmissionEnabled(Boolean(event.target.value.trim() && state.gameId));
     });
     tts.init();
     document.getElementById('command-toggle').addEventListener('click', () => handleCommand('/안내'));
@@ -928,6 +933,7 @@
 
     async function retryStory(pending) {
       state.isStreaming = true;
+      state.turnPhase = 'story';
       ui.setLoading(true, pending.regenerationFeedback ? '마지막 턴을 다시 만드는 중...' : '서사 생성 중');
       ui.clearPendingTurnActions();
       try {
@@ -986,13 +992,16 @@
         } else {
           ui.showRetryNotice(`서사 생성에 실패했습니다. [${code}]${suffix}`, '다시 생성', () => retryStory(pending));
         }
-      } finally { state.isStreaming = false; ui.setLoading(false); }
+      } finally { state.isStreaming = false; state.turnPhase = 'idle'; ui.setLoading(false); }
     }
 
     async function retryExtract(pending) {
       state.isStreaming = true;
+      state.turnPhase = 'extract';
       state.inputLocked = false;
-      ui.setLoading(true, '상태 분석 중');
+      // README section 7: extract/commit keep the draft textarea editable —
+      // only submission (chatSend) stays disabled while active.
+      ui.setLoading(true, '상태 분석 중', { lockInput: false });
       ui.clearPendingTurnActions();
       ui.clearUncommittedNarrativeBadges();
       let failed = false;
@@ -1058,20 +1067,22 @@
         );
       } finally {
         state.isStreaming = false;
+        state.turnPhase = failed ? 'blocked_failure' : 'idle';
         // Set before setLoading(false) — and stays set through it — so that
         // retryStory's own finally (which also calls ui.setLoading(false)
         // right after this function returns) can't silently re-enable the
         // input out from under a still-unresolved failure notice.
         if (failed) state.inputLocked = true;
-        ui.setLoading(false);
+        ui.setLoading(false, undefined, { lockInput: false });
         if (failed) ui.setChoicesEnabled(false);
       }
     }
 
     async function retryCommit(pending) {
       state.isStreaming = true;
+      state.turnPhase = 'commit';
       state.inputLocked = false;
-      ui.setLoading(true, '턴 저장 중');
+      ui.setLoading(true, '턴 저장 중', { lockInput: false });
       ui.clearPendingTurnActions();
       try {
         // Runs immediately after Extract, in parallel with the still-typing
@@ -1104,6 +1115,13 @@
           state.context = state.context || {};
           state.context.save = deepMergeStatePatch(state.context.save, saved.state_patch);
         }
+        // A successful Commit is the ownership boundary for the next draft:
+        // release chat submission before paced rendering, image work, or TTS.
+        state.isStreaming = false;
+        state.turnPhase = 'idle';
+        ui.setLoading(false, undefined, { lockInput: false });
+        ui.setChatDraftEditable(true);
+        ui.setTurnSubmissionEnabled(Boolean(document.getElementById('chat-input')?.value.trim()));
         ui.clearUncommittedNarrativeBadges();
         saveFeedback([]);
         sidebar.updatePlayerInfo(state.context?.save);
@@ -1167,7 +1185,9 @@
           return;
         }
         if (error.status === 409) {
-          document.getElementById('chat-input').value = pending.input;
+          const chatInput = document.getElementById('chat-input');
+          const currentDraft = chatInput?.value || '';
+          if (chatInput && !currentDraft.trim()) chatInput.value = pending.input;
           ui.showSystemMessage('다른 창에서 게임이 먼저 진행되었습니다. 최신 상태를 다시 불러왔습니다.');
           await loadGameContext();
         } else {
@@ -1181,17 +1201,17 @@
             () => retryCommit(pending)
           );
         }
-      } finally { state.isStreaming = false; ui.setLoading(false); }
+      } finally { state.isStreaming = false; if (state.turnPhase !== 'blocked_failure') state.turnPhase = 'idle'; ui.setLoading(false, undefined, { lockInput: false }); }
     }
 
     function prepareMedia(extract) {
       tts.enqueue(extract, state.turnCount);
       if (extract.character_id && extract.character_id !== 'narrator') {
-        ui.setLoading(true, '이미지 준비 중');
+        state.turnPhase = 'media';
         api.image(state.gameId, extract.character_id, extract.image_id)
           .then(res => { if (res.image_url) ui.showImage(res.image_url); })
           .catch(() => ui.showRetryNotice('이미지를 불러오지 못했습니다.', '이미지만 다시 불러오기', () => prepareMedia({ ...extract, dialogue_lines: [] }), false))
-          .finally(() => ui.setLoading(false));
+          .finally(() => { if (state.turnPhase === 'media') state.turnPhase = 'idle'; });
       }
     }
 

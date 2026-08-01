@@ -3024,7 +3024,31 @@ async function runCommitPipeline(env, { game_id, turn_number, content: rawConten
       console.warn(JSON.stringify({ event: 'recent100_summary_fail_open', endpoint: '/api/commit-turn', request_id: requestId, error: error.message }));
     }
   }
-  const patch = buildSavePatch(safeExtract, engine_patch, summaryPlan, ctx?.save || {}, turn_number, player_input, structuredPlan, ctx?.master || {}, content, game_id, rawPlayerAction);
+  // README 5.5, tier 2 self-heal: only fetch already-committed per-turn
+  // history when this NPC already shows an intimacy signal but at least one
+  // of its own base structured counters is still zero — the exact shape of
+  // the reported broken production records. Bounded to the RPC's own
+  // 100-turn cap, fail-open (never blocks Commit), and never a standalone
+  // repair call — it only feeds buildSavePatch's normal write path below.
+  let recentHistoryRows = [];
+  let sexualHistoryScanSucceeded = false;
+  const relationshipIdsForHeal = new Set([
+    safeExtract.character_id,
+    ...(Array.isArray(safeExtract?.sexual_record_events) ? safeExtract.sexual_record_events.map(event => event?.character_id) : []),
+    ...Object.keys(isPlainObject(ctx?.save?.npc_relationship_state) ? ctx.save.npc_relationship_state : {})
+  ].filter(id => typeof id === 'string' && id));
+  const needsHistoryHeal = [...relationshipIdsForHeal].some(id => relationshipNeedsSexualRecordHistoryFetch(ctx?.save?.npc_relationship_state?.[id]));
+  if (needsHistoryHeal) {
+    try {
+      const historyResult = await supabaseRpc(env, 'get_play_history', { p_game_id: game_id, p_limit: 100 });
+      recentHistoryRows = Array.isArray(historyResult?.records) ? historyResult.records : [];
+      sexualHistoryScanSucceeded = true;
+    } catch (error) {
+      recentHistoryRows = [];
+      console.warn(JSON.stringify({ event: 'sexual_record_history_fetch_fail_open', endpoint: '/api/commit-turn', request_id: requestId, error: error.message }));
+    }
+  }
+  const patch = buildSavePatch(safeExtract, engine_patch, summaryPlan, ctx?.save || {}, turn_number, player_input, structuredPlan, ctx?.master || {}, content, game_id, rawPlayerAction, recentHistoryRows, sexualHistoryScanSucceeded);
   // Reserved key (same convention as _turn_record) — commit_turn's SQL
   // strips this before merging into game_save.data and instead persists it
   // into this turn's own game_memories.pre_turn_save_snapshot column. Lets
@@ -4294,6 +4318,176 @@ function buildAddressAbbreviationSection() {
   return `\n\n[호칭 규칙 — 요약]\n\n- 간호사끼리: 이름+쌤\n- 일반 간호사 → 수간호사: 수간호사님\n- 의료진 → 일반 의사: 선생님\n- 과장급 의사: 과장님 또는 교수님\n- 환자·보호자 → 간호사: 간호사님 또는 선생님\n- 저장된 직종·직급·부서를 임의 변경하지 않는다.\n\n우선순위: 1) [CURRENT NPC PROFILE]에 그 NPC의 공식 호칭/동료 간 호칭/상급자 호칭이 있으면 그것을 우선한다. 2) 없으면 위 병원 공통 규칙을 따른다. 3) 그래도 애매하면 자연스러운 존칭으로 판단한다. 모든 어색한 호칭까지 강제로 통일할 필요는 없다.`;
 }
 
+// ─────────────────────────────────────────────────────────────────────────
+// Deterministic hospital address matrix (2026-08-01 hotfix section 6) —
+// derived from existing master 소속 text (no master-data change). Individual
+// master formal_title/peer_address/superior_address/player_honorific fields
+// win over these derived defaults whenever populated. This is prompt
+// authority only, injected every Story turn — not a post-Story hard gate.
+// ─────────────────────────────────────────────────────────────────────────
+
+function resolveNpcRoleTier(character) {
+  const affiliation = typeof character?.['소속'] === 'string' ? character['소속'] : '';
+  if (/원장/.test(affiliation)) return 'director';
+  if (/수간호사/.test(affiliation)) return 'head_nurse';
+  if (/과장|교수/.test(affiliation)) return 'dept_head_doctor';
+  if (/의사/.test(affiliation)) return 'doctor';
+  if (/간호사/.test(affiliation)) return 'nurse';
+  return 'staff';
+}
+
+function resolveNpcGivenName(name) {
+  return typeof name === 'string' && name.trim().length >= 2 ? name.trim().slice(1) : (name || '').trim();
+}
+
+function resolveNpcSurname(name) {
+  return typeof name === 'string' && name.trim().length >= 1 ? name.trim().slice(0, 1) : '';
+}
+
+function resolveDerivedNpcToNpcAddress(speakerCharacter, targetCharacter) {
+  const targetName = targetCharacter?.name || targetCharacter?.['이름'] || '';
+  const targetTier = resolveNpcRoleTier(targetCharacter);
+  const speakerTier = resolveNpcRoleTier(speakerCharacter);
+  if (targetTier === 'director') return '원장님';
+  if (targetTier === 'dept_head_doctor') return `${resolveNpcSurname(targetName)} 교수님`;
+  if (targetTier === 'head_nurse') {
+    return (speakerTier === 'nurse' || speakerTier === 'head_nurse') ? '수간호사님' : `${resolveNpcGivenName(targetName)}쌤`;
+  }
+  if (targetTier === 'doctor') return `${resolveNpcSurname(targetName)} 선생님`;
+  return `${resolveNpcGivenName(targetName)}쌤`;
+}
+
+// README 6.2: an explicit individual master field always wins over the
+// derived default. superior_address applies when the target outranks the
+// speaker (head nurse relative to an ordinary nurse, any doctor, director);
+// peer_address applies otherwise.
+function resolveNpcToNpcAddress(speakerCharacter, targetCharacter) {
+  if (typeof targetCharacter?.formal_title === 'string' && targetCharacter.formal_title.trim()) return targetCharacter.formal_title.trim();
+  const speakerTier = resolveNpcRoleTier(speakerCharacter);
+  const targetTier = resolveNpcRoleTier(targetCharacter);
+  const targetOutranksSpeaker = targetTier === 'director' || targetTier === 'dept_head_doctor' || targetTier === 'doctor'
+    || (targetTier === 'head_nurse' && speakerTier !== 'director' && speakerTier !== 'dept_head_doctor' && speakerTier !== 'doctor');
+  if (targetOutranksSpeaker && typeof targetCharacter?.superior_address === 'string' && targetCharacter.superior_address.trim()) return targetCharacter.superior_address.trim();
+  if (!targetOutranksSpeaker && typeof targetCharacter?.peer_address === 'string' && targetCharacter.peer_address.trim()) return targetCharacter.peer_address.trim();
+  return resolveDerivedNpcToNpcAddress(speakerCharacter, targetCharacter);
+}
+
+function resolvePlayerProfileDefaultAddress(save = {}) {
+  const profile = isPlainObject(save?.player_setup?.selected_profile)
+    ? save.player_setup.selected_profile
+    : (isPlainObject(save?.player) ? save.player : {});
+  const roleText = [profile.job, profile.rank, profile.position, profile.title, profile.background]
+    .filter(value => typeof value === 'string').join(' ');
+  if (/(감사원|감사관|감사)/.test(roleText)) return '감사관님';
+  if (typeof profile.honorific === 'string' && profile.honorific.trim()) return profile.honorific.trim();
+  return '선생님';
+}
+
+function resolveNpcToPlayerAddress(speakerId, speakerCharacter, overrides, save = {}) {
+  const override = isPlainObject(overrides) ? overrides[speakerId] : null;
+  if (override && typeof override.address === 'string' && override.address.trim()) return override.address.trim();
+  if (typeof speakerCharacter?.player_honorific === 'string' && speakerCharacter.player_honorific.trim()) return speakerCharacter.player_honorific.trim();
+  return resolvePlayerProfileDefaultAddress(save);
+}
+
+function buildHospitalAddressMatrixSection(save = {}, characters = {}, currentTurnAddresses = []) {
+  const presentIds = [...new Set([
+    save?.last_character_id,
+    ...(Array.isArray(save?.last_npcs_present) ? save.last_npcs_present : [])
+  ])].filter(id => typeof id === 'string' && id && id !== 'narrator' && isPlainObject(characters?.[id]));
+  if (!presentIds.length) return '';
+  const overrides = save?.npc_player_address_overrides;
+  const lines = [];
+  for (const speakerId of presentIds) {
+    const speaker = characters[speakerId];
+    const speakerName = speaker?.name || speaker?.['이름'] || speakerId;
+    for (const targetId of presentIds) {
+      if (targetId === speakerId) continue;
+      const target = characters[targetId];
+      const targetName = target?.name || target?.['이름'] || targetId;
+      lines.push(`${speakerName} → ${targetName}: "${resolveNpcToNpcAddress(speaker, target)}"`);
+    }
+    const currentOverride = currentTurnAddresses.find(item => item.speaker_id === speakerId);
+    const playerAddress = currentOverride?.address || resolveNpcToPlayerAddress(speakerId, speaker, overrides, save);
+    if (playerAddress) lines.push(`${speakerName} → 플레이어: "${playerAddress}"`);
+  }
+  if (!lines.length) return '';
+  return `\n\n[HOSPITAL ADDRESS MATRIX — ESTABLISHED FACT]\n\n${lines.join('\n')}\n\n규칙:\n- 위는 현재 장면에 등장한 NPC 간, 그리고 NPC→플레이어 호칭의 확정값이다.\n- 친밀감·성적 맥락·상식개변·관계 발전만으로 이 업무 호칭을 대체하지 않는다. 의도적으로 저장된 변경(NPC→플레이어)이 있을 때만 그 값을 쓴다.\n- NPC→플레이어 줄에 값이 없으면 기존 성격/직급에 맞는 자연스러운 존칭을 그대로 유지한다.`;
+}
+
+function isValidNpcPlayerAddress(address) {
+  return typeof address === 'string'
+    && address.length >= 1
+    && address.length <= 20
+    && !/[\r\n{}\[\]<>`]/.test(address)
+    && !/[;|\\]/.test(address);
+}
+
+function resolveCurrentTurnPlayerAddressRequests(playerInput = '', { save = {}, characters = {} } = {}) {
+  const input = typeof playerInput === 'string' ? playerInput.trim() : '';
+  if (!input) return [];
+  const present = [...new Set([save?.last_character_id, ...(Array.isArray(save?.last_npcs_present) ? save.last_npcs_present : [])])]
+    .filter(id => typeof id === 'string' && isPlainObject(characters?.[id]));
+  const candidates = Object.entries(characters || {}).filter(([id, character]) => input.includes(character?.name || character?.['이름'] || '') && present.includes(id));
+  const currentId = candidates.length === 1 ? candidates[0][0] : (present.length === 1 ? present[0] : '');
+  if (!currentId) return [];
+  const addressMatch = input.match(/(?:나를|플레이어를|너는?|나에게)\s*([^\s,.'"“”]{1,20})(?:이라고|라며|으로|로)\s*(?:부르|불러)/)
+    || input.match(/(?:이번에만\s*)?([^\s,.'"“”]{1,20})(?:이라고|라며)\s*(?:불러|불러줘|부르고)/)
+    || input.match(/이번에만\s+([^\s,.'"“”]{1,20})(?:이라고|라며)\s*$/)
+    || (candidates.length === 1 ? input.match(new RegExp(`${escapeRegExp(characters[currentId]?.name || characters[currentId]?.['이름'] || '')}(?:은|는|이|가)?\s*([^\s,.'"“”]{1,20})(?:이라고|라며)`)) : null);
+  const address = addressMatch?.[1]?.trim() || '';
+  if (!isValidNpcPlayerAddress(address)) return [];
+  return [{ speaker_id: currentId, address, scope: /이번에만/.test(input) ? 'current_turn' : 'persistent' }];
+}
+
+function buildCurrentTurnPlayerAddressRequestSection(requests = [], characters = {}) {
+  if (!Array.isArray(requests) || !requests.length) return '';
+  const lines = requests.map(item => {
+    const name = characters?.[item.speaker_id]?.name || characters?.[item.speaker_id]?.['이름'] || item.speaker_id;
+    return `- ${name} → 플레이어: "${item.address}"`;
+  });
+  return `\n\n[CURRENT-TURN PLAYER ADDRESS REQUEST — AUTHORITATIVE]\n${lines.join('\n')}\n- address applies this Story only. Persistent requests should also return Extract address_updates.`;
+}
+
+// README 6.3 — persistent NPC→player address overrides derived from the
+// same Primary Extract call (address_updates). "이번에만" style current-
+// turn-only requests are recognized but deliberately never persisted here;
+// Story itself already honors them narratively for this turn.
+function normalizeNpcPlayerAddressText(value) {
+  if (typeof value !== 'string') return '';
+  const normalized = value.trim().replace(/^["'“”'‘’]+|["'“”'‘’]+$/g, '').trim();
+  return isValidNpcPlayerAddress(normalized) ? normalized : '';
+}
+
+function resolveNpcPlayerAddressUpdates(rawUpdates, { characters = {}, npcsPresent = [], playerInput = '' } = {}) {
+  const accepted = [];
+  for (const raw of (Array.isArray(rawUpdates) ? rawUpdates : [])) {
+    if (!isPlainObject(raw)) continue;
+    if (raw.target_type !== 'player') continue;
+    const rawSpeakerId = typeof raw.speaker_id === 'string' ? raw.speaker_id.trim() : '';
+    const speakerId = rawSpeakerId || (Array.isArray(npcsPresent) && npcsPresent.length === 1 ? npcsPresent[0] : '');
+    if (!speakerId || !isPlainObject(characters?.[speakerId])) continue; // unknown/ambiguous target — ignore field-locally
+    const evidence = typeof raw.evidence === 'string' ? raw.evidence.trim() : '';
+    if (!evidence || !evidenceExists(evidence, playerInput)) continue;
+    const scope = raw.scope === 'current_turn' ? 'current_turn' : 'persistent';
+    if (scope === 'current_turn') continue; // never persisted, matches "이번에만" behavior
+    if (raw.operation === 'clear') { accepted.push({ speaker_id: speakerId, operation: 'clear' }); continue; }
+    const address = normalizeNpcPlayerAddressText(raw.address);
+    if (!address) continue;
+    accepted.push({ speaker_id: speakerId, operation: 'set', address });
+  }
+  return accepted;
+}
+
+function applyNpcPlayerAddressOverrides(previousOverrides, updates, turnNumber) {
+  const merged = isPlainObject(previousOverrides) ? { ...previousOverrides } : {};
+  for (const update of updates) {
+    if (update.operation === 'clear') delete merged[update.speaker_id];
+    else merged[update.speaker_id] = { address: update.address, source: 'player_request', set_turn: turnNumber };
+  }
+  return merged;
+}
+
 const STORY_MASTER_ALWAYS_OMIT_KEYS = new Set([
   'characters',
   'mind_monitor_format',
@@ -4665,12 +4859,20 @@ ${recentMemorySlice.map((m, index) => clipHeadTail(sanitizeRecentNarrativeForPro
     ? `\n\n[REMINDER — CSA CHOICE SCOPE]\n활성 상식개변이 정확히 허용하는 행동은 [1]에서 이미 자연스럽게 실행되거나 실행 가능한 상태다. [3. 선택지] 중 그 범위 안에 정확히 머무는 자연스러운 요청·계속 행동을 하나 포함할 수 있다면 포함하되, 그 선택지에 "확인해도 될까요?" 같은 재확인이나 성공률 표현을 넣지 않는다. 그 범위를 벗어나는 다른 행동(키스, 삽입 등 상식개변이 다루지 않는 행동)을 같은 선택지에 함께 묶지 않는다 — 범위 밖 행동은 별도 선택지로 분리한다.\n`
     : '';
   const eligibleNpcRosterSection = buildEligibleNpcRosterSection(save.world_state, master.characters || {});
+  const currentTurnPlayerAddressRequests = resolveCurrentTurnPlayerAddressRequests(playerInput, {
+    save,
+    characters: master.characters || {}
+  });
+  const currentTurnPlayerAddressSection = buildCurrentTurnPlayerAddressRequestSection(
+    currentTurnPlayerAddressRequests,
+    master.characters || {}
+  );
   // Placed at the very end (same recency-favoring position as
   // playerSetupReminder/hypnosisCapabilitySection) since it must outweigh
   // everything above it, including [최근 기억]'s now-stale account of the
   // turn that was just rolled back.
   const regenerationFeedbackSection = buildRegenerationFeedbackSection(regenerationFeedback);
-  const systemPrompt = (coreRules + playerGate + modeSection + rulebookSection + openingScenarioSection + appUsageSection + eligibleNpcRosterSection + buildCsaRuntimeSection() + buildGeneralActionJudgmentSection() + relationshipInterpretationSection + csaAcceptanceScopeSection + buildCsaDeactivationNarrativeRule() + currentSceneSection + hospitalLocationMemorySection + npcProfileSection + relationshipMemorySection + sexualHistorySection + explicitMentionSection + csaSection + csaPersistentSceneSection + csaPublicSceneSection + csaMinorNpcSection + csaDirectExecutionPrioritySection + sexualPolicySection + csaAftereffectSection + csaWeakSynergySection + mindEffectBoundarySection + physicalSceneStateSection + narrativeLengthSection + narrativeParagraphSection + npcDialogueSection + moanVocalReactionSection + antiRepetitionSection + playerStatusPanel + contextSection + feedbackSection + continuitySection + finalFormatRules + openingFlow + playerSetupReminder + registeredNpcChoiceReminder + choiceLengthReminder + csaChoiceScopeReminder + buildAddressAbbreviationSection() + regenerationFeedbackSection + csaPhysicalTransitionSection + buildStructuredActionStorySection(structuredPlan, save, activeCsa) + playerAttemptSection)
+  const systemPrompt = (coreRules + playerGate + modeSection + rulebookSection + openingScenarioSection + appUsageSection + eligibleNpcRosterSection + buildCsaRuntimeSection() + buildGeneralActionJudgmentSection() + relationshipInterpretationSection + csaAcceptanceScopeSection + buildCsaDeactivationNarrativeRule() + currentSceneSection + hospitalLocationMemorySection + npcProfileSection + relationshipMemorySection + sexualHistorySection + explicitMentionSection + csaSection + csaPersistentSceneSection + csaPublicSceneSection + csaMinorNpcSection + csaDirectExecutionPrioritySection + sexualPolicySection + csaAftereffectSection + csaWeakSynergySection + mindEffectBoundarySection + physicalSceneStateSection + narrativeLengthSection + narrativeParagraphSection + npcDialogueSection + moanVocalReactionSection + antiRepetitionSection + playerStatusPanel + contextSection + feedbackSection + continuitySection + finalFormatRules + openingFlow + playerSetupReminder + registeredNpcChoiceReminder + choiceLengthReminder + csaChoiceScopeReminder + buildAddressAbbreviationSection() + buildHospitalAddressMatrixSection(save, master.characters || {}, currentTurnPlayerAddressRequests) + currentTurnPlayerAddressSection + regenerationFeedbackSection + csaPhysicalTransitionSection + buildStructuredActionStorySection(structuredPlan, save, activeCsa) + playerAttemptSection)
     .replaceAll('상식개변 어플', '상식개변 앱');
 
   // NPC-canon hotfix — computed after systemPrompt so it can be the very
@@ -4857,8 +5059,12 @@ npc_stat_changes에는 호감도와 상식개변 수용도만 반환한다. 호�
 
 [CURRENT NPC RELATIONSHIP RECORD]
 sexual_events에는 현재 장면의 등록 NPC에게 실제로 완료된 사건만 넣는다. 시도·직전·실패·가짜·상상·회상·다른 NPC 사건은 넣지 않는다. 누적 수치와 npc_relationship_state는 반환하지 않는다.
+sexual_record_events는 sexual_events와 별개의 단순 사실 기록이다 — CSA 방향·route·동의·sexual_resolution.completed와 무관하게, 오직 최종 Story에서 이번 턴에 실제로 완료된 사건만 그대로 옮긴다. 계획·시도·진행 중(미완료)·회상·과거 언급·대사로만 언급된 사건·플레이어 입력 선언만으로는 절대 넣지 않는다. evidence는 최종 Story 원문에서 그 완료를 보여주는 문장을 정확히 그대로 복사한다(재구성·요약·의역 금지). actor_type은 player|npc|other 중 실제 행위 주체만 쓰며, 불명확하면 other다. 위치가 중요한 사건(질내/항문 사정)은 최종 Story에 그 위치가 실제로 쓰여 있을 때만 그 타입을 쓰고, 불명확하면 unspecified_ejaculation을 쓴다.
 relationship_memory_patch는 최종 Story에서 실제로 완료된 중요한 관계 사건이 있을 때만 현재 메인 NPC에 대해 {character_id, text, permanent} 형태로 최대 2개 반환한다. character_id는 현재 메인 NPC ID를 정확히 쓴다. permanent:true는 첫 키스·첫 질/구강/항문 삽입·첫 질내 사정 또는 임신 가능 사건, 결혼·이혼·임신·출산·가족관계 변화, 중대한 배신·용서·고백·약속처럼 관계를 영구적으로 바꾼 완료 사건에만 쓴다. 애매하면 false다. 플레이어 입력만의 결과 선언, 실패·추측·감정 과장, 매 턴 반복되는 일반 사실은 넣지 않는다. 정신 효과 중 실제 완료된 객관적 사건은 저장할 수 있지만, 효과 수행만으로 NPC의 진심·영구 취향·일반 복종·완전한 동의가 되었다는 해석은 저장하지 않는다.
 관계 진행은 npc_intimacy_state_patch가 아니라 relationship_events로만 반환한다. romantic_interest_declared, boundary_added, boundary_removed, refusal은 현재 NPC의 구조화된 actor/target/evidence와 함께 반환한다. CSA direct 수행은 관계 단계·현재 동의·경계 제거·로맨스를 만들지 않는다.
+
+[NPC→플레이어 호칭 변경 — address_updates]
+플레이어 입력에 "앞으로 ~라고 불러"처럼 특정 등록 NPC(들)에게 플레이어를 부르는 방식을 명시적으로 지정/복구하는 지시가 있을 때만 반환한다. 각 항목: {"speaker_id": "그 호칭을 쓰게 될 등록 NPC ID", "target_type": "player", "operation": "set 또는 clear(기존 호칭으로 되돌림)", "address": "지정된 짧은 호칭 문구(operation=set일 때만)", "scope": "persistent(계속 유지) 또는 current_turn(이번 턴에서만, 저장 안 함)", "evidence": "플레이어 입력에서 그대로 복사한 근거"}. "이번에만"처럼 이번 턴 한정 지시는 scope:"current_turn"으로 반환한다(Worker가 저장하지 않는다). 대상 NPC가 불명확하면 speaker_id를 비워 두거나 필드 자체를 생략한다.
 
 [NPC PHYSICAL SCENE STATE PATCH]
 npc_scene_state_patch는 최종 Story에서 등록 NPC가 실제로 옷을 입거나 벗고, 열고 잠그고, 올리거나 내리고, 갈아입거나 자세를 바꾼 완료 사건만 반영한다. 플레이어 입력만의 선언, 실패·시도·계획, 상식개변의 생성·해제만으로는 반환하지 않는다. 상식개변이 활성화·교체·해제됐다는 사실만으로 옷·자세가 저절로 바뀌었다고 반환하지 마라 — 규범은 즉시 바뀌어도 물질은 자동으로 바뀌지 않으며, NPC가 실제로 몸을 움직여 완료한 행동이 서사에 있을 때만 반환한다. 기존 상태를 유지할 키는 생략하고, 등록 NPC·허용 enum만 사용한다.
@@ -4890,7 +5096,7 @@ player_scene_state_patch도 최종 Story에서 플레이어 자세·위치·방�
 - npc_emotion은 기존 최소 길이와 2문장 physical_reaction 계약을 충족하는 범위에서만 작성하고 불필요하게 늘리지 않는다.
 - dialogue_lines는 Story에서 실제 등장한 등록 NPC의 대사만 옮긴다.
 - choices는 Worker가 Story의 [3. 선택지]에서 직접 추출해 사용하므로 이 필드는 생략해도 된다 — 넣어도 저장에는 쓰이지 않는다.
-- 값이 없는 optional array/object(csa_omission, csa_experienced_ids, csa_runtime_updates, sexual_events, relationship_events, relationship_memory_patch, npc_scene_state_patch, npc_scene_state_evidence 등)는 빈 값으로 채우지 말고 필드 자체를 생략해도 된다.
+- 값이 없는 optional array/object(csa_omission, csa_experienced_ids, csa_runtime_updates, sexual_events, sexual_record_events, address_updates, relationship_events, relationship_memory_patch, npc_scene_state_patch, npc_scene_state_evidence 등)는 빈 값으로 채우지 말고 필드 자체를 생략해도 된다.
 - npc_scene_state_evidence는 실제로 값이 바뀐 필드에만 넣는다. 바뀌지 않은 필드는 patch와 evidence 어디에도 넣지 않는다.
 - evidence 계열 필드는 판단에 필요한 최소한의 짧은 근거 문구만 쓴다.
 - 같은 근거를 여러 필드에 반복 설명하지 않는다.
@@ -4910,7 +5116,7 @@ ${typeof playerInput === 'string' && playerInput.trim() ? playerInput : '(없음
 ${narrativeText}
 
 [게임 설정 / 이전 저장값]
-${JSON.stringify({ master: cleanForLlm(master), save: cleanForLlm(save), turn_count: turnCount, sexual_event_rules: 'Return only completed sexual_events for the current registered NPC. Never return cumulative counters or past/profile experiences. Player ejaculation needs an explicit instruction in player_input and completion in Story.' }, null, 2)}
+${JSON.stringify({ master: cleanForLlm(master), save: cleanForLlm(save), turn_count: turnCount, sexual_event_rules: 'Return only completed sexual_events for the current registered NPC. Never return cumulative counters or past/profile experiences. Player ejaculation needs an explicit instruction in player_input and completion in Story.', sexual_record_event_rules: 'sexual_record_events is a separate factual ledger from sexual_events — read only the final Story, report every newly completed record event this turn, never plans/attempts/ongoing/remembered/dialogue-only/player-input-only claims, evidence must be copied verbatim from final Story.' }, null, 2)}
 
 [이미지 라이브러리]
 ${JSON.stringify(imageCatalog)}
@@ -4930,6 +5136,8 @@ ${JSON.stringify(imageCatalog)}
   "csa_experienced_ids": ["이번 장면에서 현재 NPC가 실제로 경험한 활성 CSA의 내부 ID만. 없으면 []"],
   "csa_runtime_updates": [{"csa_id": "필수 행동이 실제로 시작·계속·일시중단·종료된 프리셋 CSA의 내부 ID", "character_id": "그 행동을 수행한 등록 NPC ID", "target_type": "player 또는 대상 구분, 없으면 생략", "status": "active|paused|ended", "action_state": "짧은 행동 상태, 없으면 생략", "position_label": "관찰 가능한 현재 자세 한 문장, 없으면 생략", "reason": "짧은 근거"}],
   "sexual_events": [{"character_id": "현재 등장한 등록 NPC ID", "type": "vaginal_penetration|anal_penetration|oral_sex|npc_orgasm|player_orgasm|vaginal_ejaculation|anal_ejaculation|oral_ejaculation|facial_ejaculation|body_ejaculation|unspecified_ejaculation", "completed": true, "evidence": "이번 최종 Story에서 실제 완료된 짧은 근거"}],
+  "sexual_record_events": [{"character_id": "현재 등장한 등록 NPC ID", "type": "vaginal_penetration|anal_penetration|oral_sex|npc_orgasm|player_orgasm|vaginal_ejaculation|anal_ejaculation|oral_ejaculation|facial_ejaculation|body_ejaculation|unspecified_ejaculation", "actor_type": "player|npc|other", "actor_character_id": null, "completed": true, "evidence": "최종 Story 원문에서 그대로 복사한, 그 완료를 보여주는 문장"}],
+  "address_updates": [{"speaker_id": "등록 NPC ID", "target_type": "player", "operation": "set|clear", "address": "지정된 호칭", "scope": "persistent|current_turn", "evidence": "플레이어 입력 원문 근거"}],
   "relationship_memory_patch": [{"character_id": "현재 메인 NPC ID", "text": "최종 Story에서 실제 완료된 중요한 관계 사건의 짧은 사실", "permanent": false}],
   "arousal_event": null,
   "npc_intimacy_state_patch": null,
@@ -5244,7 +5452,7 @@ function clampPlayerInputEchoedStatChanges({ patch, previousSave, characterId })
   return patch;
 }
 
-function buildSavePatch(extract, enginePatch = {}, summaryPlan = null, previousSave = {}, turnNumber = 0, playerInput = '', structuredPlan = null, master = {}, narrativeText = '', gameId = '', playerAction = null) {
+function buildSavePatch(extract, enginePatch = {}, summaryPlan = null, previousSave = {}, turnNumber = 0, playerInput = '', structuredPlan = null, master = {}, narrativeText = '', gameId = '', playerAction = null, recentHistoryRows = [], sexualHistoryScanSucceeded = false) {
   const characterId = typeof extract.character_id === 'string'
     ? extract.character_id
     : null;
@@ -5347,16 +5555,30 @@ function buildSavePatch(extract, enginePatch = {}, summaryPlan = null, previousS
       updated_turn: turnNumber
     };
     patch.npc_emotion = { [characterId]: normalizedEmotion };
+    const previousRelationship = isPlainObject(previousSave?.npc_relationship_state?.[characterId])
+      ? previousSave.npc_relationship_state[characterId]
+      : {};
+    const npcSwitchTurn = previousSave?.last_character_id !== characterId;
+    const npcsPresentForLedger = Array.isArray(extract.npcs_present) ? extract.npcs_present : [];
+    // Factual ledger (README 5.1-5.4): computed unconditionally for the
+    // current registered NPC, independent of every authorization/CSA field
+    // below — this is what actually decides whether historical counters
+    // move, never sexual_resolution/csa route/direction/consent.
+    const historyMinimums = Array.isArray(recentHistoryRows) && recentHistoryRows.length
+      ? resolveSexualRecordHistoryMinimums(recentHistoryRows, characterId, master?.characters?.[characterId]?.name || master?.characters?.[characterId]?.['이름'] || '')
+      : null;
+    const ledger = applySexualRecordLedger(previousRelationship, extract.sexual_record_events, turnNumber, {
+      narrativeText, characterId, npcsPresent: npcsPresentForLedger, characters: master?.characters || {}, historyMinimums
+    });
+    const hasExistingRelationshipRecord = Object.keys(previousRelationship).length > 0;
     const hasStructuredRelationshipWork = extract.sexual_resolution?.action !== 'none'
       || extract.sexual_resolution?.completed === true
       || extract.sexual_events?.length
       || extract.relationship_memory_patch?.length
-      || extract.relationship_events?.length;
+      || extract.relationship_events?.length
+      || ledger.accepted > 0
+      || hasExistingRelationshipRecord;
     if (!degraded && hasStructuredRelationshipWork) {
-      const previousRelationship = isPlainObject(previousSave?.npc_relationship_state?.[characterId])
-        ? previousSave.npc_relationship_state[characterId]
-        : {};
-      const npcSwitchTurn = previousSave?.last_character_id !== characterId;
       const effectiveRelationshipSave = {
         ...previousSave,
         world_state: mergedWorldState,
@@ -5396,19 +5618,22 @@ function buildSavePatch(extract, enginePatch = {}, summaryPlan = null, previousS
         parsedNpcDialogue,
         sexualAuthorization
       });
-      const hasAcceptedEjaculationEvent = sexual.accepted_events.some(event => String(event.type).endsWith('_ejaculation'));
-      const hasAcceptedOrgasmEvent = sexual.accepted_events.some(event => event.type === 'npc_orgasm' || event.type === 'player_orgasm');
+      // README 5.4: relationship_memory_patch is filtered from the accepted
+      // FACTUAL ledger result (never the authorization-gated `sexual` above),
+      // so memory text and counters can never disagree with each other.
+      const hasAcceptedEjaculationEvent = ledger.accepted_events.some(event => String(event.type).endsWith('_ejaculation'));
+      const hasAcceptedOrgasmEvent = ledger.accepted_events.some(event => event.type === 'npc_orgasm' || event.type === 'player_orgasm');
       const relationshipMemoryPatch = filterCurrentRelationshipMemoryPatch(extract.relationship_memory_patch, {
         characterId,
         characters: master?.characters || {},
         narrativeText,
         turnNumber,
-        hasCurrentSexualEvent: sexual.accepted > 0,
+        hasCurrentSexualEvent: ledger.accepted > 0,
         npcSwitchTurn,
         hasAcceptedEjaculationEvent,
         hasAcceptedOrgasmEvent
       });
-      const hasExistingRelationship = Object.keys(previousRelationship).length > 0;
+      const hasExistingRelationship = hasExistingRelationshipRecord;
       const intimacyState = mergeStructuredIntimacyState(previousRelationship.intimacy_state, extract.relationship_events, {
         characterId,
         npcsPresent: Array.isArray(extract.npcs_present) ? extract.npcs_present : [],
@@ -5421,15 +5646,20 @@ function buildSavePatch(extract, enginePatch = {}, summaryPlan = null, previousS
       });
       const hasIntimacyPatch = Array.isArray(extract.relationship_events)
         && extract.relationship_events.some(event => event?.actor_character_id === characterId);
-      if (!hasExistingRelationship && sexual.accepted === 0 && relationshipMemoryPatch.length === 0 && !hasIntimacyPatch) {
+      if (!hasExistingRelationship && sexual.accepted === 0 && ledger.accepted === 0 && relationshipMemoryPatch.length === 0 && !hasIntimacyPatch) {
         // A new NPC cannot inherit a flat or inferred relationship record from another NPC.
       } else {
       const merged = normalizeRelationshipState(previousRelationship, {
-        player_ejaculation_count: sexual.history.player_ejaculation_count,
-        npc_orgasm_count: sexual.history.npc_orgasm_count
-      }, turnNumber, relationshipMemoryPatch, sexual.accepted > 0, intimacyState);
-      merged.sexual_history = sexual.history;
+        player_ejaculation_count: ledger.history.player_ejaculation_count,
+        npc_orgasm_count: ledger.history.npc_orgasm_count
+      }, turnNumber, relationshipMemoryPatch, sexual.accepted > 0 && ledger.has_player_counterpart, intimacyState, ledger);
+      merged.sexual_history = ledger.history;
+      merged.sexual_record_events = ledger.sexual_record_events;
       merged.sexual_events = sexual.sexual_events;
+      if (sexualHistoryScanSucceeded && relationshipNeedsSexualRecordHistoryFetch(previousRelationship)) {
+        merged.sexual_record_backfill_version = 1;
+        merged.sexual_record_history_scanned_through_turn = turnNumber - 1;
+      }
       patch.npc_relationship_state = { [characterId]: merged };
       }
     }
@@ -5449,7 +5679,81 @@ function buildSavePatch(extract, enginePatch = {}, summaryPlan = null, previousS
     }
 
   }
+  // Fully degraded Extracts never authorize a structured sexual action, but
+  // a clear final Story can still carry a narrowly attributable factual
+  // ledger event.  The only allowed fallback identity is the previously
+  // active registered NPC; player input is never consulted here.
+  if (degraded) {
+    const degradedCharacterId = typeof previousSave?.last_character_id === 'string' ? previousSave.last_character_id : '';
+    if (degradedCharacterId && degradedCharacterId !== 'narrator' && isPlainObject(master?.characters?.[degradedCharacterId])) {
+      const previousRelationship = isPlainObject(previousSave?.npc_relationship_state?.[degradedCharacterId])
+        ? previousSave.npc_relationship_state[degradedCharacterId]
+        : {};
+      const ledger = applySexualRecordLedger(previousRelationship, extract.sexual_record_events, turnNumber, {
+        narrativeText,
+        characterId: degradedCharacterId,
+        npcsPresent: [degradedCharacterId],
+        characters: master?.characters || {}
+      });
+      if (ledger.accepted) {
+        const merged = normalizeRelationshipState(previousRelationship, {
+          player_ejaculation_count: ledger.history.player_ejaculation_count,
+          npc_orgasm_count: ledger.history.npc_orgasm_count
+        }, turnNumber, [], false, previousRelationship.intimacy_state, ledger);
+        merged.sexual_history = ledger.history;
+        merged.sexual_record_events = ledger.sexual_record_events;
+        merged.sexual_events = Array.isArray(previousRelationship.sexual_events) ? previousRelationship.sexual_events : [];
+        patch.npc_relationship_state = { [degradedCharacterId]: merged };
+      }
+    }
+  }
   if (!degraded) {
+    // One final factual-ledger pass covers every registered NPC explicitly
+    // named by this turn's records.  The main relationship path above owns
+    // consent/stage/audit; these additional entries only receive the factual
+    // record and preserve every unrelated NPC relationship object.
+    const ledgerIds = [...new Set((Array.isArray(extract.sexual_record_events) ? extract.sexual_record_events : [])
+      .map(event => event?.character_id)
+      .filter(id => typeof id === 'string' && id && id !== characterId))];
+    const relationshipPatch = isPlainObject(patch.npc_relationship_state) ? { ...patch.npc_relationship_state } : {};
+    for (const ledgerCharacterId of ledgerIds) {
+      if (!isPlainObject(master?.characters?.[ledgerCharacterId])) continue;
+      const previousRelationship = isPlainObject(previousSave?.npc_relationship_state?.[ledgerCharacterId])
+        ? previousSave.npc_relationship_state[ledgerCharacterId]
+        : {};
+      const ledgerMinimums = recentHistoryRows.length
+        ? resolveSexualRecordHistoryMinimums(recentHistoryRows, ledgerCharacterId, master.characters[ledgerCharacterId].name || master.characters[ledgerCharacterId]['이름'] || '')
+        : null;
+      const ledger = applySexualRecordLedger(previousRelationship, extract.sexual_record_events, turnNumber, {
+        narrativeText,
+        characterId: ledgerCharacterId,
+        npcsPresent: Array.isArray(extract.npcs_present) ? extract.npcs_present : [],
+        characters: master.characters || {},
+        historyMinimums: ledgerMinimums
+      });
+      if (!ledger.accepted && !Object.keys(previousRelationship).length) continue;
+      const merged = normalizeRelationshipState(previousRelationship, {
+        player_ejaculation_count: ledger.history.player_ejaculation_count,
+        npc_orgasm_count: ledger.history.npc_orgasm_count
+      }, turnNumber, [], false, previousRelationship.intimacy_state, ledger);
+      merged.sexual_history = ledger.history;
+      merged.sexual_record_events = ledger.sexual_record_events;
+      merged.sexual_events = Array.isArray(previousRelationship.sexual_events) ? previousRelationship.sexual_events : [];
+      if (sexualHistoryScanSucceeded && relationshipNeedsSexualRecordHistoryFetch(previousRelationship)) {
+        merged.sexual_record_backfill_version = 1;
+        merged.sexual_record_history_scanned_through_turn = turnNumber - 1;
+      }
+      relationshipPatch[ledgerCharacterId] = merged;
+    }
+    if (Object.keys(relationshipPatch).length) patch.npc_relationship_state = relationshipPatch;
+    const addressUpdates = resolveNpcPlayerAddressUpdates(extract.address_updates, {
+      characters: master?.characters || {},
+      npcsPresent: Array.isArray(extract.npcs_present) ? extract.npcs_present : [],
+      playerInput
+    });
+    if (addressUpdates.length) {
+      patch.npc_player_address_overrides = applyNpcPlayerAddressOverrides(previousSave?.npc_player_address_overrides, addressUpdates, turnNumber);
+    }
     const sceneState = buildNpcSceneStatePatch(previousSave, extract.npc_scene_state_patch, turnNumber);
     if (sceneState) patch.npc_scene_state = sceneState;
     const playerSceneState = buildPlayerSceneStatePatch(previousSave, extract.player_scene_state_patch, turnNumber);
@@ -6331,6 +6635,8 @@ function normalizeExtract(extract) {
   normalized.choice_structured_meta = normalizeChoiceStructuredMeta(normalized.choice_structured_meta);
   normalized.npc_relationship_state = normalizeRelationshipExtract(normalized.npc_relationship_state);
   normalized.sexual_events = normalizeSexualEvents(normalized.sexual_events);
+  normalized.sexual_record_events = normalizeSexualRecordEvents(normalized.sexual_record_events);
+  normalized.address_updates = normalizeAddressUpdates(normalized.address_updates);
   normalized.relationship_memory_patch = normalizeRelationshipMemoryPatchExtract(normalized.relationship_memory_patch);
   normalized.npc_scene_state_patch = normalizeNpcSceneStatePatch(normalized.npc_scene_state_patch);
   normalized.npc_scene_state_evidence = normalizeNpcSceneStateEvidence(normalized.npc_scene_state_evidence);
@@ -6594,7 +6900,7 @@ function deprecatedMergeIntimacyState(previous = {}, rawPatch = null, { characte
   return next;
 }
 
-function normalizeRelationshipState(previous = {}, patch = {}, turnNumber = 0, relationshipMemoryPatch = [], isSexual = false, intimacyState = null) {
+function normalizeRelationshipState(previous = {}, patch = {}, turnNumber = 0, relationshipMemoryPatch = [], isSexual = false, intimacyState = null, factualRecord = {}) {
   // README section 5.4 self-heal — on the next ordinary valid commit for
   // this NPC, the legacy-memory compatibility minimum (if any) is folded
   // into the real persisted counter/flags exactly once, permanently fixing
@@ -6613,9 +6919,10 @@ function normalizeRelationshipState(previous = {}, patch = {}, turnNumber = 0, r
   const npcOrgasmCount = Math.max(previousNpcOrgasmCount, proposedNpcOrgasmCount);
   const previousFacts = buildRelationshipMemoryFacts(previous);
   const hasNewCounter = playerEjaculationCount > previousPlayerEjaculationCount || npcOrgasmCount > previousNpcOrgasmCount;
+  const hasPlayerCounterpart = factualRecord?.has_player_counterpart === true;
   const hasIntimateExperience = previousFacts.has_had_sex_with_player
     || playerEjaculationCount > 0
-    || npcOrgasmCount > 0
+    || hasPlayerCounterpart
     || isSexual === true;
   const hasRelationshipMemoryPatch = Array.isArray(relationshipMemoryPatch) && relationshipMemoryPatch.length > 0;
   const finalFacts = buildRelationshipMemoryFacts({
@@ -6648,6 +6955,8 @@ function normalizeRelationshipState(previous = {}, patch = {}, turnNumber = 0, r
     relationship_memory: relationshipMemory,
     intimacy_state: normalizeIntimacyState(intimacyState || previous?.intimacy_state)
   };
+  if (Number.isInteger(previous?.sexual_record_backfill_version)) result.sexual_record_backfill_version = previous.sexual_record_backfill_version;
+  if (Number.isInteger(previous?.sexual_record_history_scanned_through_turn)) result.sexual_record_history_scanned_through_turn = previous.sexual_record_history_scanned_through_turn;
   if (firstIntimateTurn !== null) result.first_intimate_turn = firstIntimateTurn;
   if (lastIntimateTurn !== null) result.last_intimate_turn = lastIntimateTurn;
   return result;
@@ -6914,6 +7223,40 @@ function normalizeSexualEvents(value) {
     }));
 }
 
+function normalizeSexualRecordEvents(value) {
+  if (!Array.isArray(value)) return [];
+  return value
+    .filter(item => isPlainObject(item)
+      && typeof item.character_id === 'string' && item.character_id.trim()
+      && SEXUAL_RECORD_EVENT_TYPES.has(item.type)
+      && item.completed === true
+      && ['player', 'npc', 'other'].includes(item.actor_type)
+      && typeof item.evidence === 'string' && item.evidence.trim())
+    .slice(0, 24)
+    .map(item => ({
+      character_id: item.character_id.trim(),
+      type: item.type,
+      actor_type: item.actor_type,
+      actor_character_id: typeof item.actor_character_id === 'string' && item.actor_character_id.trim()
+        ? item.actor_character_id.trim()
+        : null,
+      completed: true,
+      evidence: item.evidence.trim().replace(/\s+/g, ' ').slice(0, 240)
+    }));
+}
+
+function normalizeAddressUpdates(value) {
+  if (!Array.isArray(value)) return [];
+  return value.filter(item => isPlainObject(item)).slice(0, 12).map(item => ({
+    speaker_id: typeof item.speaker_id === 'string' ? item.speaker_id.trim() : '',
+    target_type: item.target_type === 'player' ? 'player' : '',
+    operation: item.operation === 'clear' ? 'clear' : 'set',
+    scope: item.scope === 'current_turn' ? 'current_turn' : 'persistent',
+    address: typeof item.address === 'string' ? item.address.trim().slice(0, 40) : '',
+    evidence: typeof item.evidence === 'string' ? item.evidence.trim().slice(0, 240) : ''
+  }));
+}
+
 function normalizeRelationshipMemoryPatchExtract(value) {
   if (!Array.isArray(value)) return [];
   const result = [];
@@ -6944,7 +7287,7 @@ function explicitPlayerEjaculationType(playerInput = '') {
   return 'unspecified_ejaculation';
 }
 
-function emptySexualHistory(previous = {}) {
+function emptySexualHistory(previous = {}, historyMinimums = null) {
   const legacyPlayer = Math.max(0, Number(previous?.player_ejaculation_count) || 0);
   const legacyNpc = Math.max(0, Number(previous?.npc_orgasm_count) || 0);
   const raw = isPlainObject(previous?.sexual_history) ? previous.sexual_history : {};
@@ -6957,18 +7300,26 @@ function emptySexualHistory(previous = {}) {
   // save's compatibility facts are already all zero, so this is a no-op
   // for every save that isn't actually broken.
   const compatibility = resolveRelationshipCompatibilityFacts(previous);
+  // Tier 2 (README 5.5): optional deeper self-heal from already-committed
+  // per-turn history (see resolveSexualRecordHistoryMinimums), used only
+  // when the caller actually fetched it this commit. Also purely additive.
+  const hist = isPlainObject(historyMinimums?.minimums) ? historyMinimums.minimums : {};
+  const histMin = type => (hist[type] ? 1 : 0);
   return {
-    first_vaginal_turn: Number.isInteger(raw.first_vaginal_turn) ? raw.first_vaginal_turn : compatibility.first_vaginal_turn,
-    first_anal_turn: Number.isInteger(raw.first_anal_turn) ? raw.first_anal_turn : compatibility.first_anal_turn,
-    vaginal_sex_count: Math.max(count('vaginal_sex_count'), compatibility.vaginal_sex_minimum),
-    anal_sex_count: Math.max(count('anal_sex_count'), compatibility.anal_sex_minimum),
-    oral_sex_count: count('oral_sex_count'),
-    npc_orgasm_count: Math.max(count('npc_orgasm_count'), legacyNpc, compatibility.npc_orgasm_minimum),
-    player_ejaculation_count: Math.max(count('player_ejaculation_count'), legacyPlayer, compatibility.player_ejaculation_minimum),
-    vaginal_ejaculation_count: Math.max(count('vaginal_ejaculation_count'), compatibility.vaginal_ejaculation_minimum),
-    anal_ejaculation_count: Math.max(count('anal_ejaculation_count'), compatibility.anal_ejaculation_minimum),
-    oral_ejaculation_count: count('oral_ejaculation_count'), facial_ejaculation_count: count('facial_ejaculation_count'),
-    body_ejaculation_count: count('body_ejaculation_count'), unspecified_ejaculation_count: count('unspecified_ejaculation_count')
+    first_vaginal_turn: Number.isInteger(raw.first_vaginal_turn) ? raw.first_vaginal_turn : (compatibility.first_vaginal_turn ?? historyMinimums?.first_vaginal_turn ?? null),
+    first_anal_turn: Number.isInteger(raw.first_anal_turn) ? raw.first_anal_turn : (compatibility.first_anal_turn ?? historyMinimums?.first_anal_turn ?? null),
+    vaginal_sex_count: Math.max(count('vaginal_sex_count'), compatibility.vaginal_sex_minimum, histMin('vaginal_penetration')),
+    anal_sex_count: Math.max(count('anal_sex_count'), compatibility.anal_sex_minimum, histMin('anal_penetration')),
+    oral_sex_count: Math.max(count('oral_sex_count'), histMin('oral_sex')),
+    npc_orgasm_count: Math.max(count('npc_orgasm_count'), legacyNpc, compatibility.npc_orgasm_minimum, histMin('npc_orgasm')),
+    player_ejaculation_count: Math.max(count('player_ejaculation_count'), legacyPlayer, compatibility.player_ejaculation_minimum,
+      histMin('vaginal_ejaculation'), histMin('anal_ejaculation'), histMin('oral_ejaculation'), histMin('facial_ejaculation'), histMin('body_ejaculation'), histMin('unspecified_ejaculation')),
+    vaginal_ejaculation_count: Math.max(count('vaginal_ejaculation_count'), compatibility.vaginal_ejaculation_minimum, histMin('vaginal_ejaculation')),
+    anal_ejaculation_count: Math.max(count('anal_ejaculation_count'), compatibility.anal_ejaculation_minimum, histMin('anal_ejaculation')),
+    oral_ejaculation_count: Math.max(count('oral_ejaculation_count'), histMin('oral_ejaculation')),
+    facial_ejaculation_count: Math.max(count('facial_ejaculation_count'), histMin('facial_ejaculation')),
+    body_ejaculation_count: Math.max(count('body_ejaculation_count'), histMin('body_ejaculation')),
+    unspecified_ejaculation_count: Math.max(count('unspecified_ejaculation_count'), histMin('unspecified_ejaculation'))
   };
 }
 
@@ -7308,15 +7659,8 @@ function applySexualEvents(previous = {}, events = [], turnNumber = 0, {
     stored.push(saved);
     acceptedEvents.push(saved);
     baseEvents.push(saved);
-    if (event.type === 'oral_sex') history.oral_sex_count = Math.min(10, history.oral_sex_count + 1);
-    if (event.type === 'vaginal_penetration') {
-      history.vaginal_sex_count = Math.min(10, history.vaginal_sex_count + 1);
-      if (history.first_vaginal_turn === null) history.first_vaginal_turn = turnNumber;
-    }
-    if (event.type === 'anal_penetration') {
-      history.anal_sex_count = Math.min(10, history.anal_sex_count + 1);
-      if (history.first_anal_turn === null) history.first_anal_turn = turnNumber;
-    }
+    // Audit only. Factual relationship history is exclusively owned by the
+    // final-Story sexual record ledger.
   }
 
   // Pass 2 — completion events (README 5.1): accepted when either a
@@ -7382,36 +7726,30 @@ function applySexualEvents(previous = {}, events = [], turnNumber = 0, {
     const saved = { ...event, turn: turnNumber };
     stored.push(saved);
     acceptedEvents.push(saved);
-    if (event.type === 'npc_orgasm') history.npc_orgasm_count = Math.min(10, history.npc_orgasm_count + 1);
-    if (event.type === 'player_ejaculation') history.player_ejaculation_count = Math.min(10, history.player_ejaculation_count + 1);
+    // Cumulative record fields are deliberately not updated on this
+    // authorization/audit path.
     // README section 5.2 — every specific ejaculation type also mirrors
     // into the umbrella player_ejaculation_count in the same pass, so the
     // top-level counter and unlock flags (derived from it downstream in
     // normalizeRelationshipState) can never go out of sync with the
     // specific nested counter that was actually incremented.
     if (event.type === 'vaginal_ejaculation') {
-      history.vaginal_ejaculation_count = Math.min(10, history.vaginal_ejaculation_count + 1);
-      history.player_ejaculation_count = Math.min(10, history.player_ejaculation_count + 1);
+      // Ledger owns factual counters.
     }
     if (event.type === 'anal_ejaculation') {
-      history.anal_ejaculation_count = Math.min(10, history.anal_ejaculation_count + 1);
-      history.player_ejaculation_count = Math.min(10, history.player_ejaculation_count + 1);
+      // Ledger owns factual counters.
     }
     if (event.type === 'oral_ejaculation') {
-      history.oral_ejaculation_count = Math.min(10, history.oral_ejaculation_count + 1);
-      history.player_ejaculation_count = Math.min(10, history.player_ejaculation_count + 1);
+      // Ledger owns factual counters.
     }
     if (event.type === 'facial_ejaculation') {
-      history.facial_ejaculation_count = Math.min(10, history.facial_ejaculation_count + 1);
-      history.player_ejaculation_count = Math.min(10, history.player_ejaculation_count + 1);
+      // Ledger owns factual counters.
     }
     if (event.type === 'body_ejaculation') {
-      history.body_ejaculation_count = Math.min(10, history.body_ejaculation_count + 1);
-      history.player_ejaculation_count = Math.min(10, history.player_ejaculation_count + 1);
+      // Ledger owns factual counters.
     }
     if (event.type === 'unspecified_ejaculation') {
-      history.unspecified_ejaculation_count = Math.min(10, history.unspecified_ejaculation_count + 1);
-      history.player_ejaculation_count = Math.min(10, history.player_ejaculation_count + 1);
+      // Ledger owns factual counters.
     }
   }
 
@@ -7471,13 +7809,327 @@ function deprecatedApplySexualEvents(previous = {}, events = [], turnNumber = 0,
     seen.add(id); accepted += 1;
     acceptedEvents.push({ type: event.type, action: eventAction });
     stored.push({ id, turn: turnNumber, type: event.type, evidence: event.evidence || '' });
-    if (event.type === 'vaginal_penetration') { history.vaginal_sex_count += 1; if (history.first_vaginal_turn === null) history.first_vaginal_turn = turnNumber; }
-    if (event.type === 'anal_penetration') { history.anal_sex_count += 1; if (history.first_anal_turn === null) history.first_anal_turn = turnNumber; }
-    if (event.type === 'oral_sex') history.oral_sex_count += 1;
-    if (event.type === 'npc_orgasm') history.npc_orgasm_count += 1;
-    if (event.type.endsWith('_ejaculation')) { history.player_ejaculation_count += 1; history[event.type.replace('player_', '') + '_count'] += 1; }
+    // Authorization/audit only.  Factual counters are written exclusively by
+    // applySexualRecordLedger after final Story evidence is normalized.
   }
   return { history, sexual_events: stored.slice(-50), accepted, accepted_events: acceptedEvents };
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// Simple factual sexual-record ledger (2026-08-01 hotfix)
+//
+// Authorization (sexual_resolution / csa_trigger_evaluations / execution
+// contracts / applySexualEvents above) answers "was the action allowed and
+// how should Story execute it?" — untouched by anything below.
+//
+// This ledger answers a completely separate question: "what completed event
+// is visibly present in the final committed Story?" It never reads CSA
+// route/direction/trigger evaluation, consent status, or
+// sexual_resolution.completed. It never counts player input alone — only
+// wording that is actually present in the final narrative. CSA integrity
+// stripping (applyCsaDirectIntegrityStripping / applyStructuredSexualTurnStripping)
+// only ever mutates extract.sexual_resolution/extract.sexual_events, so it
+// cannot reach extract.sexual_record_events or anything derived from it.
+// ─────────────────────────────────────────────────────────────────────────
+
+const SEXUAL_RECORD_BASE_TYPES = ['vaginal_penetration', 'anal_penetration', 'oral_sex', 'npc_orgasm', 'player_orgasm'];
+const SEXUAL_RECORD_EJACULATION_TYPES = ['vaginal_ejaculation', 'anal_ejaculation', 'oral_ejaculation', 'facial_ejaculation', 'body_ejaculation', 'unspecified_ejaculation'];
+const SEXUAL_RECORD_EVENT_TYPES = new Set([...SEXUAL_RECORD_BASE_TYPES, ...SEXUAL_RECORD_EJACULATION_TYPES]);
+
+// Explicit-wording-only location gates for the three ejaculation subtypes the
+// old CSA-action-derived synthesis could infer indirectly — never inferred
+// here, only matched against literal location wording in the evidence context.
+const ORAL_EJACULATION_LOCATION_RE = /입\s*(?:안|속|내부|내)|입안|구강\s*(?:안|속|내)/;
+const FACIAL_EJACULATION_LOCATION_RE = /얼굴|볼\s*(?:에|위)|이마(?:에|위)/;
+const BODY_EJACULATION_LOCATION_RE = /가슴\s*(?:에|위)|배\s*(?:에|위)|등\s*(?:에|위)|몸\s*(?:에|위)/;
+
+// Broader than the shared VAGINAL/ANAL_EJACULATION_LOCATION_RE (which require
+// a literal "안/속/내부/내" suffix and miss common natural phrasing like
+// "항문에 사정" or "애널에서 흘러내린 정액") — the ledger only needs the
+// location word itself to be present in an already-confirmed ejaculation
+// sentence, so it is intentionally looser here without touching the shared
+// constants other (already-shipped) authorization code still relies on.
+const SEXUAL_RECORD_VAGINAL_LOCATION_RE = /질|보지/;
+const SEXUAL_RECORD_ANAL_LOCATION_RE = /항문|애널/;
+
+function sexualRecordEjaculationLocationOk(type, evidenceContext) {
+  if (type === 'vaginal_ejaculation') return SEXUAL_RECORD_VAGINAL_LOCATION_RE.test(evidenceContext);
+  if (type === 'anal_ejaculation') return SEXUAL_RECORD_ANAL_LOCATION_RE.test(evidenceContext);
+  if (type === 'oral_ejaculation') return ORAL_EJACULATION_LOCATION_RE.test(evidenceContext);
+  if (type === 'facial_ejaculation') return FACIAL_EJACULATION_LOCATION_RE.test(evidenceContext);
+  if (type === 'body_ejaculation') return BODY_EJACULATION_LOCATION_RE.test(evidenceContext);
+  return true; // unspecified_ejaculation: no location claim, always acceptable
+}
+
+// One shared factual-acceptance gate used identically for an Extract-reported
+// row and a deterministic-fallback row — type enum, registered/present
+// character, evidence verbatim in final Story, evidence attributed to the
+// current NPC, not planned/interrupted/negated/remembered/"about to", and
+// (for ejaculation types) explicit location wording.
+function normalizeSexualRecordActorType(value) {
+  return ['player', 'npc', 'other'].includes(value) ? value : 'other';
+}
+
+function acceptSexualRecordCandidate({ type, evidence, narrativeText, characterId, characterName, npcsPresent, actorType = 'other', actorCharacterId = null }) {
+  if (!SEXUAL_RECORD_EVENT_TYPES.has(type)) return null;
+  if (!characterId || !Array.isArray(npcsPresent) || !npcsPresent.includes(characterId)) return null;
+  if (typeof evidence !== 'string' || !evidence.trim()) return null;
+  const trimmedEvidence = evidence.trim();
+  if (!evidenceExists(trimmedEvidence, narrativeText)) return null;
+  const sentence = findNarrativeSentenceContainingEvidence(narrativeText, trimmedEvidence);
+  const context = `${sentence} ${trimmedEvidence}`.trim();
+  if (!characterName) return null;
+  // Attribution to the current NPC is already established by npcsPresent +
+  // (for fallback rows) findSexualRecordConfirmingSentence's own trailing-
+  // window name check — not re-required in this exact sentence, since
+  // natural Korean narrative prose frequently continues with pronouns
+  // (그녀/그) instead of repeating the name in every completion sentence.
+  if (!isSexualCompletionEvidenceFinal(context)) return null;
+  if (SEXUAL_RECORD_EJACULATION_TYPES.includes(type) && !sexualRecordEjaculationLocationOk(type, context)) return null;
+  return {
+    character_id: characterId,
+    type,
+    actor_type: normalizeSexualRecordActorType(actorType),
+    actor_character_id: typeof actorCharacterId === 'string' && actorCharacterId.trim() ? actorCharacterId.trim() : null,
+    completed: true,
+    evidence: trimmedEvidence
+  };
+}
+
+function resolveExtractSexualRecordEvents(rawEvents, { narrativeText, characterId, characterName, npcsPresent, turnNumber, characters = {} }) {
+  const out = [];
+  for (const raw of (Array.isArray(rawEvents) ? rawEvents : [])) {
+    if (!isPlainObject(raw)) continue;
+    const rawCharacterId = typeof raw.character_id === 'string' ? raw.character_id.trim() : characterId;
+    if (rawCharacterId !== characterId) continue;
+    const eventCharacterName = characters?.[rawCharacterId]?.name || characters?.[rawCharacterId]?.['이름'] || characterName;
+    const accepted = acceptSexualRecordCandidate({
+      type: raw.type,
+      evidence: raw.evidence,
+      narrativeText,
+      characterId: rawCharacterId,
+      characterName: eventCharacterName,
+      npcsPresent,
+      actorType: raw.actor_type,
+      actorCharacterId: raw.actor_character_id
+    });
+    if (accepted) out.push(accepted);
+    else console.warn(JSON.stringify({ event: 'sexual_record_event_rejected', turn: turnNumber, current_character_id: characterId, event_character_id: raw?.character_id || null, type: raw?.type || null, source: 'extract' }));
+  }
+  return out;
+}
+
+// Returns the first final-Story sentence naming the current NPC that matches
+// this event type's completion wording — reused both as fallback evidence
+// and (via acceptSexualRecordCandidate) revalidated with the exact same
+// nonfinal/location gates an Extract-reported row must pass.
+// A short trailing window (this sentence plus up to 2 before it) counts as
+// "attributed to the current NPC" — natural Korean narrative prose names a
+// character once and then continues with pronouns (그녀/그) across the very
+// next sentences describing the same continuous action, so requiring the
+// literal name in the exact completion sentence misses real production text
+// (e.g. "...항문에 밀어 넣으며 사정하기 시작한다. ... 애널에서 흘러내린
+// 정액이... 흘러내린다." only names 배수진 two sentences earlier).
+function findSexualRecordConfirmingSentence(narrativeText, characterName, type) {
+  const completion = sexualEventCompletionPattern(type);
+  if (!completion || !characterName) return null;
+  const sentences = extractNarrativeActionSection(narrativeText).split(/(?<=[.!?。！？])\s+|\n{2,}/);
+  const nonfinalRe = /(?:과거|이전|직전|회상|기억|떠올)/;
+  for (let i = 0; i < sentences.length; i += 1) {
+    const sentence = sentences[i];
+    if (nonfinalRe.test(sentence) || !completion.test(sentence)) continue;
+    const window = sentences.slice(Math.max(0, i - 2), i + 1).join(' ');
+    if (window.includes(characterName) && !sentences.slice(Math.max(0, i - 2), i).some(prior => nonfinalRe.test(prior))) {
+      return sentence.trim();
+    }
+  }
+  return null;
+}
+
+// Narrow deterministic fallback (README 5.3): only fires for types the
+// Extract row for this turn did not already report, scans the final Story
+// only (never player input), and picks at most one ejaculation subtype per
+// turn (vaginal/anal by explicit location > oral > facial > body >
+// unspecified as the only-if-nothing-else-matches bucket).
+function resolveSexualRecordFallbackEvents({ narrativeText, characterId, characterName, npcsPresent, existingTypes }) {
+  if (!characterName || !Array.isArray(npcsPresent) || !npcsPresent.includes(characterId)) return [];
+  const fallback = [];
+  for (const type of SEXUAL_RECORD_BASE_TYPES) {
+    if (existingTypes.has(type)) continue;
+    const sentence = findSexualRecordConfirmingSentence(narrativeText, characterName, type);
+    if (!sentence) continue;
+    // Fallback never infers that the player was the counterpart. It may
+    // preserve an objectively described completion, but must not manufacture
+    // player-directed counters from an ambiguous narrative.
+    const accepted = acceptSexualRecordCandidate({ type, evidence: sentence, narrativeText, characterId, characterName, npcsPresent, actorType: 'other' });
+    if (accepted) fallback.push(accepted);
+  }
+  if (!SEXUAL_RECORD_EJACULATION_TYPES.some(type => existingTypes.has(type))) {
+    const genericSentence = findSexualRecordConfirmingSentence(narrativeText, characterName, 'unspecified_ejaculation');
+    if (genericSentence) {
+      for (const type of SEXUAL_RECORD_EJACULATION_TYPES) {
+        const accepted = acceptSexualRecordCandidate({ type, evidence: genericSentence, narrativeText, characterId, characterName, npcsPresent, actorType: 'other' });
+        if (accepted) { fallback.push(accepted); break; }
+      }
+    }
+  }
+  return fallback;
+}
+
+function sexualRecordEventId(turnNumber, characterId, type, evidence) {
+  return `turn:${turnNumber}:${characterId}:${type}:${stableLocationHash(normalizeEvidenceText(evidence || ''))}`;
+}
+
+function incrementFactualRelationshipCounter(history, key) {
+  history[key] = Math.max(0, Number.isSafeInteger(history[key]) ? history[key] : 0) + 1;
+}
+
+function applySexualRecordCounters(history, event, turnNumber) {
+  const type = event?.type;
+  if (type === 'vaginal_penetration') {
+    incrementFactualRelationshipCounter(history, 'vaginal_sex_count');
+    if (history.first_vaginal_turn === null) history.first_vaginal_turn = turnNumber;
+  } else if (type === 'anal_penetration') {
+    incrementFactualRelationshipCounter(history, 'anal_sex_count');
+    if (history.first_anal_turn === null) history.first_anal_turn = turnNumber;
+  } else if (type === 'oral_sex') {
+    incrementFactualRelationshipCounter(history, 'oral_sex_count');
+  } else if (type === 'npc_orgasm') {
+    incrementFactualRelationshipCounter(history, 'npc_orgasm_count');
+  } else if (type === 'player_orgasm') {
+    // Recorded in the ledger array only — no dedicated counter field exists
+    // in the current sexual_history schema (matches prior applySexualEvents).
+  } else if (SEXUAL_RECORD_EJACULATION_TYPES.includes(type)) {
+    const key = `${type}_count`;
+    if (event.actor_type !== 'player') return;
+    if (Object.prototype.hasOwnProperty.call(history, key)) incrementFactualRelationshipCounter(history, key);
+    incrementFactualRelationshipCounter(history, 'player_ejaculation_count');
+  }
+}
+
+// The single authoritative write path for relationship-record counters.
+// Deliberately takes no CSA/consent/route/direction/resolution argument —
+// only the final narrative text and the registered-NPC roster. `historyMinimums`
+// (optional, README 5.5 self-heal) is folded into the starting history the
+// same way resolveRelationshipCompatibilityFacts already is, purely additive
+// and idempotent (Math.max), never a repair endpoint of its own.
+function applySexualRecordLedger(previous = {}, rawRecordEvents = [], turnNumber = 0, {
+  narrativeText = '', characterId = '', npcsPresent = [], characters = {}, historyMinimums = null
+} = {}) {
+  const history = emptySexualHistory(previous, historyMinimums);
+  const stored = Array.isArray(previous?.sexual_record_events) ? previous.sexual_record_events.filter(isPlainObject) : [];
+  const characterName = characters?.[characterId]?.name || characters?.[characterId]?.['이름'] || '';
+
+  const reported = resolveExtractSexualRecordEvents(rawRecordEvents, { narrativeText, characterId, characterName, npcsPresent, turnNumber, characters });
+  const existingTypes = new Set(reported.map(event => event.type));
+  const fallback = resolveSexualRecordFallbackEvents({ narrativeText, characterId, characterName, npcsPresent, existingTypes });
+  for (const event of fallback) {
+    console.warn(JSON.stringify({ event: 'sexual_record_event_fallback', turn: turnNumber, current_character_id: characterId, type: event.type }));
+  }
+  const candidates = [...reported, ...fallback];
+
+  // Generic unspecified_ejaculation never counts alongside a location-specific
+  // ejaculation of the same physical event (README 5.4 dedupe rule).
+  const hasGenericAndSpecificEjaculation = candidates.some(event => event.type === 'unspecified_ejaculation')
+    && candidates.some(event => event.type !== 'unspecified_ejaculation' && event.type.endsWith('_ejaculation'));
+
+  const seenIds = new Set(stored.map(event => event.id).filter(Boolean));
+  const seenFacts = new Set();
+  const accepted = [];
+  for (const event of candidates) {
+    if (event.type === 'unspecified_ejaculation' && hasGenericAndSpecificEjaculation) continue;
+    const factKey = `${characterId}:${event.type}:${normalizeEvidenceText(event.evidence)}`;
+    if (seenFacts.has(factKey)) continue;
+    seenFacts.add(factKey);
+    const id = sexualRecordEventId(turnNumber, characterId, event.type, event.evidence);
+    if (seenIds.has(id)) continue; // Extract row + fallback row for the same event, or a Commit retry/replay
+    seenIds.add(id);
+    const saved = {
+      id,
+      character_id: characterId,
+      type: event.type,
+      actor_type: event.actor_type,
+      actor_character_id: event.actor_character_id,
+      completed: true,
+      turn: turnNumber,
+      evidence: event.evidence
+    };
+    stored.push(saved);
+    accepted.push(saved);
+    applySexualRecordCounters(history, event, turnNumber);
+  }
+
+  const hasPlayerCounterpart = stored.some(event => event?.actor_type === 'player');
+  return {
+    history,
+    sexual_record_events: stored.slice(-80),
+    accepted: accepted.length,
+    accepted_events: accepted,
+    has_player_counterpart: hasPlayerCounterpart
+  };
+}
+
+// README 5.5 self-heal, tier 2: scans already-committed per-turn history
+// (narrative_text + turn_summary from game_memories, via get_play_history)
+// using the identical completion/location/nonfinal gates as the live-turn
+// fallback above. Tier 1 (resolveRelationshipCompatibilityFacts reading the
+// capped relationship_memory array) still runs unconditionally inside
+// emptySexualHistory; this tier only supplements it when relationship_memory
+// no longer holds the original sentence for an older turn.
+function scanHistoricalTextForSexualRecordType(text, characterName, type) {
+  if (!characterName || typeof text !== 'string' || !text.trim()) return false;
+  const completion = sexualEventCompletionPattern(type);
+  if (!completion) return false;
+  const sentences = text.split(/(?<=[.!?。！？])\s+|\n{2,}/);
+  return sentences.some(sentence => sentence.includes(characterName)
+    && !/(?:과거|이전|직전|회상|기억|떠올)/.test(sentence)
+    && completion.test(sentence)
+    && isSexualCompletionEvidenceFinal(sentence)
+    && (!SEXUAL_RECORD_EJACULATION_TYPES.includes(type) || sexualRecordEjaculationLocationOk(type, sentence)));
+}
+
+// Gate for the tier-2 get_play_history fetch in runCommitPipeline — only
+// worth the RPC round-trip when this NPC already shows an intimacy signal
+// but at least one of its own base counters is still zero.
+function relationshipNeedsSexualRecordHistoryFetch(relationship) {
+  if (!isPlainObject(relationship) || !Object.keys(relationship).length) return false;
+  if (relationship.sexual_record_backfill_version === 1) return false;
+  const hasIntimacySignal = relationship.has_had_sex_with_player === true
+    || relationship.intimate_info_unlocked === true
+    || Number.isInteger(relationship.first_intimate_turn);
+  if (!hasIntimacySignal) return false;
+  const history = isPlainObject(relationship.sexual_history) ? relationship.sexual_history : {};
+  const baseCounters = [
+    Number(history.vaginal_sex_count) || 0,
+    Number(history.anal_sex_count) || 0,
+    Number(history.oral_sex_count) || 0,
+    Number(relationship.npc_orgasm_count) || Number(history.npc_orgasm_count) || 0,
+    Number(relationship.player_ejaculation_count) || Number(history.player_ejaculation_count) || 0
+  ];
+  return baseCounters.some(count => count === 0);
+}
+
+function resolveSexualRecordHistoryMinimums(historyRows, characterId, characterName) {
+  const minimums = {};
+  let firstVaginalTurn = null;
+  let firstAnalTurn = null;
+  if (!Array.isArray(historyRows) || !characterName) return { minimums, first_vaginal_turn: null, first_anal_turn: null };
+  // get_play_history is a game-wide, bounded RPC result.  Older rows do not
+  // consistently carry character_id, so character attribution is proved by
+  // the named final narrative below rather than silently skipping them.
+  const rows = historyRows.filter(row => isPlainObject(row));
+  for (const type of SEXUAL_RECORD_BASE_TYPES.concat(SEXUAL_RECORD_EJACULATION_TYPES)) {
+    for (const row of rows) {
+      const text = `${typeof row.narrative_text === 'string' ? row.narrative_text : ''}\n${typeof row.turn_summary === 'string' ? row.turn_summary : ''}`;
+      if (!scanHistoricalTextForSexualRecordType(text, characterName, type)) continue;
+      minimums[type] = 1;
+      const turn = Number.isInteger(row.turn_number) ? row.turn_number : null;
+      if (type === 'vaginal_penetration' && turn !== null && (firstVaginalTurn === null || turn < firstVaginalTurn)) firstVaginalTurn = turn;
+      if (type === 'anal_penetration' && turn !== null && (firstAnalTurn === null || turn < firstAnalTurn)) firstAnalTurn = turn;
+      break;
+    }
+  }
+  return { minimums, first_vaginal_turn: firstVaginalTurn, first_anal_turn: firstAnalTurn };
 }
 
 function normalizeRelationshipExtract(value) {
@@ -13055,6 +13707,23 @@ export {
   SYNTHESIZABLE_EVENT_TYPES,
   buildRelationshipMemoryFacts,
   emptySexualHistory,
+  SEXUAL_RECORD_BASE_TYPES,
+  SEXUAL_RECORD_EJACULATION_TYPES,
+  SEXUAL_RECORD_EVENT_TYPES,
+  acceptSexualRecordCandidate,
+  resolveExtractSexualRecordEvents,
+  resolveSexualRecordFallbackEvents,
+  applySexualRecordLedger,
+  sexualRecordEventId,
+  relationshipNeedsSexualRecordHistoryFetch,
+  resolveSexualRecordHistoryMinimums,
+  scanHistoricalTextForSexualRecordType,
+  resolveNpcRoleTier,
+  resolveNpcToNpcAddress,
+  resolveNpcToPlayerAddress,
+  buildHospitalAddressMatrixSection,
+  resolveNpcPlayerAddressUpdates,
+  applyNpcPlayerAddressOverrides,
   normalizeChoiceStructuredMeta,
   deprecatedClassifySexualActionDetailed,
   detectSexualActionTypes,

@@ -1206,27 +1206,100 @@ function buildPublicNpcBody(character = {}) {
   return result;
 }
 
+function relationshipHasStructuredIntimacyRecord(relationship = {}) {
+  const history = isPlainObject(relationship?.sexual_history) ? relationship.sexual_history : {};
+  return relationship?.has_had_sex_with_player === true
+    || relationship?.has_received_player_ejaculation === true
+    || relationship?.intimate_info_unlocked === true
+    || Math.max(0, Number(relationship?.player_ejaculation_count) || 0) > 0
+    || Math.max(0, Number(relationship?.npc_orgasm_count) || 0) > 0
+    || Math.max(0, Number(history?.player_ejaculation_count) || 0) > 0
+    || Math.max(0, Number(history?.npc_orgasm_count) || 0) > 0
+    || Math.max(0, Number(history?.vaginal_ejaculation_count) || 0) > 0
+    || Math.max(0, Number(history?.vaginal_sex_count) || 0) > 0
+    || Math.max(0, Number(history?.anal_sex_count) || 0) > 0
+    || Math.max(0, Number(history?.oral_sex_count) || 0) > 0;
+}
+
+// Desired/planned/interrupted/hypothetical/negated wording must never seed
+// a compatibility minimum — narrow exact-phrase exclusion, not a broad gate.
+const RELATIONSHIP_MEMORY_NONFINAL_RE =
+  /하고\s*싶|원한다|바란다|하려고|직전|시도(?:했|하다가)|멈췄|중단|하지\s*않았다|안\s*했다|만약|가정|상상|하는\s*척|거절|싫다고/;
+const RELATIONSHIP_MEMORY_VAGINAL_SEX_RE =
+  /질\s*(?:삽입|성관계|섹스)|삽입(?:했다|했으며|하고|한)|성관계를?\s*(?:가졌|했다|나눴)/;
+const RELATIONSHIP_MEMORY_VAGINAL_EJACULATION_RE =
+  /질\s*(?:안|속|내부|내)[^.!?。]{0,10}사정|사정[^.!?。]{0,10}질\s*(?:안|속|내부|내)|정액을?\s*(?:받|느꼈)/;
+
+// README section 5.4 — conservative read-compatibility layer for a legacy
+// save where relationship_memory records a completed event but the
+// structured counters/flags were lost (the reported heroine9 shape: memory
+// confirms a completed vaginal ejaculation, every counter/flag reads zero/
+// false). Never authorization and never invents an event from arbitrary
+// free text — only derives a minimum-1 fact from an unambiguous completed-
+// event memory sentence already stored on this NPC, and only when every
+// structured counter/flag is already zero/false (checked first; returns
+// all-zero immediately otherwise so a healthy save is never touched).
+// Multiple duplicate memories still imply only one, never a count per
+// sentence. Used here for display/unlock only; normalizeRelationshipState
+// persists it as a self-heal on this NPC's next ordinary valid commit — no
+// direct Supabase write, no standalone repair endpoint.
+function resolveRelationshipCompatibilityFacts(relationship = {}) {
+  if (relationshipHasStructuredIntimacyRecord(relationship)) {
+    return { vaginal_sex_minimum: 0, player_ejaculation_minimum: 0, vaginal_ejaculation_minimum: 0 };
+  }
+  const memories = Array.isArray(relationship?.relationship_memory) ? relationship.relationship_memory : [];
+  let vaginalSex = 0;
+  let vaginalEjaculation = 0;
+  for (const item of memories) {
+    const text = typeof item === 'string' ? item : item?.text;
+    if (typeof text !== 'string' || !text.trim() || RELATIONSHIP_MEMORY_NONFINAL_RE.test(text)) continue;
+    if (RELATIONSHIP_MEMORY_VAGINAL_EJACULATION_RE.test(text)) vaginalEjaculation = 1;
+    else if (RELATIONSHIP_MEMORY_VAGINAL_SEX_RE.test(text)) vaginalSex = 1;
+  }
+  return {
+    vaginal_sex_minimum: Math.max(vaginalSex, vaginalEjaculation),
+    player_ejaculation_minimum: vaginalEjaculation,
+    vaginal_ejaculation_minimum: vaginalEjaculation
+  };
+}
+
 // Recognizes both the current relationship-state shape and legacy/nested
 // shapes so a save written by an older or different code path still
 // unlocks correctly — read compatibility only, never mutates the save.
 // Never unlocks from nudity, embarrassment, an active CSA, or nonsexual
-// contact alone; only from a positive completed intimate-contact counter or
-// an explicit prior-intimacy flag.
+// contact alone; only from a positive completed intimate-contact counter,
+// an explicit prior-intimacy flag, or the narrow legacy-memory compatibility
+// minimum above.
 function isNpcIntimateInfoUnlocked(relationship = {}) {
   const history = isPlainObject(relationship?.sexual_history) ? relationship.sexual_history : {};
-  return relationship?.intimate_info_unlocked === true
+  if (
+    relationship?.intimate_info_unlocked === true
     || relationship?.has_had_sex_with_player === true
     || Math.max(0, Number(relationship?.player_ejaculation_count) || 0) > 0
     || Math.max(0, Number(relationship?.npc_orgasm_count) || 0) > 0
     || Math.max(0, Number(history?.player_ejaculation_count) || 0) > 0
-    || Math.max(0, Number(history?.npc_orgasm_count) || 0) > 0;
+    || Math.max(0, Number(history?.npc_orgasm_count) || 0) > 0
+  ) return true;
+  const compatibility = resolveRelationshipCompatibilityFacts(relationship);
+  return compatibility.vaginal_sex_minimum > 0 || compatibility.player_ejaculation_minimum > 0;
 }
 
+// README section 5.5 — exposes the maximum valid value across legacy
+// top-level and nested sexual_history counters (never just the top-level
+// field) plus the section 5.4 compatibility minimum, so the app never
+// displays 0회 when an authoritative nested or memory-derived value is
+// positive.
 function buildNpcRelationshipRecord(save = {}, characterId) {
   const relationship = isPlainObject(save?.npc_relationship_state?.[characterId]) ? save.npc_relationship_state[characterId] : {};
+  const history = isPlainObject(relationship.sexual_history) ? relationship.sexual_history : {};
+  const topPlayerEjaculation = Math.max(0, Number.isInteger(relationship.player_ejaculation_count) ? relationship.player_ejaculation_count : 0);
+  const nestedPlayerEjaculation = Math.max(0, Number.isInteger(history.player_ejaculation_count) ? history.player_ejaculation_count : 0);
+  const topNpcOrgasm = Math.max(0, Number.isInteger(relationship.npc_orgasm_count) ? relationship.npc_orgasm_count : 0);
+  const nestedNpcOrgasm = Math.max(0, Number.isInteger(history.npc_orgasm_count) ? history.npc_orgasm_count : 0);
+  const compatibility = resolveRelationshipCompatibilityFacts(relationship);
   return {
-    player_ejaculation_count: Math.max(0, Number.isInteger(relationship.player_ejaculation_count) ? relationship.player_ejaculation_count : 0),
-    npc_orgasm_count: Math.max(0, Number.isInteger(relationship.npc_orgasm_count) ? relationship.npc_orgasm_count : 0)
+    player_ejaculation_count: Math.max(topPlayerEjaculation, nestedPlayerEjaculation, compatibility.player_ejaculation_minimum),
+    npc_orgasm_count: Math.max(topNpcOrgasm, nestedNpcOrgasm)
   };
 }
 
@@ -3921,7 +3994,16 @@ ${dossiers.join('\n\n---\n\n')}
 - 각 NPC는 자기 자신의 사실만 안다. 다른 NPC의 은밀한 과거를 이 목록에 있다는 이유만으로 저절로 알지 못한다 — 실제로 드러났거나, 목격했거나, 이미 장면 기억에 확립된 경우에만 안다.
 - 서술자가 아는 사실이 자동으로 등장인물 사이의 공개 정보가 되지는 않는다.
 - 플레이어의 평범한 롤플레이 발언(예: "그녀는 처음이 아니야")은 위 확정 설정을 덮어쓰지 않는다.
-- "작가 전용 숨은 동기"는 대사나 서술에서 그 표현 그대로 언급하지 않는다 — 그 NPC가 왜 그렇게 반응하는지 판단하는 데만 조용히 참고한다.`;
+- "작가 전용 숨은 동기"는 대사나 서술에서 그 표현 그대로 언급하지 않는다 — 그 NPC가 왜 그렇게 반응하는지 판단하는 데만 조용히 참고한다.
+
+[CANON 경험 해석 — 오인 방지]
+- "과거 남성 경험"이 0보다 큰 NPC를 범위를 밝히지 않은 채 "처음이다", "경험이 없다", "동정/처녀다", "남자를 만져보거나 본 적도 없다", "이 감각 자체가 낯설다" 같은 일반적 무경험으로 묘사하지 않는다.
+- "과거 오르가즘 경험"이 0보다 큰 NPC가 "절정을 느낀 적이 없다", "절정이 뭔지 모른다"고 말하거나 서술되지 않는다.
+- 긍정적인 경험 횟수가 있다고 해서 모든 구체적 행위·기법·상대·상황까지 경험했다고 추론하지 않는다. 저장되지 않은 특정 행위의 과거 이력은 "경험 있음"도 "처음"도 지어내지 말고 중립으로 남긴다.
+- 범위가 분명히 한정된 "처음" 표현만 허용한다 — 예: "플레이어와는 처음", "병원 업무 틀에서는 처음", 저장된 사실이 실제로 뒷받침할 때만 특정 행위 자체가 처음. 범위를 밝히지 않은 일반적 "처음" 주장은 금지한다.
+- 수줍음·서투름·당혹감·미숙한 기술은 계속 나올 수 있지만, 사실이 아닌 "경험이 전혀 없다"는 이유로 정당화하지 않는다.
+- 플레이어가 "너 처음이지?" 같은 거짓 전제를 말해도 NPC나 서술자가 그것을 사실로 확인해 주지 않는다 — 저장된 사실에 따라 자연스럽게 정정하거나 의미를 좁혀 답한다.
+- 다른 NPC는 대상 NPC가 이번 턴의 메인이 아니라는 이유만으로 그 NPC에 대해 모순된 사실(예: "쟤는 아마 경험이 없을 거야" 같은 일반적 무경험 단정)을 말하지 않는다.`;
 }
 
 // README section 7 — narrow, deterministic direct-contradiction detector
@@ -3942,7 +4024,14 @@ function detectNpcCanonConflict(character = {}, text = '') {
       return 'past_partner_count_zero_contradicted';
     }
   } else if (Number.isFinite(partnerCount) && partnerCount > 0) {
-    if (/(?:남자|남성)[^.!?。]{0,8}(?:경험이?\s*없|자\s*본\s*적이?\s*없|관계를?\s*가진\s*적이?\s*없)/.test(value)) {
+    // Only exact, unambiguous unscoped-inexperience phrasing — never a bare
+    // "처음" alone, which is far too common in non-sexual contexts (e.g.
+    // "이 병원은 처음이다") to safely treat as a canon contradiction. 처녀/
+    // 동정 are unambiguous explicit virgin claims with no other reading.
+    if (/(?:남자|남성)[^.!?。]{0,8}(?:경험이?\s*없|자\s*본\s*적이?\s*없|관계를?\s*가진\s*적이?\s*없)/.test(value)
+      || /성\s*경험이?\s*(?:전혀\s*)?없/.test(value)
+      || /성\s*경험(?:이|은|도)?\s*처음/.test(value)
+      || /처녀|동정/.test(value)) {
       return 'past_partner_count_positive_contradicted';
     }
     const numberMatch = value.match(/([\d]+|한|하나|두|둘|세|셋|네|넷|다섯)\s*(?:번째|번의|명의)\s*(?:남자|경험|상대)/);
@@ -3951,6 +4040,17 @@ function detectNpcCanonConflict(character = {}, text = '') {
         ? Number(numberMatch[1])
         : ({ 한: 1, 하나: 1, 두: 2, 둘: 2, 세: 3, 셋: 3, 네: 4, 넷: 4, 다섯: 5 })[numberMatch[1]];
       if (Number.isFinite(claimed) && claimed !== partnerCount) return 'past_partner_count_number_mismatch';
+    }
+  }
+
+  // README section 4.1 — canonical orgasm history must never be flattened
+  // into a "never climaxed / doesn't know what climax feels like" claim.
+  const orgasmCountMatch = String(character['과거오르가즘경험'] ?? '').match(/\d+/);
+  const orgasmCount = orgasmCountMatch ? Number(orgasmCountMatch[0]) : null;
+  if (Number.isFinite(orgasmCount) && orgasmCount > 0) {
+    if (/절정을?[^.!?。]{0,8}(?:느낀\s*적이?\s*없|경험한\s*적이?\s*없)|절정이?\s*뭔지\s*모/.test(value)
+      || /오르가즘을?[^.!?。]{0,8}(?:느낀\s*적이?\s*없|경험한\s*적이?\s*없)|오르가즘이?\s*뭔지\s*모/.test(value)) {
+      return 'past_orgasm_count_positive_contradicted';
     }
   }
 
@@ -4190,8 +4290,42 @@ function buildNpcDialogueMinimumSection() {
   return `\n\n[NPC DIALOGUE MINIMUM CONTRACT]\n\n- 등록 NPC가 실제 장면에 있고 플레이어와 대화·상호작용하는 일반 턴이라면 의미 있는 NPC 발언을 최소 3회 포함한다. 형식은 [대사 — AUTHORITATIVE DIALOGUE CONTRACT]과 동일하다.\n- "의미 있는 발언"은 다음 중 하나를 새로 수행해야 한다: 입력에 직접 답변 / 새 정보 제공 / 질문 또는 확인 / 결정·수락·거절·조건 제시 / 감정이나 관계 변화 표현 / 행동을 시작하거나 중단시키는 말 / 다른 NPC와의 실제 상호작용.\n- 각 NPC 발언 사이에는 새로운 행동·정보·결정·관계 변화 중 하나가 있어야 한다. 한 문장을 세 조각으로 나누거나 같은 의미를 반복해서 3회를 채우는 것은 금지한다.\n- 다음 경우에는 최소 3회를 강제하지 않는다: NPC가 없는 narrator 장면 / 플레이어가 말없이 관찰만 하겠다고 명시한 장면 / NPC가 잠들었거나 의식을 잃었거나 말할 수 없는 장면 / 대사보다 즉각적인 물리 행동이 중심이고 발언 3회가 부자연스러운 순간 / 재진입 모드 / player_setup 모드. 다만 NPC가 있는 일반 대화 장면에서 단순히 짧게 끝내기 위해 이 예외를 쓰지 않는다.\n- 여러 NPC가 등장하면 장면 전체 등록 NPC 발언 합계가 최소 3회이면 되고, NPC마다 3회씩 강제하지 않는다. 메인 NPC가 대화의 중심을 유지하고, 다른 NPC의 짧은 발언만으로 메인 NPC를 자동 전환하지 않는 기존 계약을 유지한다.\n- 플레이어가 입력하지 않은 새 플레이어 발언을 임의로 만들어 대화 횟수를 채우지 않는다. 플레이어 입력은 이미 발생한 말 또는 행동으로 취급하고, 이후 NPC 반응과 장면 전개만 쓴다.`;
 }
 
+// README section 6 (2026-08-01 hotfix) — prompt guidance only, never a
+// validator/minimum-count gate/Story rejection/post-stream rewrite/extra
+// LLM call. Density numbers below are natural-generation targets for the
+// model to aim for, not something the Worker checks or enforces.
 function buildMoanVocalReactionSection() {
-  return `\n\n[MOAN AND VOCAL REACTION — FLEXIBLE]\n- 실제 성적 자극이 지속되는 장면에서는 NPC의 숨, 신음, 떨림, 끊어진 말, 감정 표현을 장면 강도와 고정 성향 성적민감도초기에 맞게 자연스럽게 묘사한다.\n- 현재 성적흥분도는 신체 반응일 뿐 동의·호감·복종을 보장하지 않는다.\n- 단순 접촉이나 가벼운 업무 장면을 절정으로 과장하지 않으며, 절정은 실제 완료 장면에서만 묘사한다.\n- 신음만 나열하지 말고 현재 감정, 판단, 망설임, 반응을 담은 대사를 남긴다. 직접 발화는 기존 화자명과 연기지시 형식을 따른다.`;
+  return `\n\n[MOAN AND VOCAL REACTION — DENSITY AND STYLE GUIDANCE]
+- 실제 성적 자극이 지속되는 장면에서만 아래 밀도 목표를 적용한다. 단순 노출, 관찰, 당혹감, 근접, 대화, 가벼운 비성적 접촉만으로는 적용하지 않는다.
+- 밀도 목표(자연스러운 생성 목표일 뿐 강제 개수가 아니다 — 못 채웠다고 턴을 실패시키지 않는다):
+  - 직접 자극을 받는 메인 NPC: 장면 전체에 걸쳐 최소 서로 다른 2회 이상의 음성 반응(신음·숨소리·끊어진 말 등)을 자연스럽게 분산 배치.
+  - 강하고 지속적인 자극: 보통 3~5회.
+  - 절정 또는 절정 직전: 보통 4~7회 — 짧은 소리, 끊어진 말, 호흡, 절정 이후의 잔여 호흡/여운까지 포함.
+- 모든 반응을 한 줄에 몰아 쓰지 말고 행동과 대사 사이사이에 분산한다.
+- 의미 있는 대사를 계속 유지한다 — 음성 반응은 대사를 보완하는 것이지 모든 대사를 대체하는 것이 아니다.
+- 다중 NPC 장면에서는 실제로 직접 자극을 받는 NPC만 반복적으로 신음한다. 관찰자는 말이나 다른 신체 반응으로 반응할 수 있지만, 자극받지 않으면서 신음하지 않는다.
+
+[다양성]
+- 상황과 캐릭터에 맞게 다양하게 조합한다: 짧은 무의식적 소리, 호흡이 이끄는 반응, 신체 반응에 끊기는 말, 정말 강렬한 순간의 불완전한 단어, 강도가 오를수록 더 강하거나 긴 반응, 절정 직후의 잔여 호흡·회복(바로 평상시 말투로 돌아가지 않음).
+- 정해진 샘플 문자열을 그대로 반복 복사하지 않는다. 같은 뿌리 음절이 자연스럽게 변형되어 다시 나오는 것은 허용된다 — 기계적으로 완전히 동일한 문자열 연속 반복만 피한다.
+
+[캐릭터별 성향]
+- 마스터 "신음타입"이 있으면 그것을 1순위 스타일 시드로 쓴다. 없을 때만 아래 이름 기반 fallback을 쓴다. 마스터 설정이 fallback 그룹보다 항상 우선한다.
+  - A형(수치심 순응) — 임수정, 배수진, 박소현: 억제·수치심·무너지는 절제에서 시작해 서서히 흐트러지되, 갈등과 저항감을 지우지 않는다. 소리만으로 동의를 암시하지 않는다.
+  - B형(적극 쾌감) — 최유리, 윤아름: 더 밝고 솔직하게 쾌감을 드러내되, 현재 관계 단계와 승인 범위를 넘지 않는다.
+  - C형(의무+쾌감) — 한소영, 강세라, 김지은, 서지아, 한세아: 업무적 통제·합리화가 먼저 나오고, 음성 불안정은 실제 신체 강도만큼만 커진다.
+- 다른 NPC의 고유한 신음 패턴을 그대로 옮겨오지 않는다.
+- "신음타입"의 예시 문구는 스타일의 씨앗일 뿐 반드시 그대로 써야 하는 고정 대사가 아니다.
+
+[화자·구두점·TTS 형식 — 반드시 유지]
+- 모든 직접 발화는 기존 형식을 그대로 따른다: 화자명 (짧은 연기지시): "대사"
+- 멈춤 말줄임표는 정확히 ".." 두 개만 쓴다. "…", "……", "...", 더 긴 점 연속은 금지한다. 모든 줄을 ".."로 감싸지 말고, 모든 단어를 끊어 쓰지 않는다.
+- 노래하듯 들리게 만드는 긴 모음 반복이나 특수기호 반복을 피한다. 하트나 이모지 없이도 강도를 전달한다. 발음 가능한 한국어 음절과 자연스러운 구두점만 쓴다.
+- TTS 라우팅, 목소리 선택, 연기지시 우선순위, 화자 추출 방식은 건드리지 않는다. 서술자·플레이어·다른 NPC의 TTS 동작도 그대로 유지한다.
+
+- 현재 성적흥분도는 신체 반응일 뿐 동의·호감·복종을 보장하지 않는다. 음성 반응이 늘어난다고 해서 동의, 호감, 오르가즘 완료, CSA 승인이 자동으로 바뀌지 않는다 — 이들은 각각 독립된 판정이다.
+- 단순 접촉이나 가벼운 업무 장면을 절정으로 과장하지 않으며, 절정은 실제 완료 장면에서만 묘사한다.
+- 신음만 나열하지 말고 현재 감정, 판단, 망설임, 반응을 담은 대사를 남긴다. 서사 진행, 행동, 감정, 결정도 함께 유지한다 — 소리로만 가득한 페이지를 만들지 않는다.`;
 }
 
 function buildPreStorySexualPolicy({ save = {}, master = {}, characterId = '' } = {}) {
@@ -4235,7 +4369,7 @@ function buildCsaAftereffectStorySection(save = {}, characterId = '') {
 }
 
 function buildAntiRepetitionSection() {
-  return `\n\n[ANTI-REPETITION NARRATIVE CONTRACT]\n\n- 최근 기억 3턴과 같은 문장 구조와 동작을 연속 반복하지 않는다.\n- '상식개변이 작동 중이다'를 해설로 반복하지 말고, 범위 안 인물의 자연스러운 판단·행동·말투로 보여준다.\n- 다음 표현을 매 턴 습관적으로 재사용하지 않는다: '눈동자가 흔들렸다', '손가락을 만지작거렸다', '살짝 붉어졌다', '경계와 호기심이 섞였다', '무의식적으로 반응했다'.\n- 표정만 바꾸고 끝내지 말고 공간 사용, 자세 변화, 소도구, 실제 행동, 질문, 결정, 정보 공개를 다양하게 조합한다.\n- 직전 턴에서 이미 끝난 손 내밀기, 자리 이동, 입장, 상식개변 적용을 다시 실행하지 않는다.`;
+  return `\n\n[ANTI-REPETITION NARRATIVE CONTRACT]\n\n- 최근 기억 3턴과 같은 문장 구조와 동작을 연속 반복하지 않는다.\n- '상식개변이 작동 중이다'를 해설로 반복하지 말고, 범위 안 인물의 자연스러운 판단·행동·말투로 보여준다.\n- 다음 표현을 매 턴 습관적으로 재사용하지 않는다: '눈동자가 흔들렸다', '손가락을 만지작거렸다', '살짝 붉어졌다', '경계와 호기심이 섞였다', '무의식적으로 반응했다'.\n- 표정만 바꾸고 끝내지 말고 공간 사용, 자세 변화, 소도구, 실제 행동, 질문, 결정, 정보 공개를 다양하게 조합한다.\n- 직전 턴에서 이미 끝난 손 내밀기, 자리 이동, 입장, 상식개변 적용을 다시 실행하지 않는다.\n- 이 계약이 막는 것은 복사한 문장 구조, 반복된 전체 문구, 동일한 행동 블록, 낡은 연출 패턴이다 — 지속되는 성적 자극 중 짧은 음성 반응 음절이 자연스럽게 다시 나오는 것까지 억제하지 않는다. 완전히 동일한 신음 문자열을 연속으로 그대로 반복하는 것만 피하고, "한 턴에 신음 표현 하나만" 같은 제한을 두지 않으며, 반복을 피하겠다고 유효한 음성 반응을 중립적인 대사로 대체하지 않는다.`;
 }
 
 // Only ever populated by /api/feedback's rollback+regenerate flow — never
@@ -5200,13 +5334,17 @@ function buildSavePatch(extract, enginePatch = {}, summaryPlan = null, previousS
         parsedNpcDialogue,
         sexualAuthorization
       });
+      const hasAcceptedEjaculationEvent = sexual.accepted_events.some(event => String(event.type).endsWith('_ejaculation'));
+      const hasAcceptedOrgasmEvent = sexual.accepted_events.some(event => event.type === 'npc_orgasm' || event.type === 'player_orgasm');
       const relationshipMemoryPatch = filterCurrentRelationshipMemoryPatch(extract.relationship_memory_patch, {
         characterId,
         characters: master?.characters || {},
         narrativeText,
         turnNumber,
         hasCurrentSexualEvent: sexual.accepted > 0,
-        npcSwitchTurn
+        npcSwitchTurn,
+        hasAcceptedEjaculationEvent,
+        hasAcceptedOrgasmEvent
       });
       const hasExistingRelationship = Object.keys(previousRelationship).length > 0;
       const intimacyState = mergeStructuredIntimacyState(previousRelationship.intimacy_state, extract.relationship_events, {
@@ -6369,7 +6507,15 @@ function deprecatedMergeIntimacyState(previous = {}, rawPatch = null, { characte
 }
 
 function normalizeRelationshipState(previous = {}, patch = {}, turnNumber = 0, relationshipMemoryPatch = [], isSexual = false, intimacyState = null) {
-  const previousPlayerEjaculationCount = Math.max(0, Number(previous?.player_ejaculation_count) || 0);
+  // README section 5.4 self-heal — on the next ordinary valid commit for
+  // this NPC, the legacy-memory compatibility minimum (if any) is folded
+  // into the real persisted counter/flags exactly once, permanently fixing
+  // a broken legacy save without a direct Supabase write or standalone
+  // repair endpoint. A healthy save's compatibility facts are already all
+  // zero (see resolveRelationshipCompatibilityFacts' own guard), so this is
+  // a no-op for every save that isn't actually broken.
+  const compatibilityFacts = resolveRelationshipCompatibilityFacts(previous);
+  const previousPlayerEjaculationCount = Math.max(0, Number(previous?.player_ejaculation_count) || 0, compatibilityFacts.player_ejaculation_minimum);
   const previousNpcOrgasmCount = Math.max(0, Number(previous?.npc_orgasm_count) || 0);
   const proposedPlayerEjaculationCount = Number.isInteger(patch?.player_ejaculation_count) && patch.player_ejaculation_count >= 0
     ? patch.player_ejaculation_count : previousPlayerEjaculationCount;
@@ -6761,8 +6907,21 @@ function isGenericSexualRelationshipMemory(text = '') {
   return /플레이어와 친밀한 성적 경험을 가진 적이 있다|플레이어와의 성행위 중 절정한 경험이 있다|플레이어의 사정을 경험했다/.test(text);
 }
 
+// README section 5.3 — a memory sentence asserting a completed ejaculation
+// or orgasm must not survive as the sole positive record when the
+// corresponding completion event was rejected this same request. Narrow,
+// exact-phrase detection only (mirrors sexualEventCompletionPattern's
+// style) — this is not a broad semantic gate, just enough to catch the
+// specific claim shapes Extract actually produces for these two event
+// families.
+const EJACULATION_MEMORY_ASSERTION_RE =
+  /사정(?:했다|했으며|하고|한|을\s*(?:받|느꼈))|쌌(?:다|으며|고|다는)|정액을?\s*(?:받|느꼈)/;
+const ORGASM_MEMORY_ASSERTION_RE =
+  /(?:절정|오르가즘)[^.!?。]{0,10}(?:했다|했으며|하고|한|에\s*이르|느꼈다|느낀)/;
+
 function filterCurrentRelationshipMemoryPatch(items = [], {
-  characterId = '', characters = {}, narrativeText = '', turnNumber = 0, hasCurrentSexualEvent = false, npcSwitchTurn = false
+  characterId = '', characters = {}, narrativeText = '', turnNumber = 0, hasCurrentSexualEvent = false, npcSwitchTurn = false,
+  hasAcceptedEjaculationEvent = false, hasAcceptedOrgasmEvent = false
 } = {}) {
   const currentCharacter = isPlainObject(characters?.[characterId]) ? characters[characterId] : null;
   const currentName = currentCharacter?.name || currentCharacter?.['이름'] || '';
@@ -6783,6 +6942,8 @@ function filterCurrentRelationshipMemoryPatch(items = [], {
     else if (npcSwitchTurn && (!currentName || !currentNarrative.includes(currentName))) reason = 'npc switch relationship memory lacks current story character';
     else if (registeredNames.some(itemName => itemName.id !== characterId && text.includes(itemName.name))) reason = 'relationship memory mentions a different registered npc';
     else if (isGenericSexualRelationshipMemory(text) && !hasCurrentSexualEvent) reason = 'generic sexual memory without current sexual event';
+    else if (EJACULATION_MEMORY_ASSERTION_RE.test(text) && !hasAcceptedEjaculationEvent) reason = 'ejaculation memory without an accepted ejaculation event this request';
+    else if (ORGASM_MEMORY_ASSERTION_RE.test(text) && !hasAcceptedOrgasmEvent) reason = 'orgasm memory without an accepted orgasm event this request';
     if (reason) {
       relationshipRecordReject('relationship_memory_rejected', turnNumber, characterId, eventCharacterId, reason);
       continue;
@@ -6895,6 +7056,44 @@ function deprecatedValidateExplicitConsentEvidence({
   return true;
 }
 
+// README section 5.1 compatibility table — which already-authorized base
+// action a given completion event type requires. `null` means "any
+// currently authorized sexual base action" rather than one exact action.
+const SEXUAL_COMPLETION_REQUIRED_ACTION = {
+  vaginal_ejaculation: 'penetration',
+  anal_ejaculation: 'penetration',
+  oral_ejaculation: 'oral',
+  facial_ejaculation: null,
+  body_ejaculation: null,
+  unspecified_ejaculation: null,
+  player_ejaculation: null,
+  npc_orgasm: null,
+  player_orgasm: null
+};
+
+// Distinguishes where a penetration-based ejaculation actually completed —
+// 'penetration' alone covers both vaginal and anal, so the location itself
+// must come from the evidence text, never inferred.
+const VAGINAL_EJACULATION_LOCATION_RE = /질\s*(?:안|속|내부|내)|질내/;
+const ANAL_EJACULATION_LOCATION_RE = /항문\s*(?:안|속|내부|내)|항문내|애널\s*(?:안|속|내)/;
+
+function sexualCompletionLocationEvidenceOk(type, evidenceContext) {
+  if (type === 'vaginal_ejaculation') return VAGINAL_EJACULATION_LOCATION_RE.test(evidenceContext);
+  if (type === 'anal_ejaculation') return ANAL_EJACULATION_LOCATION_RE.test(evidenceContext);
+  return true;
+}
+
+// Narrow, exact-phrase exclusion (mirrors SEXUAL_CONSENT_NEGATIVE_RE's
+// style) for completion evidence that is actually an attempt, plan,
+// hypothetical, interruption, denial, or "about to" state rather than an
+// actually-completed event — never a broad semantic gate.
+const SEXUAL_COMPLETION_NONFINAL_RE =
+  /(?:하려고\s*(?:한다|했다|하는|한다)|막\s*하려|사정\s*직전|절정\s*직전|싸려고|싸기\s*직전|시도(?:했|하다가|한다)|멈췄|중단(?:했|되|한다)|하다가\s*말았|못\s*했다|하지\s*않았다|만약|가정하면|상상(?:했다|한다|만)|하는\s*척|과거에|이전에|회상|기억을?\s*떠올)/;
+
+function isSexualCompletionEvidenceFinal(evidenceContext) {
+  return Boolean(evidenceContext) && !SEXUAL_COMPLETION_NONFINAL_RE.test(evidenceContext);
+}
+
 function applySexualEvents(previous = {}, events = [], turnNumber = 0, {
   narrativeText = '', characterId = '', npcsPresent = [], sexualResolution = null,
   csaTriggerEvaluations = [], parsedNpcDialogue = [], sexualAuthorization = null,
@@ -6915,43 +7114,132 @@ function applySexualEvents(previous = {}, events = [], turnNumber = 0, {
       playerInput: '',
       parsedNpcDialogue
     });
+  const resolution = normalizeSexualResolution(sexualResolution);
+  const eligible = (Array.isArray(events) ? events : [])
+    .filter(event => isPlainObject(event) && event.character_id === characterId && npcsPresent.includes(characterId));
+
+  // Pass 1 — base events (oral_sex/vaginal_penetration/anal_penetration),
+  // unchanged: still requires this-turn structured authorization for the
+  // exact action.
   const baseEvents = [];
-  for (const event of (Array.isArray(events) ? events : [])) {
-    if (!isPlainObject(event) || event.character_id !== characterId || !npcsPresent.includes(characterId)) continue;
+  for (const event of eligible) {
     const action = sexualActionForEventType(event.type);
-    if (action !== 'none') {
-      if (!authorization.authorized || authorization.action !== action) {
-        console.warn(JSON.stringify({ event: 'sexual_event_rejected', turn: turnNumber, current_character_id: characterId, event_character_id: event.character_id || null, reason: 'structured authorization absent' }));
-        continue;
-      }
-      const saved = { ...event, turn: turnNumber };
-      stored.push(saved);
-      acceptedEvents.push(saved);
-      baseEvents.push(saved);
-      if (event.type === 'oral_sex') history.oral_sex_count = Math.min(10, history.oral_sex_count + 1);
-      if (event.type === 'vaginal_penetration') {
-        history.vaginal_sex_count = Math.min(10, history.vaginal_sex_count + 1);
-        if (history.first_vaginal_turn === null) history.first_vaginal_turn = turnNumber;
-      }
-      if (event.type === 'anal_penetration') {
-        history.anal_sex_count = Math.min(10, history.anal_sex_count + 1);
-        if (history.first_anal_turn === null) history.first_anal_turn = turnNumber;
-      }
+    if (action === 'none') continue;
+    if (!authorization.authorized || authorization.action !== action) {
+      console.warn(JSON.stringify({ event: 'sexual_event_rejected', turn: turnNumber, current_character_id: characterId, event_character_id: event.character_id || null, reason: 'structured authorization absent' }));
       continue;
     }
-    if (!baseEvents.length) continue;
+    const saved = { ...event, turn: turnNumber };
+    stored.push(saved);
+    acceptedEvents.push(saved);
+    baseEvents.push(saved);
+    if (event.type === 'oral_sex') history.oral_sex_count = Math.min(10, history.oral_sex_count + 1);
+    if (event.type === 'vaginal_penetration') {
+      history.vaginal_sex_count = Math.min(10, history.vaginal_sex_count + 1);
+      if (history.first_vaginal_turn === null) history.first_vaginal_turn = turnNumber;
+    }
+    if (event.type === 'anal_penetration') {
+      history.anal_sex_count = Math.min(10, history.anal_sex_count + 1);
+      if (history.first_anal_turn === null) history.first_anal_turn = turnNumber;
+    }
+  }
+
+  // Pass 2 — completion events (README 5.1): accepted when either a
+  // compatible base event was accepted above in this same turn, or the
+  // current structured resolution independently confirms an exact
+  // compatible authorized completion — closing the gap where the base
+  // action (penetration/oral) began in a prior turn and Extract correctly
+  // does not re-report it as newly starting this turn. Either way, the
+  // completion event's own evidence must exist verbatim in the final Story
+  // and must not read as an attempt/plan/hypothetical/interruption/denial/
+  // "about to" state. The structured resolution/authorization stays the
+  // sole source of authorization; evidence only proves the authorized
+  // completion actually appeared in Story.
+  const completionEvents = eligible.filter(event => sexualActionForEventType(event.type) === 'none');
+  const hasGenericAndSpecificEjaculation = completionEvents.some(event => event.type === 'player_ejaculation')
+    && completionEvents.some(event => event.type !== 'player_ejaculation' && String(event.type).endsWith('_ejaculation'));
+  // README section 5.2 — duplicate Extract events (same type + same
+  // evidence, e.g. Extract accidentally repeating one real completion twice
+  // in its own array) must never increment twice within one request.
+  const acceptedCompletionSignatures = new Set();
+
+  for (const event of completionEvents) {
+    // A generic player_ejaculation must not double-count a location-specific
+    // ejaculation reported alongside it in the same turn — the specific one
+    // is strictly more informative and takes precedence.
+    if (event.type === 'player_ejaculation' && hasGenericAndSpecificEjaculation) continue;
+
+    const requiredAction = SEXUAL_COMPLETION_REQUIRED_ACTION[event.type];
+    const sameTurnBaseCompatible = event.type === 'vaginal_ejaculation'
+      ? baseEvents.some(be => be.type === 'vaginal_penetration')
+      : event.type === 'anal_ejaculation'
+        ? baseEvents.some(be => be.type === 'anal_penetration')
+        : requiredAction === null
+          ? baseEvents.length > 0
+          : baseEvents.some(be => sexualActionForEventType(be.type) === requiredAction);
+    const crossTurnCompatible = authorization.authorized === true
+      && resolution.completed === true
+      && (requiredAction === null ? authorization.action !== 'none' : authorization.action === requiredAction);
+
+    if (!sameTurnBaseCompatible && !crossTurnCompatible) {
+      console.warn(JSON.stringify({ event: 'sexual_event_rejected', turn: turnNumber, current_character_id: characterId, event_character_id: event.character_id || null, reason: 'no compatible base event or authorization' }));
+      continue;
+    }
+
+    const evidence = typeof event.evidence === 'string' ? event.evidence.trim() : '';
+    const evidenceSentence = findNarrativeSentenceContainingEvidence(narrativeText, evidence);
+    const evidenceContext = `${evidenceSentence} ${evidence}`.trim();
+    if (!evidence || !evidenceExists(evidence, narrativeText) || !isSexualCompletionEvidenceFinal(evidenceContext)) {
+      console.warn(JSON.stringify({ event: 'sexual_event_rejected', turn: turnNumber, current_character_id: characterId, event_character_id: event.character_id || null, reason: 'completion evidence missing or non-final' }));
+      continue;
+    }
+    if (!sexualCompletionLocationEvidenceOk(event.type, evidenceContext)) {
+      console.warn(JSON.stringify({ event: 'sexual_event_rejected', turn: turnNumber, current_character_id: characterId, event_character_id: event.character_id || null, reason: 'location-specific completion evidence missing' }));
+      continue;
+    }
+    const signature = `${event.type}:${evidence}`;
+    if (acceptedCompletionSignatures.has(signature)) {
+      console.warn(JSON.stringify({ event: 'sexual_event_rejected', turn: turnNumber, current_character_id: characterId, event_character_id: event.character_id || null, reason: 'duplicate event within this request' }));
+      continue;
+    }
+    acceptedCompletionSignatures.add(signature);
+
     const saved = { ...event, turn: turnNumber };
     stored.push(saved);
     acceptedEvents.push(saved);
     if (event.type === 'npc_orgasm') history.npc_orgasm_count = Math.min(10, history.npc_orgasm_count + 1);
     if (event.type === 'player_ejaculation') history.player_ejaculation_count = Math.min(10, history.player_ejaculation_count + 1);
-    if (event.type === 'vaginal_ejaculation') history.vaginal_ejaculation_count = Math.min(10, history.vaginal_ejaculation_count + 1);
-    if (event.type === 'anal_ejaculation') history.anal_ejaculation_count = Math.min(10, history.anal_ejaculation_count + 1);
-    if (event.type === 'oral_ejaculation') history.oral_ejaculation_count = Math.min(10, history.oral_ejaculation_count + 1);
-    if (event.type === 'facial_ejaculation') history.facial_ejaculation_count = Math.min(10, history.facial_ejaculation_count + 1);
-    if (event.type === 'body_ejaculation') history.body_ejaculation_count = Math.min(10, history.body_ejaculation_count + 1);
-    if (event.type === 'unspecified_ejaculation') history.unspecified_ejaculation_count = Math.min(10, history.unspecified_ejaculation_count + 1);
+    // README section 5.2 — every specific ejaculation type also mirrors
+    // into the umbrella player_ejaculation_count in the same pass, so the
+    // top-level counter and unlock flags (derived from it downstream in
+    // normalizeRelationshipState) can never go out of sync with the
+    // specific nested counter that was actually incremented.
+    if (event.type === 'vaginal_ejaculation') {
+      history.vaginal_ejaculation_count = Math.min(10, history.vaginal_ejaculation_count + 1);
+      history.player_ejaculation_count = Math.min(10, history.player_ejaculation_count + 1);
+    }
+    if (event.type === 'anal_ejaculation') {
+      history.anal_ejaculation_count = Math.min(10, history.anal_ejaculation_count + 1);
+      history.player_ejaculation_count = Math.min(10, history.player_ejaculation_count + 1);
+    }
+    if (event.type === 'oral_ejaculation') {
+      history.oral_ejaculation_count = Math.min(10, history.oral_ejaculation_count + 1);
+      history.player_ejaculation_count = Math.min(10, history.player_ejaculation_count + 1);
+    }
+    if (event.type === 'facial_ejaculation') {
+      history.facial_ejaculation_count = Math.min(10, history.facial_ejaculation_count + 1);
+      history.player_ejaculation_count = Math.min(10, history.player_ejaculation_count + 1);
+    }
+    if (event.type === 'body_ejaculation') {
+      history.body_ejaculation_count = Math.min(10, history.body_ejaculation_count + 1);
+      history.player_ejaculation_count = Math.min(10, history.player_ejaculation_count + 1);
+    }
+    if (event.type === 'unspecified_ejaculation') {
+      history.unspecified_ejaculation_count = Math.min(10, history.unspecified_ejaculation_count + 1);
+      history.player_ejaculation_count = Math.min(10, history.player_ejaculation_count + 1);
+    }
   }
+
   return { history, sexual_events: stored.slice(-50), accepted: acceptedEvents.length, accepted_events: acceptedEvents };
 }
 
@@ -12284,6 +12572,12 @@ export {
   getCsaLimits,
   isCsaApplicable,
   filterMainNpcDialogue,
+  applySexualEvents,
+  sexualActionForEventType,
+  filterCurrentRelationshipMemoryPatch,
+  buildNpcRelationshipRecord,
+  resolveRelationshipCompatibilityFacts,
+  buildMoanVocalReactionSection,
   normalizeRelationshipState,
   mindMonologueLength,
   validateMindMonologue,

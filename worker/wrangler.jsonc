@@ -1,7 +1,12 @@
 {
   "$schema": "../node_modules/wrangler/config-schema.json",
   "name": "game-proxy-v2",
-  "main": "./game-proxy-v2.js",
+  "main": "./game-proxy-v2.generated.js",
+  "build": {
+    "command": "node ./build-csa-deactivation-hotfix.mjs",
+    "cwd": "worker",
+    "watch_dir": ["worker/game-proxy-v2.js", "worker/build-csa-deactivation-hotfix.mjs", "worker/build-csa-deactivation-hotfix.parts"]
+  },
   "compatibility_date": "2026-07-22",
   "compatibility_flags": ["nodejs_compat", "global_fetch_strictly_public"],
   "version_metadata": {

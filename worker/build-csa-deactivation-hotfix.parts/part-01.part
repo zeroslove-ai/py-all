@@ -1,0 +1,45 @@
+
+function normalizeCsaAftereffectEntry(state = {}, csa = null) {
+  const evidenceTurns = [...new Set((Array.isArray(state?.reaction_evidence_turns) ? state.reaction_evidence_turns : [])
+    .filter(Number.isInteger))].sort((a, b) => a - b);
+  const strength = CSA_STRENGTH_TIERS.includes(state?.strength)
+    ? state.strength
+    : (CSA_STRENGTH_TIERS.includes(csa?.strength) ? csa.strength : '약함');
+  const required = csaAftereffectRequiredEncounters(strength);
+  const legacyWithoutEvidence = state?.schema_version !== CSA_AFTEREFFECT_SCHEMA_VERSION && evidenceTurns.length === 0;
+  const processed = legacyWithoutEvidence ? 0 : Math.min(required, evidenceTurns.length);
+  const phase = processed >= required ? 'integrated' : processed > 0 ? 'processing' : 'shock';
+  return {
+    ...state,
+    schema_version: CSA_AFTEREFFECT_SCHEMA_VERSION,
+    phase,
+    strength,
+    processed_encounters: processed,
+    required_processing_encounters: required,
+    reaction_evidence_turns: evidenceTurns,
+    last_processed_turn: processed > 0 ? evidenceTurns[evidenceTurns.length - 1] : null,
+    canonical_content: typeof state?.canonical_content === 'string' && state.canonical_content
+      ? state.canonical_content
+      : (typeof csa?.content === 'string' ? csa.content : ''),
+    actual_execution_confirmed: state?.actual_execution_confirmed === true,
+    requires_boundary_review: state?.requires_boundary_review === true
+      || (Boolean(csa) && csaAftereffectRequiredEncounters(strength) >= 2 && csaHasDirectSexualRequiredAction(csa))
+  };
+}
+
+function csaAftereffectAppliesToCharacter(globalEntry = {}, character = {}) {
+  const actorGroup = typeof globalEntry?.actor_group === 'string' ? globalEntry.actor_group : 'unknown';
+  if (actorGroup === 'unknown') return true;
+  return characterMatchesCsaActorGroup(character, actorGroup);
+}
+
+function buildCsaAftereffectEffectiveSave(previousSave = {}, effectiveSave = {}, structuredPlan = null, master = {}, playerInput = '', turnNumber = 0, extraCandidateIds = []) {
+  const characters = isPlainObject(master?.characters) ? master.characters : {};
+  const state = isPlainObject(effectiveSave?.csa_aftereffect_state)
+    ? structuredClone(effectiveSave.csa_aftereffect_state)
+    : (isPlainObject(previousSave?.csa_aftereffect_state) ? structuredClone(previousSave.csa_aftereffect_state) : {});
+  state[CSA_AFTEREFFECT_GLOBAL_KEY] = isPlainObject(state[CSA_AFTEREFFECT_GLOBAL_KEY])
+    ? state[CSA_AFTEREFFECT_GLOBAL_KEY]
+    : {};
+
+  const csaById = new Map((Array.isArray(effectiveSave?.csa_active) ? effectiveSave.csa_active : [])

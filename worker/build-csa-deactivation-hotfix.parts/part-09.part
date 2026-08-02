@@ -1,0 +1,39 @@
+const npcReactionAmbientContract = [
+  "function buildNpcReactionAndAmbientEventSection({ mode = 'normal', activeCsa = [] } = {}) {",
+  "  if (mode !== 'normal' && mode !== 'opening') return '';",
+  "  const reactionSection = `",
+  "",
+  "[NPC 복합 반응]",
+  "- 상식개변은 직접 행동과 사회적 해석만 바꾸며 성격·관계·질투·불편·흥분·수치·호기심을 지우지 않는다.",
+  "- 배우자·연인·썸·라이벌·친한 동료처럼 개인적 이해관계가 걸린 중요한 목격 장면에서는 성격·관계·성적 욕구·자제력에 맞춰 즉각 반응, 복합 감정 또는 자기합리화, 후속 행동 중 최소 두 요소를 자연스럽게 보여라.",
+  "- 자제력은 감정을 숨기는 정도이지 감정 부재가 아니다. 무심하거나 업무적인 말투를 쓰더라도 침묵·시선·호흡·손동작·질문·거리 두기·개입·퇴장 이유 중 하나에 잔여 감정을 남긴다.",
+  "- 규정 준수와 개인적 수용은 별개다. 이해하면서 질투하거나, 따르면서 불편하거나, 흥분하면서 당황할 수 있다. 흥분은 동의·참여 의사·관계 상승을 뜻하지 않는다.",
+  "- 등록 히로인과 일반 NPC 모두 이 규칙을 따른다. 같은 NPC가 직전 턴과 같은 반응 문구와 행동을 그대로 반복하지 않는다.",
+  "`;",
+  "  const hasActiveCsa = Array.isArray(activeCsa) && activeCsa.some(item => item && item.active !== false);",
+  "  if (!hasActiveCsa) return reactionSection;",
+  "  return reactionSection + `",
+  "",
+  "[가벼운 자율 사건]",
+  "- 활성 CSA와 현재 장소·근무·방문 동기가 자연스럽게 맞고 장면에 도움이 될 때만, 플레이어 지시 없이 짧은 배경 사건을 선택적으로 만들 수 있다. 사건이 없어도 정상이다.",
+  "- 한 턴에 최대 하나, 보통 1~3문장으로 소리·호출·보고·지나가며 본 장면·이미 진행 중인 업무처럼 제시하고 플레이어가 관심을 보일 때만 확대한다.",
+  "- active CSA의 actor·target·trigger·duration·required_action 직접 범위 안에서만 만들며 성행위·복종·관계를 임의 확대하지 않는다.",
+  "- 현재 장면을 빼앗거나 플레이어를 강제로 중심에 두지 않는다. 가까운 병동의 등록 히로인 또는 general_npcs 중 실제 동선이 맞는 인물만 사용한다.",
+  "- 같은 유형의 사건과 같은 반응을 연속 반복하지 않는다.",
+  "`;",
+  "}",
+  "",
+  "function buildRelationshipInterpretationSection() {"
+].join('\n');
+
+replaceRegex(
+  /function buildRelationshipInterpretationSection\(\) \{/,
+  npcReactionAmbientContract,
+  'add lightweight NPC reactions and optional ambient events'
+);
+
+replaceRegex(
+  /buildGeneralActionJudgmentSection\(\) \+ relationshipInterpretationSection/,
+  "buildGeneralActionJudgmentSection() + buildNpcReactionAndAmbientEventSection({ mode, activeCsa }) + relationshipInterpretationSection",
+  'inject lightweight NPC reaction and ambient-event contract'
+);

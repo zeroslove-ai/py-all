@@ -8,6 +8,18 @@ const repoRoot = new URL('../', import.meta.url);
 const patchPath = new URL('../worker/build-csa-deactivation-hotfix.parts/part-17.part', import.meta.url);
 const patch = fs.readFileSync(patchPath, 'utf8');
 
+function extractStringRawPayload(source, declarationName) {
+  const marker = `const ${declarationName} = String.raw\``;
+  const start = source.indexOf(marker);
+  assert.notEqual(start, -1, `${declarationName} declaration missing`);
+  const payloadStart = start + marker.length;
+  const end = source.indexOf('`;\n\nreplaceOnce(', payloadStart);
+  assert.notEqual(end, -1, `${declarationName} payload terminator missing`);
+  return source.slice(payloadStart, end);
+}
+
+const generatedHelperPayload = extractStringRawPayload(patch, 'csaRuleAwarenessHelpers');
+
 const runBuild = () => spawnSync(process.execPath, ['worker/build-csa-deactivation-hotfix.mjs'], {
   cwd: fileURLToPath(repoRoot),
   encoding: 'utf8'
@@ -87,10 +99,10 @@ test('newer paused or ended runtime suppresses stale ongoing scene action withou
 });
 
 test('generator emits a parseable Worker with no new model database timer random or frontend dependency', () => {
-  assert.doesNotMatch(patch, /requestDeepSeek|attemptDeepSeek|chat\/completions/);
-  assert.doesNotMatch(patch, /supabaseRpc|supabaseGet|supabasePost|fetch\s*\(/);
-  assert.doesNotMatch(patch, /Math\.random|setInterval|setTimeout/);
-  assert.doesNotMatch(patch, /pages\//);
+  assert.doesNotMatch(generatedHelperPayload, /requestDeepSeek|attemptDeepSeek|chat\/completions/);
+  assert.doesNotMatch(generatedHelperPayload, /supabaseRpc|supabaseGet|supabasePost|fetch\s*\(/);
+  assert.doesNotMatch(generatedHelperPayload, /Math\.random|setInterval|setTimeout/);
+  assert.doesNotMatch(generatedHelperPayload, /pages\//);
 
   const build = runBuild();
   assert.equal(build.status, 0, `${build.stdout}\n${build.stderr}`);

@@ -1,6 +1,6 @@
 -- One-time operational cleanup for stale transient NPC physical state.
 -- Durable relationship, address, memory, stats, CSA history, and turn records are untouched.
--- Safe to re-run: it writes the same normalized scene-state result for the target save.
+-- Already applied to the production save on 2026-08-02. Do not re-run during deploy.
 
 UPDATE public.game_save
 SET data = jsonb_set(

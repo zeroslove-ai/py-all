@@ -75,6 +75,7 @@ const affinityEvidenceConstants = String.raw`const CSA_FALSE_AFFINITY_EVIDENCE_R
 const INDEPENDENT_AFFINITY_EVIDENCE_RE = /(?:의사를?\s*존중|경계를?\s*존중|요청을?\s*(?:즉시\s*)?(?:존중|들어|반영)|멈춰\s*달라|중단\s*요청|약속을?\s*지(?:키|켰)|위험에서\s*(?:구|보호)|업무\s*문제를?\s*해결|진지하게\s*(?:들|이해)|고민을?\s*(?:들|이해)|사과를?\s*(?:받|하)|위로|배려|상호\s*합의|자발적\s*호의|개인적\s*대화|다정|부드럽게|안심|진정|상태를?\s*확인|괜찮(?:은지|냐고)|강도를?\s*(?:낮|조절)|속도를?\s*(?:늦|조절)|선택권|애프터케어|칭찬)/;
 const STRONG_AFFINITY_EVIDENCE_RE = /(?:멈춰\s*달라|중단\s*요청|거부\s*의사|경계를?\s*존중|선택권을?\s*(?:돌려|보장)|위험에서\s*(?:구|보호)|중요한\s*약속을?\s*지(?:키|켰)|진심으로\s*사과)/;
 const GENTLE_AFFINITY_EVIDENCE_RE = /(?:다정|부드럽게|안심|진정|위로|배려|상태를?\s*확인|괜찮(?:은지|냐고)|강도를?\s*(?:낮|조절)|속도를?\s*(?:늦|조절)|애프터케어|조심스럽게|무리하지\s*않)/;
+const SUBSTANTIVE_CARE_AFFINITY_RE = /(?:안심|진정|위로|배려|상태를?\s*확인|괜찮(?:은지|냐고)|강도를?\s*(?:낮|조절)|속도를?\s*(?:늦|조절)|애프터케어|무리하지\s*않)/;
 const LIGHT_COMPLIMENT_AFFINITY_RE = /(?:예쁘|아름답|사랑스럽|멋지|매력적|칭찬)/;
 const LOW_AFFINITY_ROMANCE_RE = /(?:플레이어|실장님|감사관님|주인님)[^.!?。\n]{0,45}(?:특별|사랑|좋아|눈에\s*들|전용|내\s*사람|내\s*것|당신\s*것|실장님\s*거|에게만\s*약|앞에서만\s*숨길\s*수\s*없)|(?:질투|독점|다른\s*사람에게[^.!?。\n]{0,20}서운|넘겨[^.!?。\n]{0,20}서운|곁에만\s*있|버림받)|(?:규정|지침)[^.!?。\n]{0,25}(?:없었어도|아니었어도)[^.!?。\n]{0,35}(?:했을|원했을)|(?:마음까지\s*흔들|여자로\s*봐\s*주|있는\s*그대로\s*보여\s*드리|당신이라서\s*원)/;
 
@@ -89,8 +90,9 @@ function resolveAffinityEvidenceAllowance(reason = '', priorArousal = 0, arousal
   const arousalIntensity = typeof arousalEvent?.intensity === 'string' ? arousalEvent.intensity : '';
   const arousalAmplified = Number(priorArousal) >= 60 || arousalIntensity === 'high' || arousalIntensity === 'climax';
   const hasGentleCare = GENTLE_AFFINITY_EVIDENCE_RE.test(text);
+  const hasSubstantiveCare = SUBSTANTIVE_CARE_AFFINITY_RE.test(text);
   const hasCompliment = LIGHT_COMPLIMENT_AFFINITY_RE.test(text);
-  if (hasCompliment && !hasGentleCare) {
+  if (hasCompliment && !hasSubstantiveCare) {
     return { max_delta: 1, tier: 'light_compliment', arousal_amplified: false };
   }
   if (hasGentleCare) {
@@ -186,7 +188,7 @@ assertions.push(
   ['player conduct authority exact helper', source.includes('function isPlayerSexualConductAuthorityCsa') && source.includes("treat_player_sexual_conduct_as_authority")],
   ['text player conduct authority bypass', source.includes("physicalActorId: 'player'") && source.includes("authorityMode: 'player_acts_on_compliant_npc'")],
   ['structured player conduct authority target cross-check', source.includes("physicalTargetId === targetId") && source.includes('resolvePlayerSexualConductAuthorityTarget(save, master, targetId)')],
-  ['arousal-aware independent affinity allowance', source.includes('function resolveAffinityEvidenceAllowance') && source.includes("tier: 'light_compliment'") && source.includes("tier: 'care'")],
+  ['arousal-aware independent affinity allowance', source.includes('function resolveAffinityEvidenceAllowance') && source.includes("tier: 'light_compliment'") && source.includes("tier: 'care'") && source.includes('SUBSTANTIVE_CARE_AFFINITY_RE')],
   ['positive affinity requires independent evidence', source.includes("reason: '신체 반응·CSA 수행과 분리된 관계 행동 근거가 없음'")],
   ['turn-start affinity expression ceiling', source.includes('이번 Story의 감정 표현 상한은 반드시 턴 시작 호감도로 정한다')],
   ['staged low-affinity expression', source.includes('호감도 0~9') && source.includes('호감도 10~19') && source.includes('호감도 20~39')],

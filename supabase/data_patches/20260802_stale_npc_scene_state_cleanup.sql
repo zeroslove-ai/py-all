@@ -21,7 +21,7 @@ SET data = jsonb_set(
         'underwear_top', 'worn',
         'underwear_bottom', 'worn'
       ),
-      'updated_turn', COALESCE((data->>'turn_count')::integer, 0),
+      'updated_turn', turn_count,
       'current_action', '공개된 병원 공간에서 몸을 가리고 유니폼을 갖춰 입은 채 플레이어와 대화 중'
     )
   ),

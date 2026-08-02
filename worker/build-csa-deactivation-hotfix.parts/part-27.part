@@ -1,0 +1,65 @@
+const generalNpcPoolContinuityHelpers = String.raw`
+function buildGeneralNpcPoolSection(master = {}, save = {}) {
+  const root = isPlainObject(master?.general_npcs) ? master.general_npcs : {};
+  const profiles = isPlainObject(root.profiles) ? root.profiles : {};
+  const entries = Object.entries(profiles).filter(([, profile]) => isPlainObject(profile));
+  if (!entries.length) return '';
+  const lines = entries.map(([id, profile]) => {
+    const fields = [
+      profile.name ? '이름=' + profile.name : '',
+      profile.age ? '나이=' + profile.age : '',
+      profile.gender ? '성별=' + profile.gender : '',
+      profile.role ? '역할=' + profile.role : '',
+      profile.affiliation ? '소속=' + profile.affiliation : '',
+      profile.personality ? '성격=' + profile.personality : '',
+      profile.relationship ? '관계=' + profile.relationship : '',
+      profile.speech ? '말투=' + profile.speech : '',
+      profile.sexual_desire ? '성욕=' + profile.sexual_desire : '',
+      profile.sexual_expression ? '성적 표현=' + profile.sexual_expression : ''
+    ].filter(Boolean).join(' · ');
+    return '- ' + id + ': ' + fields;
+  });
+  return '\n\n[GENERAL NPC POOL — 단역 NPC의 유일한 출처]\n'
+    + lines.join('\n') + '\n\n'
+    + '절대 규칙:\n'
+    + '- 서사에 등장하는 비등록 단역 NPC는 반드시 위 general_npcs.profiles 중 한 명이어야 한다. 위 목록에 없는 새 이름·직업·나이·외형·관계·설정을 즉흥 생성하지 않는다.\n'
+    + '- 단역이 필요하면 현재 장소·시간·업무·방문 목적에 가장 자연스러운 기존 프로필을 선택한다. 적절한 인물이 없으면 새 단역을 만들지 않고 현재 등장인물만으로 진행한다.\n'
+    + '- 한번 등장한 단역은 플레이어가 보내거나, 본인의 명확한 업무 완료·긴급 호출·이동 명령·장면 전환이 실제로 발생하지 않는 한 임의로 퇴장·사라짐·복귀하지 않는다.\n'
+    + '- 단순히 대사가 끝났거나 메인 NPC에게 초점을 옮겼다는 이유로 단역을 장면 밖으로 지우지 않는다. 계속 곁에 있으면 반응·시선·짧은 행동을 자연스럽게 유지한다.\n'
+    + '- 등장한 단역이 성인이고 야한 장면을 목격하며 별도의 퇴장 명령·위험·업무상 긴급 사유가 없다면, 성격과 자기통제 범위 안에서 흥미를 보이고 계속 지켜보거나 즐기는 방향을 기본으로 한다. 갑자기 도망가거나 도덕적 훈계를 하거나 장면을 강제로 중단하지 않는다.\n'
+    + '- 야한 장면을 즐긴다는 이유만으로 강압·폭력·무단 신체접촉을 자동 생성하지 않는다. 참여는 플레이어 지시, 적용되는 CSA, 기존 관계와 장면 근거가 있을 때만 자연스럽게 확대한다.\n'
+    + '- 이들은 비등록 단역이므로 새 character_id, npc_stats, 마인드 모니터, 전용 이미지, 영구 관계 수치를 만들지 않는다.';
+}
+`;
+
+replaceOnce(
+  `function buildCurrentNpcRelationshipMemorySection(save = {}, characters = {}) {`,
+  generalNpcPoolContinuityHelpers + `\nfunction buildCurrentNpcRelationshipMemorySection(save = {}, characters = {}) {`,
+  'add strict general NPC pool and scene continuity prompt'
+);
+
+replaceOnce(
+  `  const playerEjaculationMeterSection = buildPlayerEjaculationMeterSection(save);\n  const absoluteClothingCsaSection = buildAbsoluteClothingCsaSection(save, master.characters || {}, activeCsa);`,
+  `  const playerEjaculationMeterSection = buildPlayerEjaculationMeterSection(save);\n  const generalNpcPoolSection = buildGeneralNpcPoolSection(master, save);\n  const absoluteClothingCsaSection = buildAbsoluteClothingCsaSection(save, master.characters || {}, activeCsa);`,
+  'build general NPC pool section'
+);
+
+replaceOnce(
+  `+ buildStructuredActionStorySection(structuredPlan, save, activeCsa) + playerAttemptSection + playerPhysicalSceneStateSection + playerEjaculationMeterSection + absoluteClothingCsaSection)`,
+  `+ buildStructuredActionStorySection(structuredPlan, save, activeCsa) + playerAttemptSection + playerPhysicalSceneStateSection + playerEjaculationMeterSection + generalNpcPoolSection + absoluteClothingCsaSection)`,
+  'inject general NPC pool at final Story priority'
+);
+
+replaceOnce(
+  `  buildPlayerEjaculationMeterSection,`,
+  `  buildGeneralNpcPoolSection,\n  buildPlayerEjaculationMeterSection,`,
+  'export general NPC pool helper'
+);
+
+assertions.push(
+  ['general NPC pool only', source.includes('GENERAL NPC POOL — 단역 NPC의 유일한 출처') && source.includes('위 general_npcs.profiles 중 한 명')],
+  ['no invented supporting NPC', source.includes('새 이름·직업·나이·외형·관계·설정을 즉흥 생성하지 않는다')],
+  ['supporting NPC stays present', source.includes('임의로 퇴장·사라짐·복귀하지 않는다') && source.includes('반응·시선·짧은 행동을 자연스럽게 유지한다')],
+  ['adult supporting NPC enjoys sexual scene by default', source.includes('흥미를 보이고 계속 지켜보거나 즐기는 방향을 기본')],
+  ['supporting NPC does not force participation', source.includes('강압·폭력·무단 신체접촉을 자동 생성하지 않는다')]
+);

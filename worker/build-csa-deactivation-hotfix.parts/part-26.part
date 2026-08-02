@@ -99,8 +99,8 @@ replaceOnce(
 );
 
 replaceOnce(
-  `+ buildStructuredActionStorySection(structuredPlan, save, activeCsa) + playerAttemptSection + playerPhysicalSceneStateSection + absoluteClothingCsaSection)`,
-  `+ buildStructuredActionStorySection(structuredPlan, save, activeCsa) + playerAttemptSection + playerPhysicalSceneStateSection + playerEjaculationMeterSection + absoluteClothingCsaSection)`,
+  `+ playerPhysicalSceneStateSection + absoluteClothingCsaSection)`,
+  `+ playerPhysicalSceneStateSection + playerEjaculationMeterSection + absoluteClothingCsaSection)`,
   'inject ejaculation meter at final Story priority'
 );
 

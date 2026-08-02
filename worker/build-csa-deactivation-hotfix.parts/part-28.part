@@ -58,7 +58,7 @@ replaceBalancedStatement(
 
 replaceBalancedStatement(
   `function buildPlayerEjaculationMeterSection(save = {}) {`,
-  `function buildPlayerEjaculationMeterSection(save = {}) {
+  String.raw`function buildPlayerEjaculationMeterSection(save = {}) {
   const state = normalizePlayerSexualState(save?.player_sexual_state);
   const meter = state.ejaculation_meter;
   const availability = meter >= 50 ? '사정 가능' : '아직 사정 불가';

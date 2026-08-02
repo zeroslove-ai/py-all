@@ -18,15 +18,22 @@ function runBuild() {
   });
 }
 
+function transformGeneratedWorkerForVm(generated) {
+  const withoutDefaultExport = generated.replace(/^export\s+default\s+\{/m, 'const __workerDefault = {');
+  const withoutNamedExports = withoutDefaultExport.replace(/\nexport\s*\{[\s\S]*?\};?\s*$/m, '\n');
+  assert.doesNotMatch(withoutNamedExports, /(^|\n)export\s/m, 'generated Worker still contains an ESM export after VM transform');
+  return withoutNamedExports
+    + '\nglobalThis.__contractExports = {'
+    + ' buildChoiceMeta, isCurrentChoiceMetaValid, resolveAffinityEvidenceAllowance, LOW_AFFINITY_ROMANCE_RE'
+    + ' };';
+}
+
 function loadGeneratedContracts() {
   if (cachedGeneratedContracts) return cachedGeneratedContracts;
   const build = runBuild();
   assert.equal(build.status, 0, `${build.stdout}\n${build.stderr}`);
   const generated = fs.readFileSync(generatedPath, 'utf8');
-  const transformed = generated.replace('export default {', 'const __workerDefault = {')
-    + '\nglobalThis.__contractExports = {'
-    + ' buildChoiceMeta, isCurrentChoiceMetaValid, resolveAffinityEvidenceAllowance, LOW_AFFINITY_ROMANCE_RE'
-    + ' };';
+  const transformed = transformGeneratedWorkerForVm(generated);
   const context = {
     console: { log() {}, warn() {}, error() {} },
     structuredClone: globalThis.structuredClone,

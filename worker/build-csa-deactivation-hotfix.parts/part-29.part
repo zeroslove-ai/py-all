@@ -1,0 +1,35 @@
+replaceBalancedStatement(
+  `function buildAbsoluteClothingCsaSection(save = {}, characters = {}, activeCsa = getActiveCsaEntries(save)) {`,
+  `function buildAbsoluteClothingCsaSection(save = {}, characters = {}, activeCsa = getActiveCsaEntries(save)) {
+  const allRegisteredIds = Object.keys(isPlainObject(characters) ? characters : {});
+  const forced = resolveAbsoluteClothingCsaByCharacter(save, characters, activeCsa, allRegisteredIds);
+  const stateLabel = { worn: '착용', removed: '벗음', open: '열림', unknown: '미확인' };
+  const clothingLines = Object.entries(forced).map(([characterId, clothing]) => {
+    const name = characters?.[characterId]?.name || characters?.[characterId]?.['이름'] || characterId;
+    const details = Object.entries(clothing).map(([key, value]) => key + '=' + (stateLabel[value] || value)).join(', ');
+    const fullyNude = ['uniform_top', 'uniform_bottom', 'underwear_top', 'underwear_bottom']
+      .every(key => clothing[key] === 'removed');
+    return '- ' + name + ': ' + details + (fullyNude ? ' — 이미 완전한 전라 상태' : '');
+  });
+  if (!clothingLines.length) return '';
+  const clothingNewline = String.fromCharCode(10);
+  return [
+    '',
+    '',
+    '[FINAL ACTIVE CLOTHING CSA — DO NOT CONTRADICT]',
+    ...clothingLines,
+    '- 위 대상이 이번 장면에 등장하면 첫 묘사부터 위 복장 상태다. 새로 옷을 벗는 준비 장면을 만들지 않는다.',
+    '- 완전 전라 대상에게 상의만 입음, 가운을 걸침, 하의만 벗음 같은 중간 복장을 절대 쓰지 않는다.',
+    '- 저장된 과거 복장, 최근 요약, 외부인, 회진, 방문객, 체면, 성격, 최면, 업무 이동보다 이 상태가 우선한다.',
+    '- 플레이어가 반대 복장을 입혀도 NPC는 규정상 유지할 수 없다고 말하고 즉시 스스로 위 상태로 되돌린다.',
+    '- 별도의 예외, 의식적 위반, 불이익 감수, 협상 분기를 만들지 않는다.',
+    '- Extract의 복장 결과가 충돌해도 저장 시 위 상태로 자동 정규화하며 턴이나 저장을 실패시키지 않는다.'
+  ].join(clothingNewline);
+}`,
+  'replace unsafe absolute clothing prompt string assembly'
+);
+
+assertions.push(
+  ['absolute clothing prompt uses safe newline assembly', source.includes('const clothingNewline = String.fromCharCode(10)') && source.includes('].join(clothingNewline)')],
+  ['unsafe absolute clothing return literal removed', !source.includes("return '\n\n[FINAL ACTIVE CLOTHING CSA — DO NOT CONTRADICT]"))
+);

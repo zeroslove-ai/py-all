@@ -110,9 +110,13 @@ replaceRegex(
   'parse choices only after a real choice heading and only from numbered entries'
 );
 
-replaceRegex(
-  /(function normalizeFinalChoicesDeterministically\(choices, \{ narrativeText = '', capability, characters = \{\}, playerName = '', playerJob = '' \} = \{\}\) \{[\s\S]*?let normalized = Array\.isArray\(choices\)[\s\S]*?\n    : \[\];)/,
-  '$1\n  normalized = normalized.filter(choice => !isChoiceDirectiveLeak(choice));',
+const choiceNormalizationStart = String.raw`function normalizeFinalChoicesDeterministically(choices, { narrativeText = '', capability, characters = {}, playerName = '', playerJob = '' } = {}) {
+  let normalized = Array.isArray(choices)
+    ? choices.filter(choice => typeof choice === 'string' && choice.trim()).map(choice => clipChoiceText(choice))
+    : [];`;
+replaceOnce(
+  choiceNormalizationStart,
+  `${choiceNormalizationStart}\n  normalized = normalized.filter(choice => !isChoiceDirectiveLeak(choice));`,
   'drop leaked directives before deterministic choice normalization'
 );
 

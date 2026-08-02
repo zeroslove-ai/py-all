@@ -1,0 +1,156 @@
+const hardenedCharacterMatch = String.raw`function characterMatchesCsaActorGroup(character = {}, actorGroup = '') {
+  if (actorGroup === 'everyone_in_hospital') return true;
+
+  const haystack = [
+    character?.name,
+    character?.['이름'],
+    character?.job,
+    character?.['직업'],
+    character?.rank,
+    character?.['직책'],
+    character?.role,
+    character?.['역할'],
+    character?.department,
+    character?.['소속'],
+    character?.profession,
+    character?.['직종']
+  ].filter(value => typeof value === 'string').join(' ');
+  const genderText = [character?.gender, character?.sex, character?.['성별']]
+    .filter(value => typeof value === 'string').join(' ');
+
+  const isNurse = /(?:간호사|수간호사|간호팀)/.test(haystack);
+  const isDoctor = /(?:의사|전문의|전공의|교수)/.test(haystack);
+  const isMedicalStaff = isNurse || isDoctor || /의료진/.test(haystack);
+  const isHospitalStaff = isMedicalStaff || /(?:병원\s*직원|원무|행정|접수|병동\s*직원)/.test(haystack);
+  const hasFemaleEvidence = /(?:여성|여자|female|woman)/i.test(genderText + ' ' + haystack)
+    || Boolean(character?.cup || character?.npc_컵 || character?.['컵'] || character?.['은밀유두'] || character?.['은밀유륜']);
+  const hasMaleEvidence = /(?:남성|남자|male|man)/i.test(genderText + ' ' + haystack);
+
+  if (actorGroup === 'nurse') return isNurse;
+  if (actorGroup === 'doctor') return isDoctor;
+  if (actorGroup === 'medical_staff') return isMedicalStaff;
+  if (actorGroup === 'hospital_staff') return isHospitalStaff;
+  if (actorGroup === 'female_staff') return isHospitalStaff && hasFemaleEvidence && !hasMaleEvidence;
+  if (actorGroup === 'male_staff') return isHospitalStaff && hasMaleEvidence;
+
+  return false;
+}`;
+
+replaceRegex(
+  /function characterMatchesCsaActorGroup\(character = \{\}, actorGroup = ''\) \{.*?\n\}\n\n(?=function playerMatchesCsaTargetGroup)/s,
+  `${hardenedCharacterMatch}\n\n`,
+  'recognize female registered staff without requiring a literal gender word'
+);
+
+const hardenedAftereffectEvidence = String.raw`const CSA_AFTEREFFECT_STRONG_REACTION_RE = /(?:정상\s*업무가\s*아니|당연(?:한|하지)\s*않|왜\s*(?:그런|그렇게|이런)\s*(?:행동|말|판단)|이해(?:가\s*)?되지\s*않|관행이\s*아니|다시\s*(?:생각|판단)|재평가|선을\s*긋|거리를\s*두|물러서|행동을\s*(?:멈추|중단)|옷을\s*(?:챙겨\s*)?입|상의(?:를|가)?\s*(?:챙겨\s*)?입)/;
+const CSA_AFTEREFFECT_EMOTION_RE = /(?:당황|충격|혼란|수치|후회|이상하|낯설|경계|불편|질투|두렵|무섭)/;
+const CSA_AFTEREFFECT_ACTION_RE = /(?:멈추|중단|정리|거리|물러|옷|상의|질문|묻|거절|경계|다시|확인|바라보|고개를\s*저)/;
+const CSA_AFTEREFFECT_REALIZATION_RE = /(?:기억은\s*(?:나|하지만)|무슨\s*일을\s*했는지는\s*(?:알|기억)|왜\s*(?:당연|자연스럽)|지금\s*보니|이제\s*생각하니|아무리\s*생각해도\s*이상)/;
+const CSA_AFTEREFFECT_MEMORY_GAP_RE = /(?:언제\s*(?:옷을\s*)?(?:벗|했)는지\s*(?:모르|기억이?\s*안)|잘\s*기억이?\s*안\s*나|기억이?\s*나지\s*않|기억나지\s*않|무슨\s*일이\s*있었는지\s*(?:모르|기억이?\s*안)|어떻게\s*(?:여기|이렇게)\s*(?:됐|된)\s*건지\s*(?:모르|기억이?\s*안))/;
+
+function storyHasCsaAftereffectReactionEvidence(narrativeText = '', characterName = '') {
+  if (!characterName) return false;
+  const blocks = extractNarrativeActionSection(narrativeText)
+    .split(/\n{2,}|(?<=[.!?。！？])\s+/)
+    .filter(block => block.includes(characterName));
+  return blocks.some(block => {
+    if (CSA_AFTEREFFECT_MEMORY_GAP_RE.test(block)) return false;
+    return CSA_AFTEREFFECT_STRONG_REACTION_RE.test(block)
+      || CSA_AFTEREFFECT_REALIZATION_RE.test(block)
+      || (CSA_AFTEREFFECT_EMOTION_RE.test(block) && CSA_AFTEREFFECT_ACTION_RE.test(block));
+  });
+}`;
+
+replaceRegex(
+  /const CSA_AFTEREFFECT_STRONG_REACTION_RE = .*?\nfunction storyHasCsaAftereffectReactionEvidence\(narrativeText = '', characterName = ''\) \{.*?\n\}/s,
+  hardenedAftereffectEvidence,
+  'accept natural aftereffect reactions but reject memory-gap evidence'
+);
+
+replaceRegex(
+  /- 해제된 규범의 당연함은 즉시 사라지지만, 실제 사건의 기억과 현재 옷·자세·위치·신체 상태는 그대로 남는다\. 기억상실·시간 공백·자동 복장·자동 자세 복구는 금지한다\./,
+  '- 해제된 규범의 당연함은 즉시 사라지지만, 실제 사건의 기억과 현재 옷·자세·위치·신체 상태는 그대로 남는다. 기억상실·시간 공백·자동 복장·자동 자세 복구는 금지한다.\\n- 인물은 자신이 무엇을 했고 어떻게 현재 상태가 되었는지 기억한다. “언제 옷을 벗었죠?”, “잘 기억이 안 나요”, “무슨 일이 있었죠?” 같은 기억 공백 대사는 금지한다. 올바른 충격은 “기억은 나지만 왜 그게 당연했는지 이해되지 않는다”처럼 표현한다.',
+  'make deactivation memory preservation explicit'
+);
+
+const hardenedChoiceExtraction = String.raw`const CHOICE_DIRECTIVE_LEAK_RE = /(?:^\s*\[(?:약함|중간|강함)\]|선택지(?:에는|는)[^\n]{0,50}(?:4가지|네\s*가지)|아래\s*\[?\s*3\.\s*선택지|\[?\s*3\.\s*선택지\s*\]?[^\n]{0,30}(?:형식|쓰|작성)|(?:지시사항|규칙|형식)[^\n]{0,40}(?:따르|쓰|작성))/i;
+const SAFE_FALLBACK_CHOICE_TEXTS = new Set([
+  '가벼운 질문을 건네본다.',
+  '주변 상황을 조용히 관찰한다.',
+  '다른 장소로 이동할지 생각해본다.',
+  '대화를 마무리하고 자리를 정리한다.'
+]);
+
+function isChoiceDirectiveLeak(choice = '') {
+  return CHOICE_DIRECTIVE_LEAK_RE.test(String(choice || '').trim());
+}
+
+function extractChoicesFromNarrative(narrativeText) {
+  const text = stripBoldMarkers(typeof narrativeText === 'string' ? narrativeText : '');
+  const heading = /\[?\s*3\.\s*선택지\s*\]?\s*:?\s*(?=\r?\n|$)/i.exec(text);
+  if (!heading) return [];
+
+  const source = text.slice(heading.index + heading[0].length).split(/\r?\n/);
+  const choices = [];
+  for (const line of source) {
+    if (/^\s*\[?\s*[1-2]\.\s*(?:서사|플레이어)/.test(line)) break;
+    const match = line.match(/^\s*(?:[①②③④]|[1-4][.)])\s*(.+?)\s*$/);
+    if (!match) continue;
+    const choice = match[1].trim();
+    if (!choice || isChoiceDirectiveLeak(choice) || choices.includes(choice)) continue;
+    choices.push(choice);
+    if (choices.length === 4) break;
+  }
+  return choices;
+}`;
+
+replaceRegex(
+  /function extractChoicesFromNarrative\(narrativeText\) \{.*?\n\}\n\n(?=\/\/ Preserves|function buildChoicesFromNarrativeOrFallback)/s,
+  `${hardenedChoiceExtraction}\n\n`,
+  'parse choices only after a real choice heading and only from numbered entries'
+);
+
+replaceRegex(
+  /(function normalizeFinalChoicesDeterministically\(choices, \{ narrativeText = '', capability, characters = \{\}, playerName = '', playerJob = '' \} = \{\}\) \{[\s\S]*?let normalized = Array\.isArray\(choices\)[\s\S]*?\n    : \[\];)/,
+  '$1\n  normalized = normalized.filter(choice => !isChoiceDirectiveLeak(choice));',
+  'drop leaked directives before deterministic choice normalization'
+);
+
+replaceOnce(
+  `    choicesRepaired = choiceResult.replaced_count > 0;
+    choicesFallbackUsed = narrativeChoices.length !== 4;
+    choiceValidationWarnings = choiceResult.warnings;`,
+  `    choicesRepaired = choiceResult.replaced_count > 0;
+    choicesFallbackUsed = narrativeChoices.length !== 4;
+    if (choicesRepaired || choicesFallbackUsed) extract.choice_structured_meta = [];
+    choiceValidationWarnings = choiceResult.warnings;`,
+  'discard structured choice meta whenever visible choices are repaired or replaced'
+);
+
+replaceOnce(
+  "    if (meta.choice_id !== `turn_${turnNumber}_choice_${index + 1}`) return false;",
+  "    if (meta.choice_id !== `turn_${turnNumber}_choice_${index + 1}`) return false;\n    if (SAFE_FALLBACK_CHOICE_TEXTS.has(stripChoiceMarker(choices[index])) && (meta.sexual_action ?? 'none') !== 'none') return false;",
+  'invalidate sexual metadata attached to deterministic safe fallback choices'
+);
+
+const outputLeakGuard = String.raw`function buildStoryOutputLeakGuardSection() {
+  return `
+
+[출력 메타 지시문 금지 — 최종]
+- “선택지에는 4가지가 있어야 한다”, “아래 형식으로 쓰세요”, “지시사항을 따르세요” 같은 작성 지시나 프롬프트 문장을 서사에 출력하지 않는다.
+- [3. 선택지]를 출력할 때는 제목을 독립된 한 줄로 쓰고, 바로 아래에 1.부터 4.까지 실제 플레이 행동 네 줄만 쓴다.
+- [3. 선택지] 앞의 상식 목록·상황판 항목을 선택지로 복사하지 않는다.`;
+}
+`;
+
+replaceRegex(
+  /function buildRelationshipInterpretationSection\(\) \{/,
+  `${outputLeakGuard}\nfunction buildRelationshipInterpretationSection() {`,
+  'add late Story output leak guard helper'
+);
+
+replaceOnce(
+  '+ csaAftereffectSection + buildStructuredActionStorySection(structuredPlan, save, activeCsa) + playerAttemptSection)',
+  '+ csaAftereffectSection + buildStructuredActionStorySection(structuredPlan, save, activeCsa) + buildStoryOutputLeakGuardSection() + playerAttemptSection)',
+  'inject output leak guard at the end of the Story prompt'
+);

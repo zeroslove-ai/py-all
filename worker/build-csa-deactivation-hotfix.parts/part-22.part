@@ -1,6 +1,48 @@
+function replaceBalancedStatement(startMarker, replacement, label) {
+  const start = source.indexOf(startMarker);
+  if (start === -1) throw new Error(`${label}: start marker not found`);
+  const braceStart = source.indexOf('{', start + startMarker.length - 1);
+  if (braceStart === -1) throw new Error(`${label}: opening brace not found`);
+  let depth = 0;
+  let inString = false;
+  let quote = '';
+  let escaped = false;
+  let inLineComment = false;
+  let inBlockComment = false;
+  let end = -1;
+  for (let i = braceStart; i < source.length; i++) {
+    const ch = source[i];
+    const next = source[i + 1] || '';
+    if (inLineComment) {
+      if (ch === '\n') inLineComment = false;
+      continue;
+    }
+    if (inBlockComment) {
+      if (ch === '*' && next === '/') { inBlockComment = false; i++; }
+      continue;
+    }
+    if (inString) {
+      if (escaped) escaped = false;
+      else if (ch === '\\') escaped = true;
+      else if (ch === quote) { inString = false; quote = ''; }
+      continue;
+    }
+    if (ch === '/' && next === '/') { inLineComment = true; i++; continue; }
+    if (ch === '/' && next === '*') { inBlockComment = true; i++; continue; }
+    if (ch === '"' || ch === "'" || ch === '`') { inString = true; quote = ch; continue; }
+    if (ch === '{') depth++;
+    else if (ch === '}') {
+      depth--;
+      if (depth === 0) { end = i + 1; break; }
+    }
+  }
+  if (end === -1) throw new Error(`${label}: balanced closing brace not found`);
+  source = source.slice(0, start) + replacement + source.slice(end);
+}
+
 // Phase 1: trust Extract's affinity judgment and retire bold-choice probability.
-replaceRegex(
-  /  if \(affinityChange && acceptedAffinityDelta > 0\) \{[\s\S]*?\n  \}\n  if \(affinityChange && acceptedAffinityDelta < 0\)/,
+replaceBalancedStatement(
+  `  if (affinityChange && acceptedAffinityDelta > 0) {`,
   `  if (affinityChange) {
     acceptedAffinityDelta = Math.max(-5, Math.min(5, Number(affinityChange.delta) || 0));
     changes['호감도'] = {
@@ -8,8 +50,7 @@ replaceRegex(
       reason: typeof affinityChange.reason === 'string' ? affinityChange.reason.slice(0, 180) : ''
     };
     next.npc_stat_changes = changes;
-  }
-  if (affinityChange && acceptedAffinityDelta < 0)`,
+  }`,
   'trust LLM affinity delta within -5..+5 without keyword reclassification'
 );
 

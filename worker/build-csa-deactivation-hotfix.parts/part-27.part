@@ -45,8 +45,8 @@ replaceOnce(
 );
 
 replaceOnce(
-  `+ buildStructuredActionStorySection(structuredPlan, save, activeCsa) + playerAttemptSection + playerPhysicalSceneStateSection + playerEjaculationMeterSection + absoluteClothingCsaSection)`,
-  `+ buildStructuredActionStorySection(structuredPlan, save, activeCsa) + playerAttemptSection + playerPhysicalSceneStateSection + playerEjaculationMeterSection + generalNpcPoolSection + absoluteClothingCsaSection)`,
+  `+ playerEjaculationMeterSection + absoluteClothingCsaSection)`,
+  `+ playerEjaculationMeterSection + generalNpcPoolSection + absoluteClothingCsaSection)`,
   'inject general NPC pool at final Story priority'
 );
 

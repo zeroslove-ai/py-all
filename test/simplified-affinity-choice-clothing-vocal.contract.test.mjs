@@ -53,9 +53,9 @@ test('stored bold metadata is invalidated and no bold roll executes', () => {
 
 test('choice prompt no longer forces extreme or probability options', () => {
   const generated = generatedWorker();
-  assert.match(generated, /never force an extreme, reckless, humiliating, violent, or low-probability option merely for variety/);
-  assert.match(generated, /never display a success percentage/);
-  assert.match(generated, /All four may be ordinary choices/);
+  assert.match(generated, /극단적·무모한·모욕적·폭력적·저확률 행동을 억지로 만들지 않고/);
+  assert.match(generated, /성공률을 표시하지 않는다/);
+  assert.match(generated, /네 개 모두 평범한 선택지여도 정상이다/);
 });
 
 test('physical state prompt remains compact and present-NPC only', () => {

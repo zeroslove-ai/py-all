@@ -1,0 +1,63 @@
+const savedAffinityViewSanitizer = String.raw`function sanitizeSavedCsaAffinityView(view = {}) {
+  if (!isPlainObject(view)) return view;
+  const hasActiveCsa = Array.isArray(view?.csa_active) && view.csa_active.some(csa => csa?.active !== false);
+  if (!hasActiveCsa) return view;
+  const next = { ...view };
+
+  if (isPlainObject(next.npc_emotion)) {
+    next.npc_emotion = Object.fromEntries(Object.entries(next.npc_emotion).map(([characterId, rawEmotion]) => {
+      if (!isPlainObject(rawEmotion)) return [characterId, rawEmotion];
+      const affinity = Math.max(0, Math.min(100, Number(next?.npc_stats?.[characterId]?.['호감도']) || 0));
+      if (affinity >= 40) return [characterId, rawEmotion];
+      const emotion = { ...rawEmotion };
+      emotion.surface = sanitizeLowAffinityCsaText(
+        emotion.surface,
+        '“규정에 따라 필요한 행동은 수행하겠지만, 그건 개인적인 호감이나 연애 감정과는 별개예요. 업무 범위와 제 감정은 구분하고 있어요.”'
+      );
+      emotion.inner = sanitizeLowAffinityCsaText(
+        emotion.inner,
+        '“지금 행동은 병원 규정과 상황 때문에 하는 것이다. 몸이 반응하거나 당황해도 플레이어가 특별해서 그런 것은 아니고, 개인적인 호감은 별개의 문제다.”'
+      );
+      if (emotion.state === 'dependent') emotion.state = 'accepting';
+      return [characterId, emotion];
+    }));
+  }
+
+  if (isPlainObject(next.npc_stat_changes)) {
+    next.npc_stat_changes = Object.fromEntries(Object.entries(next.npc_stat_changes).map(([characterId, rawChanges]) => {
+      if (!isPlainObject(rawChanges) || !isPlainObject(rawChanges['호감도'])) return [characterId, rawChanges];
+      const changes = { ...rawChanges, 호감도: { ...rawChanges['호감도'] } };
+      const delta = Math.trunc(Number(changes['호감도'].delta) || 0);
+      const reason = typeof changes['호감도'].reason === 'string' ? changes['호감도'].reason : '';
+      if (delta > 0 && CSA_FALSE_AFFINITY_EVIDENCE_RE.test(reason) && !INDEPENDENT_AFFINITY_EVIDENCE_RE.test(reason)) {
+        changes['호감도'] = { delta: 0, reason: '상식개변·업무 수행·성적 반응은 플레이어 호감 상승의 독립 근거가 아님' };
+      }
+      return [characterId, changes];
+    }));
+  }
+
+  return next;
+}`;
+
+replaceOnce(
+  `function buildCsaOnlySaveView(save = {}) {`,
+  savedAffinityViewSanitizer + '\n\nfunction buildCsaOnlySaveView(save = {}) {',
+  'add view-only sanitation for already-saved CSA-derived affection'
+);
+
+replaceOnce(
+  `  return view;
+}
+
+function buildCsaOnlyEffectiveSave(save = {}, master = {}) {`,
+  `  return sanitizeSavedCsaAffinityView(view);
+}
+
+function buildCsaOnlyEffectiveSave(save = {}, master = {}) {`,
+  'sanitize stale low-affinity affection before public context and prompt use'
+);
+
+assertions.push(
+  ['saved affinity public view sanitizer', source.includes('function sanitizeSavedCsaAffinityView') && source.includes('return sanitizeSavedCsaAffinityView(view);')],
+  ['saved false affinity delta hidden', source.includes("changes['호감도'] = { delta: 0, reason: '상식개변·업무 수행·성적 반응은 플레이어 호감 상승의 독립 근거가 아님' }")]
+);

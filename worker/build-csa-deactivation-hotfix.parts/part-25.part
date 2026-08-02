@@ -25,7 +25,7 @@ function inferPlayerClothingFromPositionLabel(clothing = {}, positionLabel = '')
   if (/(?:바지|청바지|슬랙스).{0,20}(?:완전히\s*)?벗/.test(text)) result.outer_bottom = 'removed';
   else if (/(?:바지|청바지|슬랙스).{0,24}(?:반쯤|내리|내려|지퍼|풀어)|성기.{0,16}(?:꺼내|드러내|노출)/.test(text)) result.outer_bottom = 'open';
   if (/(?:팬티|속옷).{0,20}(?:완전히\s*)?벗/.test(text)) result.underwear_bottom = 'removed';
-  else if (/(?:팬티|속옷).{0,20}(?:내리|내려|열어|벌려)|성기.{0,16}(?:꺼내|드러내|노출)/.test(text)) result.underwear_bottom = 'open';
+  else if (/(?:팬티|속옷).{0,20}(?:내리|내려|열어|벌려)|성기.{0,16}(?:꺼내|드러내|노출)|(?:꺼낸|드러난|노출된)\s*성기/.test(text)) result.underwear_bottom = 'open';
   if (/(?:셔츠|상의|재킷|가운).{0,20}(?:완전히\s*)?벗/.test(text)) result.outer_top = 'removed';
   else if (/(?:셔츠|상의|재킷|가운).{0,20}(?:열어|풀어|내려|젖혀)/.test(text)) result.outer_top = 'open';
   return result;

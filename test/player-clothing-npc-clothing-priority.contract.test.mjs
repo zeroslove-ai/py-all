@@ -83,7 +83,7 @@ test('active NPC clothing authority is last and covers registered NPC switches',
   const generated = generatedWorker();
   assert.match(generated, /const allRegisteredIds = Object\.keys/);
   assert.match(generated, /FINAL ACTIVE CLOTHING CSA — DO NOT CONTRADICT/);
-  assert.match(generated, /playerAttemptSection \+ playerPhysicalSceneStateSection \+ absoluteClothingCsaSection/);
+  assert.match(generated, /playerAttemptSection \+ playerPhysicalSceneStateSection \+ playerEjaculationMeterSection \+ generalNpcPoolSection \+ absoluteClothingCsaSection/);
   assert.doesNotMatch(generated, /physicalSceneStateSection \+ absoluteClothingCsaSection \+ narrativeLengthSection/);
 });
 

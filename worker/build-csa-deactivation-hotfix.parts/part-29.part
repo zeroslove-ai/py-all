@@ -31,5 +31,6 @@ replaceBalancedStatement(
 
 assertions.push(
   ['absolute clothing prompt uses safe newline assembly', source.includes('const clothingNewline = String.fromCharCode(10)') && source.includes('].join(clothingNewline)')],
-  ['unsafe absolute clothing return literal removed', !source.includes("return '\n\n[FINAL ACTIVE CLOTHING CSA — DO NOT CONTRADICT]"))
+  ['unsafe absolute clothing return literal removed', !source.includes("return '\n\n[FINAL ACTIVE CLOTHING CSA — DO NOT CONTRADICT]")],
+  ['no broken return quote followed by newline', !/return ['"]\r?\n/.test(source)]
 );

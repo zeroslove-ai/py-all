@@ -1,0 +1,196 @@
+const expandedStorySummaryFunction = String.raw`function appendSummary(previous, addition, limit = 3000) {
+  const entries = [previous, addition]
+    .filter(value => typeof value === 'string' && value.trim())
+    .flatMap(value => value.split(/\r?\n/))
+    .map(value => value.trim())
+    .filter(Boolean);
+  if (!entries.length) return '';
+  const kept = [];
+  let used = 0;
+  for (let index = entries.length - 1; index >= 0; index -= 1) {
+    const entry = entries[index];
+    const separatorLength = kept.length ? 1 : 0;
+    if (used + separatorLength + entry.length > limit) {
+      if (!kept.length) kept.unshift(entry.slice(-limit));
+      break;
+    }
+    kept.unshift(entry);
+    used += separatorLength + entry.length;
+  }
+  return kept.join('\n');
+}`;
+
+replaceRegex(
+  /function appendSummary\(previous, addition, limit = 1000\) \{[\s\S]*?\n\}/,
+  expandedStorySummaryFunction,
+  'expand summary retention to 3000 characters without cutting a turn-summary line'
+);
+
+replaceRegex(
+  /story_summary_recent100\(1000자\)/,
+  'story_summary_recent100(3000자)',
+  'update recent summary prompt limit'
+);
+replaceRegex(
+  /1000자 초과 시 오래된 부분 압축\./,
+  '3000자 초과 시 오래된 완성 요약 항목부터 제거.',
+  'update recent summary overflow rule'
+);
+replaceRegex(
+  /story_summary_overall\(1000자\)/,
+  'story_summary_overall(3000자)',
+  'update overall summary prompt limit'
+);
+replaceRegex(
+  /\(1000자 초과 시 오래된 부분 삭제\)/,
+  '(3000자 초과 시 오래된 완성 요약 항목부터 제거)',
+  'update overall summary overflow rule'
+);
+
+replaceRegex(
+  /return ordered\.slice\(0, 4\);/,
+  'return ordered;',
+  'remove arbitrary four-NPC cap from relevant NPC selection'
+);
+
+const relevantNpcStructuredStateHelpers = String.raw`function compactRelevantNpcStateText(value, limit = 500) {
+  if (value === null || value === undefined) return '';
+  let text = '';
+  if (typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean') text = String(value);
+  else {
+    try { text = JSON.stringify(value); } catch { text = ''; }
+  }
+  return text.replace(/\s+/g, ' ').trim().slice(0, limit);
+}
+
+function buildRelevantNpcStructuredStateSection(relevantIds = [], save = {}, characters = {}) {
+  const ids = [...new Set(Array.isArray(relevantIds) ? relevantIds : [])]
+    .filter(id => typeof id === 'string' && id && id !== 'narrator' && isPlainObject(characters?.[id]));
+  if (!ids.length) return '';
+
+  const relationships = isPlainObject(save?.npc_relationship_state) ? save.npc_relationship_state : {};
+  const addressOverrides = isPlainObject(save?.npc_player_address_overrides) ? save.npc_player_address_overrides : {};
+  const locations = isPlainObject(save?.npc_locations) ? save.npc_locations : {};
+  const emotions = isPlainObject(save?.npc_emotion) ? save.npc_emotion : {};
+  const sceneStates = isPlainObject(save?.npc_scene_state) ? save.npc_scene_state : {};
+  const statsById = isPlainObject(save?.npc_stats) ? save.npc_stats : {};
+
+  const blocks = ids.map(id => {
+    const character = characters[id];
+    const name = character?.name || character?.['이름'] || id;
+    const relationship = isPlainObject(relationships[id]) ? relationships[id] : {};
+    const addressEntry = isPlainObject(addressOverrides[id]) ? addressOverrides[id] : {};
+    const location = isPlainObject(locations[id]) ? locations[id] : {};
+    const emotion = isPlainObject(emotions[id]) ? emotions[id] : {};
+    const scene = isPlainObject(sceneStates[id]) ? sceneStates[id] : {};
+    const stats = csaOnlyNpcStats(statsById[id]);
+    const lines = [name + ' (' + id + ')'];
+    const push = (label, value, limit = 500) => {
+      const text = compactRelevantNpcStateText(value, limit);
+      if (text) lines.push('- ' + label + ': ' + text);
+    };
+
+    push('현재 개인 관계', relationship.current_personal_relationship || relationship.current_relationship || relationship.relationship_status);
+    push('관계 진행 단계', relationship.relationship_development_stage || relationship.relationship_stage || (relationship.intimacy_state?.stage && relationship.intimacy_state.stage !== 'none' ? relationship.intimacy_state.stage : ''));
+    if (Array.isArray(relationship.intimacy_state?.active_boundaries) && relationship.intimacy_state.active_boundaries.length) {
+      push('현재 경계', relationship.intimacy_state.active_boundaries, 350);
+    }
+    push('플레이어 호칭', addressEntry.address || character?.player_honorific, 120);
+
+    const locationLabel = location.location_label || location.label || location.name;
+    if (locationLabel) push('현재 위치' + (Number.isInteger(location.updated_turn) ? ' (T' + location.updated_turn + ' 갱신)' : ''), locationLabel, 250);
+
+    if (emotion.state) push('마지막 감정 상태' + (Number.isInteger(emotion.updated_turn) ? ' (T' + emotion.updated_turn + ' 갱신)' : ''), emotion.state, 120);
+    push('표면 인식', emotion.surface, 450);
+    push('내면 인식', emotion.inner, 450);
+    push('신체·행동 반응', emotion.physical_reaction, 450);
+
+    const statParts = ['호감도', '상식수용도', '성적흥분도']
+      .filter(key => Number.isFinite(Number(stats[key])))
+      .map(key => key + ' ' + Number(stats[key]));
+    if (statParts.length) lines.push('- 현재 수치: ' + statParts.join(' / '));
+
+    if (scene.posture) push('자세' + (Number.isInteger(scene.updated_turn) ? ' (T' + scene.updated_turn + ' 갱신)' : ''), NPC_SCENE_POSTURE_LABELS?.[scene.posture] || scene.posture, 120);
+    if (isPlainObject(scene.clothing)) {
+      const clothingParts = [['uniform_top', '유니폼 상의'], ['uniform_bottom', '유니폼 하의'], ['underwear_top', '상의 속옷'], ['underwear_bottom', '하의 속옷']]
+        .map(([key, label]) => {
+          const raw = scene.clothing[key];
+          if (!raw) return '';
+          return label + ' ' + (NPC_SCENE_CLOTHING_LABELS?.[key]?.[raw] || raw);
+        })
+        .filter(Boolean);
+      if (clothingParts.length) lines.push('- 현재 복장: ' + clothingParts.join(' / '));
+    }
+    push('현재 행동', scene.current_action, 350);
+
+    const facts = buildRelationshipMemoryFacts(relationship);
+    const countParts = [];
+    if (facts.npc_orgasm_count > 0) countParts.push('NPC 절정 ' + facts.npc_orgasm_count + '회');
+    if (facts.player_ejaculation_count > 0) countParts.push('플레이어 사정 ' + facts.player_ejaculation_count + '회');
+    if (countParts.length) lines.push('- 누적 친밀 기록: ' + countParts.join(' / '));
+
+    const memories = normalizeRelationshipMemoryItems([
+      ...facts.deterministic_memory,
+      ...(Array.isArray(relationship.relationship_memory) ? relationship.relationship_memory : [])
+    ]).slice(0, 6);
+    for (const memory of memories) {
+      const turnLabel = Number.isInteger(memory.turn) ? 'T' + memory.turn + ' ' : '';
+      lines.push('- ' + (memory.permanent ? '영구 기억' : '최근 중요 기억') + ': ' + turnLabel + memory.text);
+    }
+    return lines.join('\n');
+  });
+
+  return `[관련 NPC 구조화 상태 — 현재 저장값]
+아래에는 이번 입력에서 직접 언급되었거나 현재 장면에 등장 중인 등록 NPC 전원이 포함된다. 임의의 인원 수 제한으로 뒤쪽 인물을 생략하지 않는다.
+
+${blocks.join('\n\n---\n\n')}
+
+규칙:
+- 현재 저장값은 오래된 줄거리 요약과 충돌할 때 우선한다. 이번 턴 서사에서 실제 변화가 완료되면 그 변화는 새 Extract가 갱신한다.
+- 갱신 턴 표시는 정보의 시점을 알리는 내부 참고이며 대사나 서술에서 숫자로 읽지 않는다.
+- 저장된 위치·복장·자세·현재 행동을 근거 없이 초기화하거나 다른 인물의 상태와 섞지 않는다.
+- 감정 기록은 마지막으로 확인된 내적 상태다. 현재 사건과 시간이 흐른 만큼 성격과 새 자극에 맞게 이어가되, 반대 감정으로 갑자기 초기화하지 않는다.
+- 관계 기억·호감·흥분·과거 성적 경험은 현재 동의, 참여, 연애 관계 상승 또는 모든 부탁 수락을 자동 보장하지 않는다.
+- 이 블록에 포함된 모든 등장 NPC를 각자의 저장 상태로 반응시킨다. 메인 NPC 한 명만 반응시키고 나머지를 장면에서 무시하지 않는다.`;
+}`;
+
+replaceRegex(
+  /function buildRelevantNpcCanonSection\(relevantIds, characters = \{\}\) \{/,
+  relevantNpcStructuredStateHelpers + '\n\nfunction buildRelevantNpcCanonSection(relevantIds, characters = {}) {',
+  'add all-relevant-NPC structured state prompt builder'
+);
+
+replaceOnce(
+  `  const relevantNpcCanonSection = relevantNpcCanonIds.length
+    ? buildRelevantNpcCanonSection(relevantNpcCanonIds, master.characters || {})
+    : '';
+
+  return {`,
+  `  const relevantNpcCanonSection = relevantNpcCanonIds.length
+    ? buildRelevantNpcCanonSection(relevantNpcCanonIds, master.characters || {})
+    : '';
+  const relevantNpcStructuredStateSection = relevantNpcCanonIds.length
+    ? buildRelevantNpcStructuredStateSection(relevantNpcCanonIds, save, master.characters || {})
+    : '';
+
+  return {`,
+  'build relevant NPC structured state beside canon'
+);
+
+replaceOnce(
+  `      ...(needsNpcCsaEpistemicFirewall ? [{ role: 'system', content: buildNpcCsaEpistemicFirewallSection() }] : []),
+      ...(relevantNpcCanonSection ? [{ role: 'system', content: relevantNpcCanonSection }] : [])`,
+  `      ...(needsNpcCsaEpistemicFirewall ? [{ role: 'system', content: buildNpcCsaEpistemicFirewallSection() }] : []),
+      ...(relevantNpcCanonSection ? [{ role: 'system', content: relevantNpcCanonSection }] : []),
+      ...(relevantNpcStructuredStateSection ? [{ role: 'system', content: relevantNpcStructuredStateSection }] : [])`,
+  'inject relevant NPC structured state as the latest Story system message'
+);
+
+assertions.push(
+  ['summary limit 3000', source.includes('function appendSummary(previous, addition, limit = 3000)')],
+  ['summary keeps whole lines', source.includes("return kept.join('\\n');")],
+  ['relevant NPC cap removed', source.includes('return ordered;') && !source.includes('return ordered.slice(0, 4);')],
+  ['structured NPC state helper', source.includes('function buildRelevantNpcStructuredStateSection')],
+  ['all present NPC rule', source.includes('임의의 인원 수 제한으로 뒤쪽 인물을 생략하지 않는다')],
+  ['structured state final injection', source.includes("content: relevantNpcStructuredStateSection")]
+);

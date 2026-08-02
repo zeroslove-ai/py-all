@@ -1,0 +1,289 @@
+const csaClothingAffinityRelationshipHelpers = String.raw`
+const RELATIONSHIP_COMMITMENT_AFFINITY_FLOOR = 40;
+const UNSUPPORTED_RELATIONSHIP_MEMORY_RE = /(?:여자친구|남자친구|연인|사귀|자기야|사랑해)/;
+const NPC_RELATIONSHIP_ACCEPTANCE_RE = /(?:여자친구|남자친구|연인).{0,24}(?:할게|할래|되겠|됐|되었|맞아|예요|입니다|수락|좋아|오늘부터)|(?:오늘부터|이제).{0,20}(?:여자친구|남자친구|연인)|(?:나도\s*)?사랑해(?:요)?(?:[.!?…]|$)/;
+const NPC_RELATIONSHIP_REJECTION_RE = /(?:아직|아니|취소|성급|이르|거절|못\s*해|할\s*수\s*없|그런\s*뜻이\s*아니|연인으로\s*받아들인\s*것은\s*아니)/;
+const NPC_RELATIONSHIP_CORRECTION_RE = /(?:아까|방금|그때|그\s*말|여자친구|남자친구|연인|사랑한다고).{0,80}(?:성급|취소|아직|아니|잘못|정정|이르|받아들인\s*것은\s*아니|연인\s*관계가\s*아니)/;
+
+function isUnsupportedRelationshipMemoryText(value = '') {
+  const text = typeof value === 'string' ? value : value?.text;
+  return typeof text === 'string' && UNSUPPORTED_RELATIONSHIP_MEMORY_RE.test(text);
+}
+
+function sanitizeUnsupportedRelationshipMemories(relationship = {}, affinity = 0) {
+  if (!isPlainObject(relationship) || Number(affinity) >= RELATIONSHIP_COMMITMENT_AFFINITY_FLOOR) return relationship;
+  const memories = Array.isArray(relationship.relationship_memory) ? relationship.relationship_memory : [];
+  const filtered = memories.filter(item => !isUnsupportedRelationshipMemoryText(item));
+  return filtered.length === memories.length ? relationship : { ...relationship, relationship_memory: filtered };
+}
+
+function getNpcRelationshipEvidenceLines(narrativeText = '', characters = {}, characterId = '') {
+  const character = characters?.[characterId] || {};
+  const dialogue = parseAuthoritativeNpcDialogue({ narrativeText, characters })
+    .filter(line => line.character_id === characterId)
+    .map(line => line.text);
+  const attributed = getNpcAttributedNarrativeSegments(narrativeText, character);
+  return [...new Set([...dialogue, ...attributed].filter(text => typeof text === 'string' && text.trim()))];
+}
+
+function findUnsupportedRelationshipCommitmentLine(narrativeText = '', characters = {}, characterId = '', affinity = 0) {
+  if (!characterId || characterId === 'narrator' || Number(affinity) >= RELATIONSHIP_COMMITMENT_AFFINITY_FLOOR) return '';
+  return getNpcRelationshipEvidenceLines(narrativeText, characters, characterId)
+    .find(line => NPC_RELATIONSHIP_ACCEPTANCE_RE.test(line) && !NPC_RELATIONSHIP_REJECTION_RE.test(line)) || '';
+}
+
+function resolveExistingUnsupportedRelationshipPending(save = {}, characters = {}, characterId = '') {
+  const stored = isPlainObject(save?.relationship_correction_pending) ? save.relationship_correction_pending : null;
+  if (stored?.active === true && stored.character_id === characterId) return stored;
+  const affinity = Number(save?.npc_stats?.[characterId]?.['호감도']) || 0;
+  if (affinity >= RELATIONSHIP_COMMITMENT_AFFINITY_FLOOR) return null;
+  const memories = Array.isArray(save?.npc_relationship_state?.[characterId]?.relationship_memory)
+    ? save.npc_relationship_state[characterId].relationship_memory
+    : [];
+  const invalid = memories.find(isUnsupportedRelationshipMemoryText);
+  if (!invalid) return null;
+  const text = typeof invalid === 'string' ? invalid : invalid.text;
+  return {
+    active: true,
+    character_id: characterId,
+    source_turn: Number.isInteger(invalid?.turn) ? invalid.turn : null,
+    invalid_claim: String(text || '성급한 연애 관계 선언').slice(0, 120),
+    reason: '충분한 독립적 관계 형성 없이 성적 분위기만으로 연애 관계를 확정함'
+  };
+}
+
+function relationshipCorrectionWasNarrated(narrativeText = '', characters = {}, characterId = '') {
+  return getNpcRelationshipEvidenceLines(narrativeText, characters, characterId)
+    .some(line => NPC_RELATIONSHIP_CORRECTION_RE.test(line));
+}
+
+function resolveRelationshipCorrectionState({
+  previousSave = {}, narrativeText = '', characterId = '', characters = {}, turnNumber = 0
+} = {}) {
+  if (!characterId || characterId === 'narrator') return { detected: false, pending: null, clear_address_override: false, has_unsupported_commitment: false };
+  const affinity = Number(previousSave?.npc_stats?.[characterId]?.['호감도']) || 0;
+  const newInvalidLine = findUnsupportedRelationshipCommitmentLine(narrativeText, characters, characterId, affinity);
+  if (newInvalidLine) {
+    return {
+      detected: true,
+      has_unsupported_commitment: true,
+      clear_address_override: true,
+      pending: {
+        active: true,
+        character_id: characterId,
+        source_turn: turnNumber,
+        invalid_claim: /사랑해/.test(newInvalidLine) ? '성급한 사랑 고백' : '성급한 연애 관계 수락',
+        reason: '충분한 독립적 관계 형성 없이 성적 분위기만으로 연애 관계를 확정함'
+      }
+    };
+  }
+  const existing = resolveExistingUnsupportedRelationshipPending(previousSave, characters, characterId);
+  if (!existing) return { detected: false, pending: null, clear_address_override: false, has_unsupported_commitment: false };
+  if (relationshipCorrectionWasNarrated(narrativeText, characters, characterId)) {
+    return {
+      detected: false,
+      has_unsupported_commitment: true,
+      clear_address_override: true,
+      pending: { ...existing, active: false, corrected_turn: turnNumber }
+    };
+  }
+  return {
+    detected: false,
+    has_unsupported_commitment: true,
+    clear_address_override: true,
+    pending: { ...existing, active: true }
+  };
+}
+
+function buildRelationshipCommitmentGuardSection() {
+  return '\n\n[연애 관계 기본 원칙 — 단순 최종 규칙]\n'
+    + '- 성행위, 상식개변 수행, 흥분, 절정, 신음이나 순간적인 분위기만으로 갑자기 여자친구·남자친구·연인이 되거나 사랑을 고백하지 않는다.\n'
+    + '- 플레이어가 갑자기 교제를 요구하면 기본 반응은 거절하거나 아직 이르다며 유보하는 것이다.\n'
+    + '- 충분히 쌓인 독립적인 감정과 관계 근거가 명백할 때만 연애 관계를 자발적으로 고려한다.\n'
+    + '- 성적 만족과 호감 상승은 가능하지만, 그것이 곧 연애 수락이나 사랑 고백을 뜻하지 않는다.';
+}
+
+function buildRelationshipCorrectionSection(save = {}, characters = {}) {
+  const characterId = typeof save?.last_character_id === 'string' ? save.last_character_id : '';
+  const pending = resolveExistingUnsupportedRelationshipPending(save, characters, characterId);
+  if (!pending) return '';
+  const name = characters?.[characterId]?.name || characters?.[characterId]?.['이름'] || characterId;
+  return '\n\n[관계 오류 정정 — 이번 응답의 첫 행동으로 반드시 실행]\n'
+    + name + '은(는) 직전의 "' + String(pending.invalid_claim || '연애 관계 선언').slice(0, 120) + '"을(를) 실제 확정 관계로 유지하지 않는다.\n'
+    + '- 플레이어의 이번 행동이나 선택지에 반응하기 전에, 먼저 자신의 말이 성급했으며 아직 연인 관계가 아니라는 점을 명확히 정정한다.\n'
+    + '- 표현은 캐릭터 성격에 맞게 쓰되, 취소·유보의 의미를 흐리지 않는다.\n'
+    + '- 잘못된 자기야 호칭과 사랑 고백을 계속 이어가지 않는다.\n'
+    + '- 정정을 마친 뒤 플레이어의 현재 행동에 자연스럽게 반응한다.\n'
+    + '- 최근 요약이나 관계 기억에 반대 내용이 남아 있어도 이 정정 규칙이 최종 권위다.';
+}
+
+function resolveAbsoluteClothingPatchForCsa(csa = {}) {
+  const preset = isPlainObject(csa?.preset) ? csa.preset : {};
+  const key = [preset.template_id, preset.required_action, csa?.content].filter(Boolean).join(' ');
+  const patch = {};
+  if (/nudity_is_standard_uniform_for_selected_group|(?:전라|알몸|나체).{0,24}(?:표준|근무|유지|해야)/.test(key)) {
+    return { uniform_top: 'removed', uniform_bottom: 'removed', underwear_top: 'removed', underwear_bottom: 'removed' };
+  }
+  if (/(?:노브라|브래지어.{0,16}(?:금지|없이|벗|착용하지))/.test(key)) patch.underwear_top = 'removed';
+  if (/(?:노팬티|팬티.{0,16}(?:금지|없이|벗|착용하지))/.test(key)) patch.underwear_bottom = 'removed';
+  if (/(?:가슴|상반신|상의).{0,20}(?:노출|드러낸|벗은|벗어야|열어야)/.test(key)) {
+    patch.uniform_top = 'removed';
+    patch.underwear_top = 'removed';
+  }
+  if (/(?:성기|하반신|하의|엉덩이).{0,20}(?:노출|드러낸|벗은|벗어야|열어야)/.test(key)) {
+    patch.uniform_bottom = 'removed';
+    patch.underwear_bottom = 'removed';
+  }
+  if (/(?:유니폼\s*상의|상의).{0,20}(?:입어야|착용해야|잠가야|착용\s*상태)/.test(key)) patch.uniform_top = 'worn';
+  if (/(?:유니폼\s*하의|하의).{0,20}(?:입어야|착용해야|잠가야|착용\s*상태)/.test(key)) patch.uniform_bottom = 'worn';
+  if (/(?:유니폼|근무복).{0,20}(?:입어야|착용해야|항상\s*착용)/.test(key)) {
+    patch.uniform_top = 'worn';
+    patch.uniform_bottom = 'worn';
+  }
+  return Object.keys(patch).length ? patch : null;
+}
+
+function resolveAbsoluteClothingCsaByCharacter(save = {}, characters = {}, activeCsa = getActiveCsaEntries(save), explicitPresentIds = []) {
+  const presentIds = [...new Set([
+    ...(Array.isArray(explicitPresentIds) ? explicitPresentIds : []),
+    ...getCurrentPresentNpcIds(save, characters)
+  ])].filter(id => typeof id === 'string' && id && id !== 'narrator' && isPlainObject(characters?.[id]));
+  const forced = {};
+  const applicable = getApplicableCsaEntries(save, activeCsa)
+    .slice()
+    .sort((a, b) => (Number(a?.created_turn) || 0) - (Number(b?.created_turn) || 0));
+  for (const csa of applicable) {
+    const clothingPatch = resolveAbsoluteClothingPatchForCsa(csa);
+    if (!clothingPatch) continue;
+    const actorGroup = csa?.preset?.actor_group || buildCsaSemanticContract(csa).actor_group;
+    for (const characterId of presentIds) {
+      if (!characterMatchesCsaActorGroup(characters[characterId], actorGroup)) continue;
+      forced[characterId] = { ...(forced[characterId] || {}), ...clothingPatch };
+    }
+  }
+  return forced;
+}
+
+function applyAbsoluteClothingCsaState(previousSave = {}, proposedSceneState = null, presentIds = [], characters = {}, turnNumber = 0) {
+  const forced = resolveAbsoluteClothingCsaByCharacter(previousSave, characters, getActiveCsaEntries(previousSave), presentIds);
+  if (!Object.keys(forced).length) return proposedSceneState;
+  const previous = isPlainObject(previousSave?.npc_scene_state) ? previousSave.npc_scene_state : {};
+  const result = Object.fromEntries(Object.entries(previous).map(([characterId, state]) => [characterId, {
+    ...(isPlainObject(state) ? state : {}),
+    clothing: isPlainObject(state?.clothing) ? { ...state.clothing } : {}
+  }]));
+  for (const [characterId, state] of Object.entries(isPlainObject(proposedSceneState) ? proposedSceneState : {})) {
+    result[characterId] = {
+      ...(result[characterId] || {}),
+      ...state,
+      clothing: {
+        ...(isPlainObject(result[characterId]?.clothing) ? result[characterId].clothing : {}),
+        ...(isPlainObject(state?.clothing) ? state.clothing : {})
+      }
+    };
+  }
+  for (const [characterId, clothing] of Object.entries(forced)) {
+    result[characterId] = {
+      ...(result[characterId] || {}),
+      clothing: {
+        ...(isPlainObject(result[characterId]?.clothing) ? result[characterId].clothing : {}),
+        ...clothing
+      },
+      updated_turn: turnNumber
+    };
+  }
+  return result;
+}
+
+function buildAbsoluteClothingCsaSection(save = {}, characters = {}, activeCsa = getActiveCsaEntries(save)) {
+  const forced = resolveAbsoluteClothingCsaByCharacter(save, characters, activeCsa);
+  const stateLabel = { worn: '착용', removed: '벗음', open: '열림', unknown: '미확인' };
+  const lines = Object.entries(forced).map(([characterId, clothing]) => {
+    const name = characters?.[characterId]?.name || characters?.[characterId]?.['이름'] || characterId;
+    const details = Object.entries(clothing).map(([key, value]) => key + '=' + (stateLabel[value] || value)).join(', ');
+    return '- ' + name + ': ' + details;
+  });
+  if (!lines.length) return '';
+  return '\n\n[활성 복장 CSA — 실제 복장의 절대 최종 권위]\n'
+    + lines.join('\n') + '\n'
+    + '- 위 상태는 현재 등장 NPC의 실제 복장이다. 저장된 과거 복장, 최근 요약, 외부인, 회진, 방문객, 체면, 성격, 최면, 업무 이동보다 우선한다.\n'
+    + '- 플레이어가 반대 복장을 입혀도 NPC는 규정상 유지할 수 없다고 말하고 즉시 스스로 위 상태로 되돌린다.\n'
+    + '- 별도의 예외, 의식적 위반, 불이익 감수, 협상 분기를 만들지 않는다.\n'
+    + '- Extract의 복장 결과가 충돌해도 저장 시 위 상태로 자동 정규화하며 턴이나 저장을 실패시키지 않는다.';
+}
+`;
+
+replaceOnce(
+  `function buildCurrentNpcRelationshipMemorySection(save = {}, characters = {}) {`,
+  csaClothingAffinityRelationshipHelpers + `\nfunction buildCurrentNpcRelationshipMemorySection(save = {}, characters = {}) {`,
+  'add absolute clothing CSA and lightweight relationship correction helpers'
+);
+
+replaceOnce(
+  `호감도는 플레이어 개인에 대한 실제 독립적 감정·관계 변화만 근거로 -5~+5 안에서 판단한다. 상식개변 수행·업무적 협조·접촉을 거부하지 않음·홍조·흥분·신음·성행위 자체·플레이어 결과 선언·높은 수용도만을 근거로 한 호감 상승은 delta 0이다.`,
+  `호감도는 플레이어에 대한 전체 인상과 감정 변화를 -5~+5 안에서 자연스럽게 판단한다. 대화와 배려뿐 아니라 성적 매력, 성적 만족, 신체적 친밀감, 익숙함과 떡정도 작은 긍정 근거가 될 수 있다. 다만 성행위·흥분·신음·절정만으로 큰 폭 상승시키거나 같은 자극을 반복할 때 매 턴 기계적으로 누적하지 않는다. 숫자용 키워드 계산 없이 장면 전체와 NPC 성격을 보고 자연스럽게 판단한다.`,
+  'allow modest sexual satisfaction affinity without mechanical farming'
+);
+
+replaceOnce(
+  `활성 복장 CSA가 현재 등장 NPC에게 적용되면 회진·체면·관행·외부인·업무 이동을 임의 예외로 만들지 않는다. NPC가 의식적으로 위반하려면 규정을 정확히 알고, 위반임을 인정하고, 구체적 이유와 불이익 감수를 대사나 행동으로 드러내야 한다. 그 외에는 현재 복장과 규정 상태를 그대로 유지한다. Story가 직전 복장을 잘못 묘사했더라도 저장된 구조화 복장 상태를 자동으로 뒤집지 않는다.`,
+  `활성 복장 CSA가 현재 등장 NPC에게 적용되면 그 CSA가 실제 복장의 절대 최종 권위다. 외부인·회진·방문객·체면·성격·최면·업무 이동을 예외로 만들지 않는다. 플레이어가 반대 복장을 입히거나 NPC가 잠시 입더라도 NPC는 즉시 규정을 설명하고 스스로 CSA 상태로 되돌린다. 별도의 위반·불이익·예외 판단은 만들지 않는다. Story나 저장된 과거 복장이 충돌하면 활성 복장 CSA 상태로 자동 정규화한다.`,
+  'make clothing CSA absolute and remove exception branches'
+);
+
+replaceOnce(
+  `  const physicalSceneStateSection = buildCurrentNpcPhysicalSceneStateSection(save, master.characters || {});\n  const explicitMentionSection = buildExplicitNpcMentionSection(playerInput, master.characters || {});`,
+  `  const physicalSceneStateSection = buildCurrentNpcPhysicalSceneStateSection(save, master.characters || {});\n  const absoluteClothingCsaSection = buildAbsoluteClothingCsaSection(save, master.characters || {}, activeCsa);\n  const explicitMentionSection = buildExplicitNpcMentionSection(playerInput, master.characters || {});`,
+  'build absolute clothing CSA Story section'
+);
+
+replaceOnce(
+  `+ mindEffectBoundarySection + physicalSceneStateSection + narrativeLengthSection`,
+  `+ mindEffectBoundarySection + physicalSceneStateSection + absoluteClothingCsaSection + narrativeLengthSection`,
+  'inject absolute clothing CSA after stored physical state'
+);
+
+replaceOnce(
+  `+ buildHospitalAddressMatrixSection(save, master.characters || {}, currentTurnPlayerAddressRequests) + currentTurnPlayerAddressSection + regenerationFeedbackSection`,
+  `+ buildHospitalAddressMatrixSection(save, master.characters || {}, currentTurnPlayerAddressRequests) + currentTurnPlayerAddressSection + buildRelationshipCommitmentGuardSection() + buildRelationshipCorrectionSection(save, master.characters || {}) + regenerationFeedbackSection`,
+  'inject relationship default rejection and pending correction at highest priority'
+);
+
+replaceOnce(
+  `    const previousRelationship = isPlainObject(previousSave?.npc_relationship_state?.[characterId])\n      ? previousSave.npc_relationship_state[characterId]\n      : {};\n    const npcSwitchTurn = previousSave?.last_character_id !== characterId;`,
+  `    const previousRelationshipRaw = isPlainObject(previousSave?.npc_relationship_state?.[characterId])\n      ? previousSave.npc_relationship_state[characterId]\n      : {};\n    const previousAffinity = Number(previousSave?.npc_stats?.[characterId]?.['호감도']) || 0;\n    let previousRelationship = sanitizeUnsupportedRelationshipMemories(previousRelationshipRaw, previousAffinity);\n    const npcSwitchTurn = previousSave?.last_character_id !== characterId;`,
+  'self-heal unsupported low-affinity relationship memories'
+);
+
+replaceOnce(
+  `      const relationshipMemoryPatch = filterCurrentRelationshipMemoryPatch(extract.relationship_memory_patch, {`,
+  `      let relationshipMemoryPatch = filterCurrentRelationshipMemoryPatch(extract.relationship_memory_patch, {`,
+  'allow unsupported relationship memory filtering'
+);
+
+replaceOnce(
+  `      const hasExistingRelationship = hasExistingRelationshipRecord;`,
+  `      const relationshipCorrectionState = resolveRelationshipCorrectionState({\n        previousSave, narrativeText, characterId, characters: master?.characters || {}, turnNumber\n      });\n      if (relationshipCorrectionState.has_unsupported_commitment) {\n        relationshipMemoryPatch = relationshipMemoryPatch.filter(item => !isUnsupportedRelationshipMemoryText(item));\n      }\n      if (relationshipCorrectionState.pending) {\n        patch.relationship_correction_pending = relationshipCorrectionState.pending;\n      }\n      if (relationshipCorrectionState.clear_address_override) {\n        const clearedOverrides = applyNpcPlayerAddressOverrides(previousSave?.npc_player_address_overrides, [{\n          speaker_id: characterId,\n          target_type: 'player',\n          operation: 'clear',\n          address: '',\n          scope: 'persistent',\n          evidence: 'unsupported relationship commitment correction'\n        }], turnNumber);\n        if (clearedOverrides) patch.npc_player_address_overrides = clearedOverrides;\n      }\n      const hasExistingRelationship = hasExistingRelationshipRecord;`,
+  'detect unsupported relationship commitment and schedule next-turn correction'
+);
+
+replaceOnce(
+  `    const sceneState = buildNpcSceneStatePatch(previousSave, extract.npc_scene_state_patch, turnNumber);\n    if (sceneState) patch.npc_scene_state = sceneState;\n    const playerSceneState = buildPlayerSceneStatePatch(previousSave, extract.player_scene_state_patch, turnNumber);`,
+  `    const sceneState = buildNpcSceneStatePatch(previousSave, extract.npc_scene_state_patch, turnNumber);\n    const clothingAuthoritySave = Array.isArray(patch.csa_active)\n      ? { ...previousSave, csa_active: patch.csa_active }\n      : previousSave;\n    const normalizedSceneState = applyAbsoluteClothingCsaState(\n      clothingAuthoritySave,\n      sceneState,\n      Array.isArray(extract.npcs_present) ? extract.npcs_present : [],\n      master?.characters || {},\n      turnNumber\n    );\n    if (normalizedSceneState) patch.npc_scene_state = normalizedSceneState;\n    const playerSceneState = buildPlayerSceneStatePatch(previousSave, extract.player_scene_state_patch, turnNumber);`,
+  'normalize committed clothing state to active clothing CSA'
+);
+
+replaceOnce(
+  `  buildRelationshipMemoryFacts,`,
+  `  buildRelationshipCommitmentGuardSection,\n  buildRelationshipCorrectionSection,\n  resolveRelationshipCorrectionState,\n  resolveAbsoluteClothingCsaByCharacter,\n  applyAbsoluteClothingCsaState,\n  buildRelationshipMemoryFacts,`,
+  'export new clothing and relationship helpers for contract tests'
+);
+
+assertions.push(
+  ['sexual satisfaction may modestly raise affinity', source.includes('성적 매력, 성적 만족, 신체적 친밀감, 익숙함과 떡정도 작은 긍정 근거')],
+  ['sexual affinity farming discouraged', source.includes('매 턴 기계적으로 누적하지 않는다')],
+  ['clothing csa absolute authority', source.includes('활성 복장 CSA — 실제 복장의 절대 최종 권위') && source.includes('별도의 예외, 의식적 위반, 불이익 감수, 협상 분기를 만들지 않는다')],
+  ['clothing csa commit normalization', source.includes('applyAbsoluteClothingCsaState') && source.includes('normalizedSceneState')],
+  ['relationship default rejection', source.includes('연애 관계 기본 원칙 — 단순 최종 규칙')],
+  ['relationship correction pending', source.includes('relationship_correction_pending') && source.includes('관계 오류 정정 — 이번 응답의 첫 행동으로 반드시 실행')]
+);

@@ -12,7 +12,7 @@ const PLAYER_CLOTHING_STATE_LABELS = { worn: '착용', open: '열림/일부 내�
 function resolvePlayerBaseClothingState(save = {}) {
   const style = typeof save?.player?.style === 'string' ? save.player.style : '';
   return {
-    outer_top: /(?:셔츠|상의|재킷|재킷|가운|티셔츠|니트|블라우스|코트)/.test(style) ? 'worn' : 'unknown',
+    outer_top: /(?:셔츠|상의|재킷|가운|티셔츠|니트|블라우스|코트)/.test(style) ? 'worn' : 'unknown',
     outer_bottom: /(?:바지|청바지|슬랙스|하의|치마|스커트)/.test(style) ? 'worn' : 'unknown',
     underwear_top: 'unknown',
     underwear_bottom: 'unknown'
@@ -92,8 +92,8 @@ replaceBalancedStatement(
 );
 
 replaceBalancedStatement(
-  `function buildPlayerSceneStatePatch(previousSave = {}, rawPatch = {}, turnNumber = 0) {`,
-  `function buildPlayerSceneStatePatch(previousSave = {}, rawPatch = {}, turnNumber = 0) {
+  `function buildPlayerSceneStatePatch(previousSave = {}, rawPatch = null, turnNumber = 0) {`,
+  `function buildPlayerSceneStatePatch(previousSave = {}, rawPatch = null, turnNumber = 0) {
   const previous = isPlainObject(previousSave?.player_scene_state) ? previousSave.player_scene_state : {};
   const next = normalizePlayerSceneStatePatch(rawPatch);
   const hadClothing = isPlainObject(previous.clothing) && Object.keys(previous.clothing).length > 0;

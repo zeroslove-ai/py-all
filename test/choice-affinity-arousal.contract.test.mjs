@@ -9,6 +9,7 @@ const repoRoot = new URL('../', import.meta.url);
 const patchPath = new URL('../worker/build-csa-deactivation-hotfix.parts/part-21.part', import.meta.url);
 const generatedPath = new URL('../worker/game-proxy-v2.generated.js', import.meta.url);
 const patch = fs.readFileSync(patchPath, 'utf8');
+let cachedGeneratedContracts = null;
 
 function runBuild() {
   return spawnSync(process.execPath, ['worker/build-csa-deactivation-hotfix.mjs'], {
@@ -18,6 +19,7 @@ function runBuild() {
 }
 
 function loadGeneratedContracts() {
+  if (cachedGeneratedContracts) return cachedGeneratedContracts;
   const build = runBuild();
   assert.equal(build.status, 0, `${build.stdout}\n${build.stderr}`);
   const generated = fs.readFileSync(generatedPath, 'utf8');
@@ -33,18 +35,24 @@ function loadGeneratedContracts() {
     URL: globalThis.URL,
     URLSearchParams: globalThis.URLSearchParams,
     AbortController: globalThis.AbortController,
+    ReadableStream: globalThis.ReadableStream,
+    TransformStream: globalThis.TransformStream,
+    WritableStream: globalThis.WritableStream,
     setTimeout,
     clearTimeout,
     Response: globalThis.Response,
     Request: globalThis.Request,
     Headers: globalThis.Headers,
+    FormData: globalThis.FormData,
+    Blob: globalThis.Blob,
     crypto: globalThis.crypto,
     atob: globalThis.atob,
     btoa: globalThis.btoa,
     fetch: async () => { throw new Error('network disabled in contract test'); }
   };
   vm.runInNewContext(transformed, context, { timeout: 5000, filename: 'game-proxy-v2.generated.js' });
-  return { generated, contracts: context.__contractExports };
+  cachedGeneratedContracts = { generated, contracts: context.__contractExports };
+  return cachedGeneratedContracts;
 }
 
 function makeAuthorityFixture() {

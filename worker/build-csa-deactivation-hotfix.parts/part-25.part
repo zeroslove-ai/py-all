@@ -160,8 +160,8 @@ replaceOnce(
 );
 
 replaceOnce(
-  `+ buildStructuredActionStorySection(structuredPlan, save, activeCsa) + playerAttemptSection)`,
-  `+ buildStructuredActionStorySection(structuredPlan, save, activeCsa) + playerAttemptSection + playerPhysicalSceneStateSection + absoluteClothingCsaSection)`,
+  `+ playerAttemptSection)`,
+  `+ playerAttemptSection + playerPhysicalSceneStateSection + absoluteClothingCsaSection)`,
   'inject player and NPC clothing facts at final Story priority'
 );
 

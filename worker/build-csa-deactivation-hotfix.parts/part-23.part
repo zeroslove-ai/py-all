@@ -1,0 +1,9 @@
+replaceOnce(
+  `return buildChoiceMetaLegacy(choices, save, master, turnNumber, { allowBold: false, structuredMeta }).map(meta => {`,
+  `return buildChoiceMetaLegacy(choices, save, master, turnNumber, { allowBold, structuredMeta }).map(meta => {`,
+  'preserve csa_direct classification before downgrading remaining bold metadata'
+);
+
+assertions.push(
+  ['csa direct classification remains enabled', source.includes('return buildChoiceMetaLegacy(choices, save, master, turnNumber, { allowBold, structuredMeta }).map(meta => {')]
+);

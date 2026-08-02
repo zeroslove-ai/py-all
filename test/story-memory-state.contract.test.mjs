@@ -23,9 +23,9 @@ test('story summaries retain up to 3000 characters by complete summary lines', (
   assert.doesNotMatch(script, /function appendSummary\(previous, addition, limit = 1000\)/);
 });
 
-test('relevant NPC selection has no arbitrary four-person cap', () => {
-  assert.match(script, /return ordered;/);
-  assert.doesNotMatch(script, /return ordered\.slice\(0, 4\);/);
+test('relevant NPC generator removes the arbitrary four-person cap from the deploy artifact', () => {
+  assert.match(patch, /remove arbitrary four-NPC cap from relevant NPC selection/);
+  assert.match(patch, /'return ordered;'/);
   assert.match(script, /임의의 인원 수 제한으로 뒤쪽 인물을 생략하지 않는다/);
 });
 
@@ -62,6 +62,7 @@ test('build generator emits a parseable Worker with final structured-state injec
   assert.match(generated, /function appendSummary\(previous, addition, limit = 3000\)/);
   assert.match(generated, /function buildRelevantNpcStructuredStateSection/);
   assert.match(generated, /content: relevantNpcStructuredStateSection/);
+  assert.match(generated, /return ordered;/);
   assert.doesNotMatch(generated, /return ordered\.slice\(0, 4\);/);
   assert.ok(partNames.indexOf('part-11.part') < partNames.indexOf('part-07.part'));
 

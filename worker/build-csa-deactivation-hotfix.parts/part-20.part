@@ -1,0 +1,26 @@
+replaceOnce(
+  '해제된 규정의 원문·의무·권한·적용 범위를 재현하거나 현재 판단 근거로 사용하지 않는다.',
+  '해제된 규정의 원문·의무·권한·적용 범위를 재현하지 않는다. 현재 판단 근거로 사용하지 않는다.',
+  'normalize final aftereffect isolation wording'
+);
+
+const aftereffectCanonicalAssertion = assertions.find(item => item?.[0] === 'aftereffect canonical text excluded');
+if (!aftereffectCanonicalAssertion) {
+  throw new Error('aftereffect canonical isolation assertion missing');
+}
+aftereffectCanonicalAssertion[1] = source.includes('과거 해제 규정의 기억 — 현재 규칙 아님')
+  && source.includes('해제된 규정의 원문·의무·권한·적용 범위를 재현하지 않는다')
+  && source.includes('현재 활성 CSA만 규범과 행동 판단의 권위');
+
+const finalAftereffectStart = source.indexOf('function buildCsaAftereffectStorySection(save = {}, characterIds = [], characters = {})');
+const finalAftereffectEnd = source.indexOf('function collectCsaRuleAwarenessProjectionText', finalAftereffectStart);
+const finalAftereffectBody = finalAftereffectStart >= 0 && finalAftereffectEnd > finalAftereffectStart
+  ? source.slice(finalAftereffectStart, finalAftereffectEnd)
+  : '';
+
+assertions.push(
+  ['final aftereffect function boundaries', finalAftereffectStart >= 0 && finalAftereffectEnd > finalAftereffectStart],
+  ['final aftereffect canonical content absent', finalAftereffectBody && !finalAftereffectBody.includes('canonical_content')],
+  ['final aftereffect isolation wording', finalAftereffectBody.includes('해제된 규정의 원문·의무·권한·적용 범위를 재현하지 않는다')],
+  ['final aftereffect current authority wording', finalAftereffectBody.includes('현재 활성 CSA만 규범과 행동 판단의 권위')]
+);

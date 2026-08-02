@@ -1,0 +1,36 @@
+replaceRegex(
+  /const SUPPORTING_NURSE_RE = .*?;/,
+  `const SUPPORTING_NURSE_RE = /(?:(?:미등록|일반|다른|옆|근처|새로 온|이름 모를)\\s*(?:남자|남성|여자|여성)?|(?:남자|남성|여자|여성)\\s*)(?:간호사|수간호사)/;`,
+  'infer an anonymous nurse only from explicit generic or gendered scene wording'
+);
+
+replaceRegex(
+  /const SUPPORTING_DOCTOR_RE = .*?;/,
+  `const SUPPORTING_DOCTOR_RE = /(?:(?:미등록|일반|다른|옆|근처|새로 온|이름 모를)\\s*(?:남자|남성|여자|여성)?|(?:남자|남성|여자|여성)\\s*)(?:의사|전문의|전공의)/;`,
+  'infer an anonymous doctor only from explicit generic or gendered scene wording'
+);
+
+replaceRegex(
+  /const SUPPORTING_HOSPITAL_STAFF_RE = .*?;/,
+  `const SUPPORTING_HOSPITAL_STAFF_RE = /(?:(?:미등록|일반|다른|옆|근처|새로 온|이름 모를)\\s*(?:남자|남성|여자|여성)?|(?:남자|남성|여자|여성)\\s*)(?:병원\\s*직원|직원|원무|행정|접수\\s*직원)/;`,
+  'infer anonymous hospital staff only from explicit generic or gendered scene wording'
+);
+
+replaceOnce(
+  `  if (participant?.type === 'group') {
+    const supporting = collectPresentSupportingNpcProfiles(save)[0];
+    return supporting?.id || (typeof save?.last_character_id === 'string' ? save.last_character_id : null);
+  }`,
+  `  if (participant?.type === 'group') {
+    const mainId = typeof save?.last_character_id === 'string' && save.last_character_id !== 'narrator' ? save.last_character_id : null;
+    if (mainId) return mainId;
+    const supporting = collectPresentSupportingNpcProfiles(save)[0];
+    return supporting?.id || null;
+  }`,
+  'keep the registered main NPC as first concrete performer for group contracts'
+);
+
+assertions.push(
+  ['no ghost nurse inference', source.includes('이름 모를') && !source.includes("(?:미등록|일반|다른|옆|근처|새로 온)?\\\\s*(?:남자|남성|여자|여성)?\\\\s*(?:간호사|수간호사)")],
+  ['registered main participant priority', source.includes("if (mainId) return mainId;") && source.includes("return supporting?.id || null;")]
+);

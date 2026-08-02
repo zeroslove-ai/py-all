@@ -44,6 +44,38 @@ function createEllipsisSanitizer() {
   };
 }
 
+// Story occasionally echoes a system-style writing instruction instead of
+// producing the actual [3. 선택지] block. This deterministic line sanitizer
+// removes only that leaked instruction segment. It does not invent choices,
+// rewrite narrative meaning, or make another model call. A carry buffer is
+// required because SSE deltas may split the instruction across chunks.
+const STORY_META_LEAK_SEGMENT_RE = /(?:선택지(?:에는|는)[^\n]{0,70}(?:4가지|네\s*가지)[^\n]{0,100}(?:형식|쓰세요|작성)|아래\s*\[?\s*3\.\s*선택지\s*\]?[^\n]{0,100}(?:형식|쓰세요|작성)|(?:지시사항|출력\s*규칙)[^\n]{0,80}(?:따르세요|쓰세요|작성하세요))/i;
+
+function sanitizeStoryMetaLeakLine(line = '') {
+  const value = String(line || '');
+  const match = STORY_META_LEAK_SEGMENT_RE.exec(value);
+  if (!match) return value;
+  return value.slice(0, match.index).trimEnd();
+}
+
+function createStoryMetaLeakSanitizer() {
+  let carry = '';
+  return {
+    push(delta) {
+      const combined = carry + String(delta || '');
+      const lines = combined.split(/\r?\n/);
+      carry = lines.pop() || '';
+      if (!lines.length) return '';
+      return lines.map(sanitizeStoryMetaLeakLine).filter(line => line.trim()).join('\n') + '\n';
+    },
+    flush() {
+      const leftover = sanitizeStoryMetaLeakLine(carry);
+      carry = '';
+      return leftover;
+    }
+  };
+}
+
 const stream = {
   // ─── 서사 스트리밍 ───
   // Worker가 DeepSeek OpenAI 호환 SSE를 그대로 중계, 파싱은 브라우저에서 한 번만.
@@ -99,18 +131,23 @@ const stream = {
         const reader = res.body.getReader();
         const decoder = new TextDecoder();
         const ellipsisSanitizer = createEllipsisSanitizer();
+        const metaLeakSanitizer = createStoryMetaLeakSanitizer();
         let buffer = '';
         let fullText = '';
         let firstContentMs = null;
         const recordFirstContent = () => {
           if (firstContentMs === null) firstContentMs = Date.now() - overallStart;
         };
-        const ingestDelta = (delta) => {
-          const sanitized = ellipsisSanitizer.push(delta);
+        const appendSanitizedText = (text) => {
+          const sanitized = ellipsisSanitizer.push(text);
           if (!sanitized) return;
           fullText += sanitized;
           recordFirstContent();
           onChunk(sanitized);
+        };
+        const ingestDelta = (delta) => {
+          const filtered = metaLeakSanitizer.push(delta);
+          if (filtered) appendSanitizedText(filtered);
         };
 
         while (true) {
@@ -158,6 +195,8 @@ const stream = {
           }
         }
 
+        const metaFlushed = metaLeakSanitizer.flush();
+        if (metaFlushed) appendSanitizedText(metaFlushed);
         const flushed = ellipsisSanitizer.flush();
         if (flushed) { fullText += flushed; onChunk(flushed); }
 

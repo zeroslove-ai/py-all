@@ -10,7 +10,7 @@ test('stream sanitizer removes a standalone leaked choice-writing instruction', 
   const sanitizer = helpers.createStoryMetaLeakSanitizer();
   const first = sanitizer.push('정상적인 서사 문장입니다.\n\n선택지에는 4가지가 있어야 하고, 아래 [3. 선택지] 형식으로 쓰세요.\n');
   const last = sanitizer.flush();
-  assert.equal(first + last, '정상적인 서사 문장입니다.\n');
+  assert.equal(first + last, '정상적인 서사 문장입니다.\n\n');
 });
 
 test('stream sanitizer handles an instruction split across SSE deltas', () => {
@@ -23,10 +23,10 @@ test('stream sanitizer handles an instruction split across SSE deltas', () => {
   assert.equal(chunks.join(''), '서사가 이어진다.\n');
 });
 
-test('stream sanitizer preserves legitimate narrative and actual numbered choices', () => {
+test('stream sanitizer preserves legitimate narrative, paragraph breaks, and numbered choices', () => {
   const sanitizer = helpers.createStoryMetaLeakSanitizer();
-  const text = '[3. 선택지]\n1. 그녀에게 상황을 묻는다.\n2. 조용히 기다린다.\n';
-  assert.equal(sanitizer.push(text) + sanitizer.flush(), text.trimEnd() + '\n');
+  const text = '서사 첫 문단.\n\n[3. 선택지]\n1. 그녀에게 상황을 묻는다.\n2. 조용히 기다린다.\n';
+  assert.equal(sanitizer.push(text) + sanitizer.flush(), text);
 });
 
 test('line sanitizer keeps content before a leaked instruction on the same line', () => {

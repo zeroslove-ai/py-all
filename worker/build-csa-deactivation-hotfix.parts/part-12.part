@@ -1,0 +1,236 @@
+const transientSceneStateHelpers = String.raw`const NPC_TRANSIENT_SCENE_STATE_MAX_AGE = 8;
+const NPC_TRANSIENT_SEXUAL_ACTION_RE = /(?:성행위|성관계|삽입|사정|오르가즘|성기|애널|구강|유두|가슴|클리|키스|애무|자위|몸을\s*만지|성적\s*접촉)/;
+const CSA_WARDROBE_TEMPLATE_IDS = new Set([
+  'nudity_is_standard_uniform_for_selected_group',
+  'remove_top_while_working',
+  'work_without_underwear'
+]);
+const CSA_WARDROBE_ACTION_RE = /(?:nudity_is_standard_uniform|work_topless|work_without_underwear)/;
+const CSA_WARDROBE_CONTENT_RE = /(?:전라\s*상태가\s*표준|상의(?:를|가)?\s*벗은\s*채|속옷(?:을|을\s*)?착용하지\s*않|노브라|노팬티)/;
+
+function npcTransientSceneStateAge(save = {}, state = {}) {
+  const currentTurn = Number(save?.turn_count);
+  const updatedTurn = Number(state?.updated_turn);
+  if (!Number.isInteger(currentTurn) || !Number.isInteger(updatedTurn)) return null;
+  return Math.max(0, currentTurn - updatedTurn);
+}
+
+function isNpcTransientSceneStateFresh(save = {}, state = {}) {
+  const age = npcTransientSceneStateAge(save, state);
+  return age === null || age <= NPC_TRANSIENT_SCENE_STATE_MAX_AGE;
+}
+
+function csaIsWardrobeNormalizationRule(csa = {}) {
+  const templateId = csa?.preset?.template_id;
+  const requiredAction = csa?.preset?.required_action;
+  const content = typeof csa?.content === 'string' ? csa.content : '';
+  return CSA_WARDROBE_TEMPLATE_IDS.has(templateId)
+    || CSA_WARDROBE_ACTION_RE.test(String(requiredAction || ''))
+    || CSA_WARDROBE_CONTENT_RE.test(content);
+}
+
+function csaWardrobeRuleAppliesToCharacter(csa = {}, character = {}) {
+  const actorGroup = csa?.preset?.actor_group || buildCsaSemanticContract(csa)?.actor_group || 'unknown';
+  return actorGroup === 'unknown' || characterMatchesCsaActorGroup(character, actorGroup);
+}
+
+function activeWardrobeCsaExists(save = {}, character = {}) {
+  return (Array.isArray(save?.csa_active) ? save.csa_active : []).some(csa =>
+    csa?.active !== false
+    && csaIsWardrobeNormalizationRule(csa)
+    && csaWardrobeRuleAppliesToCharacter(csa, character)
+  );
+}
+
+function latestEndedWardrobeCsaTurn(save = {}, character = {}) {
+  const turns = (Array.isArray(save?.csa_active) ? save.csa_active : [])
+    .filter(csa => csa?.active === false && csaIsWardrobeNormalizationRule(csa) && csaWardrobeRuleAppliesToCharacter(csa, character))
+    .map(csa => Number.isInteger(csa?.updated_turn) ? csa.updated_turn : csa?.created_turn)
+    .filter(Number.isInteger);
+  return turns.length ? Math.max(...turns) : null;
+}
+
+function removedNpcClothingLabels(state = {}) {
+  const clothing = isPlainObject(state?.clothing) ? state.clothing : {};
+  return [
+    ['uniform_top', '유니폼 상의'],
+    ['uniform_bottom', '유니폼 하의'],
+    ['underwear_top', '상의 속옷'],
+    ['underwear_bottom', '하의 속옷']
+  ].filter(([key]) => clothing[key] === 'removed').map(([, label]) => label);
+}
+
+function describeNpcWardrobeRecovery(save = {}, character = {}, state = {}) {
+  const removed = removedNpcClothingLabels(state);
+  const endedTurn = latestEndedWardrobeCsaTurn(save, character);
+  if (!removed.length || endedTurn === null || activeWardrobeCsaExists(save, character)) return null;
+  const age = npcTransientSceneStateAge(save, state);
+  const fresh = isNpcTransientSceneStateFresh(save, state);
+  const action = typeof state?.current_action === 'string' ? state.current_action.trim() : '';
+  return {
+    removed,
+    ended_turn: endedTurn,
+    age,
+    fresh,
+    current_voluntary_sexual_action: fresh && NPC_TRANSIENT_SEXUAL_ACTION_RE.test(action)
+  };
+}
+
+function buildCsaWardrobeRecoverySection(relevantIds = [], save = {}, characters = {}) {
+  const entries = [...new Set(Array.isArray(relevantIds) ? relevantIds : [])].map(id => {
+    const character = characters?.[id];
+    const state = save?.npc_scene_state?.[id];
+    if (!isPlainObject(character) || !isPlainObject(state)) return '';
+    const recovery = describeNpcWardrobeRecovery(save, character, state);
+    if (!recovery) return '';
+    const name = character.name || character['이름'] || id;
+    const ageLabel = recovery.age === null ? '갱신 시점 불명' : recovery.age + '턴 전 기록';
+    const freshness = recovery.fresh ? '직전 장면의 물리 상태' : '만료된 일시 상태';
+    return '- ' + name + ': 해제된 복장 규칙 T' + recovery.ended_turn + ' / ' + ageLabel + ' / ' + freshness + ' / 벗은 기록: ' + recovery.removed.join(', ');
+  }).filter(Boolean);
+  if (!entries.length) return '';
+  return '[해제된 복장 상식 — 물리 복구 규칙, 최우선]\n'
+    + entries.join('\n')
+    + '\n\n규칙:\n'
+    + '- 상식이 해제되는 순간 옷이 마법처럼 생기거나 자동으로 입혀지지는 않는다. 해제 직후 실제로 벗은 상태라면 인물은 그 사실과 과거 행동을 기억한 채 당황하고, 몸을 가리거나 가까운 옷을 집어 실제 착의 동작을 한다.\n'
+    + '- 공공장소·병원 근무·일반 대화 장면에서는 같은 턴 안에 최소한 유니폼부터 입거나 몸을 가리는 행동을 우선한다. 속옷이 바로 없으면 유니폼을 먼저 입고 나중에 정리할 수 있다.\n'
+    + '- 만료된 일시 상태는 현재 복장·자세·행동의 확정값이 아니다. 장면을 떠났다가 다시 등장했거나 여러 턴이 지난 경우, 현재의 명시적 반대 근거가 없으면 직업과 장소에 맞는 통상 복장으로 재등장시킨다.\n'
+    + '- 진행 중인 현재의 자발적 성적 행동이 명확할 때만 벗은 상태를 그 행동 동안 이어갈 수 있다. 예전 규칙, 습관, 상식수용도, 과거 성적 경험만으로 계속 벗고 있게 하지 않는다.\n'
+    + '- 해제된 규칙을 근거로 현재 동의나 성적 참여를 자동 확정하지 않는다. 새 성적 요청은 현재 관계·경계·장소에 따라 별도로 판정한다.\n'
+    + '- 올바른 후유증은 기억상실이 아니라 재평가다. 무엇을 했는지는 기억하지만 왜 당연하게 여겼는지 혼란스러워하며, 현재 상식에 맞는 가리기·착의·거리두기 같은 실제 행동으로 이어진다.';
+}
+
+function buildCurrentNpcPhysicalSceneStateSection(save = {}, characters = {}) {
+  const sceneState = isPlainObject(save?.npc_scene_state) ? save.npc_scene_state : {};
+  const ids = [...new Set([save?.last_character_id, ...(Array.isArray(save?.last_npcs_present) ? save.last_npcs_present : [])])]
+    .filter(id => typeof id === 'string' && id && id !== 'narrator' && isPlainObject(characters?.[id]) && isPlainObject(sceneState[id]));
+  const blocks = ids.map(id => {
+    const state = sceneState[id];
+    const character = characters[id];
+    const name = character.name || character['이름'] || id;
+    const fresh = isNpcTransientSceneStateFresh(save, state);
+    const age = npcTransientSceneStateAge(save, state);
+    const recovery = describeNpcWardrobeRecovery(save, character, state);
+    const lines = [name];
+    if (fresh) {
+      for (const [key, label] of [['uniform_top', '유니폼 상의'], ['uniform_bottom', '유니폼 하의'], ['underwear_top', '상의 속옷'], ['underwear_bottom', '하의 속옷']]) {
+        const value = state?.clothing?.[key];
+        if (NPC_SCENE_CLOTHING_LABELS[key]?.[value]) lines.push('- ' + label + ': ' + NPC_SCENE_CLOTHING_LABELS[key][value]);
+      }
+      if (NPC_SCENE_POSTURE_LABELS[state.posture]) lines.push('- 자세: ' + NPC_SCENE_POSTURE_LABELS[state.posture]);
+      if (typeof state.current_action === 'string' && state.current_action.trim()) lines.push('- 현재 행동: ' + state.current_action.trim());
+    } else {
+      lines.push('- 일시 장면 상태: T' + state.updated_turn + ' 기록은 ' + age + '턴 전 상태라 현재 확정값에서 제외');
+    }
+    if (recovery) {
+      lines.push('- 복장 복구 판정: 해제된 복장 규칙의 잔존 기록이며, 현재의 명시적 자발 행동이 없으면 가리기·착의 또는 통상 근무 복장 복귀가 필요');
+    }
+    return lines.length > 1 ? lines.join('\n') : '';
+  }).filter(Boolean);
+  if (!blocks.length) return '';
+  return '\n\n[CURRENT NPC PHYSICAL SCENE STATE — FRESHNESS-AWARE]\n\n' + blocks.join('\n\n') + '\n\n규칙:\n'
+    + '- 최근 ' + NPC_TRANSIENT_SCENE_STATE_MAX_AGE + '턴 이내에 갱신된 복장·자세·현재 행동만 현재 물리 상태의 강한 근거로 사용한다.\n'
+    + '- 만료된 일시 상태는 과거 장면 기록일 뿐 현재 확정값이 아니다. 재등장·장소 이동·긴 시간 경과 뒤에는 직업과 현재 장소에 맞는 통상 상태를 우선한다.\n'
+    + '- 최근 상태라도 실제로 입고 벗고 열고 잠그거나 자세를 바꾸는 행동이 완료된 경우에만 다음 상태로 바꾼다.\n'
+    + '- 상식개변 해제는 복장을 자동 변경하지 않지만, 해제 후 공공·근무 장면에서는 현재 인식에 맞춰 몸을 가리고 옷을 입는 실제 행동이 자연스럽게 뒤따라야 한다.';
+}`;
+
+replaceRegex(
+  /function buildCurrentNpcPhysicalSceneStateSection\(save = \{\}, characters = \{\}\) \{[\s\S]*?\n\}\n\n\/\/ Injected every turn/,
+  transientSceneStateHelpers + '\n\n// Injected every turn',
+  'make transient NPC physical state freshness-aware and add wardrobe recovery rules'
+);
+
+replaceOnce(
+  `    const scene = isPlainObject(sceneStates[id]) ? sceneStates[id] : {};
+    const stats = csaOnlyNpcStats(statsById[id]);`,
+  `    const scene = isPlainObject(sceneStates[id]) ? sceneStates[id] : {};
+    const sceneFresh = isNpcTransientSceneStateFresh(save, scene);
+    const sceneAge = npcTransientSceneStateAge(save, scene);
+    const wardrobeRecovery = describeNpcWardrobeRecovery(save, character, scene);
+    const stats = csaOnlyNpcStats(statsById[id]);`,
+  'classify structured NPC scene state freshness and wardrobe recovery'
+);
+
+replaceOnce(
+  `    if (scene.posture) push('자세' + (Number.isInteger(scene.updated_turn) ? ' (T' + scene.updated_turn + ' 갱신)' : ''), NPC_SCENE_POSTURE_LABELS?.[scene.posture] || scene.posture, 120);
+    if (isPlainObject(scene.clothing)) {
+      const clothingParts = [['uniform_top', '유니폼 상의'], ['uniform_bottom', '유니폼 하의'], ['underwear_top', '상의 속옷'], ['underwear_bottom', '하의 속옷']]
+        .map(([key, label]) => {
+          const raw = scene.clothing[key];
+          if (!raw) return '';
+          return label + ' ' + (NPC_SCENE_CLOTHING_LABELS?.[key]?.[raw] || raw);
+        })
+        .filter(Boolean);
+      if (clothingParts.length) lines.push('- 현재 복장: ' + clothingParts.join(' / '));
+    }
+    push('현재 행동', scene.current_action, 350);`,
+  `    if (sceneFresh) {
+      if (scene.posture) push('자세' + (Number.isInteger(scene.updated_turn) ? ' (T' + scene.updated_turn + ' 갱신)' : ''), NPC_SCENE_POSTURE_LABELS?.[scene.posture] || scene.posture, 120);
+      if (isPlainObject(scene.clothing)) {
+        const clothingParts = [['uniform_top', '유니폼 상의'], ['uniform_bottom', '유니폼 하의'], ['underwear_top', '상의 속옷'], ['underwear_bottom', '하의 속옷']]
+          .map(([key, label]) => {
+            const raw = scene.clothing[key];
+            if (!raw) return '';
+            return label + ' ' + (NPC_SCENE_CLOTHING_LABELS?.[key]?.[raw] || raw);
+          })
+          .filter(Boolean);
+        if (clothingParts.length) lines.push('- 현재 복장: ' + clothingParts.join(' / '));
+      }
+      push('현재 행동', scene.current_action, 350);
+    } else if (Number.isInteger(scene.updated_turn)) {
+      lines.push('- 일시 장면 상태: T' + scene.updated_turn + ' 기록은 ' + sceneAge + '턴 전 상태라 현재 확정값에서 제외');
+    }
+    if (wardrobeRecovery) {
+      lines.push('- 복장 복구 필요: 해제된 복장 규칙의 잔존 기록. 현재의 명시적 자발 행동이 없으면 몸을 가리거나 통상 복장으로 복귀');
+    }`,
+  'do not project stale clothing posture or current action as current structured facts'
+);
+
+replaceOnce(
+  `    + '- 저장된 위치·복장·자세·현재 행동을 근거 없이 초기화하거나 다른 인물의 상태와 섞지 않는다.\\n'
+    + '- 감정 기록은 마지막으로 확인된 내적 상태다. 현재 사건과 시간이 흐른 만큼 성격과 새 자극에 맞게 이어가되, 반대 감정으로 갑자기 초기화하지 않는다.\\n'`,
+  `    + '- 관계·호칭·영구 기억은 지속 상태다. 반면 복장·자세·현재 행동은 최근 ' + NPC_TRANSIENT_SCENE_STATE_MAX_AGE + '턴 이내에 갱신된 경우만 현재 확정값으로 사용한다.\\n'
+    + '- 만료된 복장·자세·행동은 재등장 시 그대로 되살리지 않는다. 현재 장면의 직업·장소·명시적 행동을 기준으로 자연스럽게 복구한다.\\n'
+    + '- 감정 기록은 마지막으로 확인된 내적 상태다. 현재 사건과 시간이 흐른 만큼 성격과 새 자극에 맞게 이어가되, 반대 감정으로 갑자기 초기화하지 않는다.\\n'`,
+  'separate durable memory from expiring physical scene state'
+);
+
+replaceOnce(
+  `  const relevantNpcStructuredStateSection = relevantNpcCanonIds.length
+    ? buildRelevantNpcStructuredStateSection(relevantNpcCanonIds, save, master.characters || {})
+    : '';
+
+  return {`,
+  `  const relevantNpcStructuredStateSection = relevantNpcCanonIds.length
+    ? buildRelevantNpcStructuredStateSection(relevantNpcCanonIds, save, master.characters || {})
+    : '';
+  const csaWardrobeRecoverySection = relevantNpcCanonIds.length
+    ? buildCsaWardrobeRecoverySection(relevantNpcCanonIds, save, master.characters || {})
+    : '';
+
+  return {`,
+  'build wardrobe recovery guidance for all relevant NPCs'
+);
+
+replaceOnce(
+  `      ...(relevantNpcStructuredStateSection ? [{ role: 'system', content: relevantNpcStructuredStateSection }] : [])`,
+  `      ...(relevantNpcStructuredStateSection ? [{ role: 'system', content: relevantNpcStructuredStateSection }] : []),
+      ...(csaWardrobeRecoverySection ? [{ role: 'system', content: csaWardrobeRecoverySection }] : [])`,
+  'inject wardrobe recovery after structured NPC state as latest Story authority'
+);
+
+replaceOnce(
+  `const CSA_AFTEREFFECT_ACTION_RE = /(?:멈추|중단|정리|거리|물러|옷|상의|질문|묻|거절|경계|다시|확인|바라보|고개를\\s*저)/;`,
+  `const CSA_AFTEREFFECT_ACTION_RE = /(?:멈추|중단|정리|거리|물러|옷|상의|유니폼|가리|여미|단추|착의|질문|묻|거절|경계|다시|확인|바라보|고개를\\s*저)/;`,
+  'recognize covering and dressing as CSA aftereffect processing evidence'
+);
+
+assertions.push(
+  ['transient scene freshness limit', source.includes('const NPC_TRANSIENT_SCENE_STATE_MAX_AGE = 8;')],
+  ['stale physical state excluded', source.includes('상태라 현재 확정값에서 제외')],
+  ['wardrobe recovery helper', source.includes('function buildCsaWardrobeRecoverySection')],
+  ['wardrobe recovery final injection', source.includes('content: csaWardrobeRecoverySection')],
+  ['habit cannot preserve nudity', source.includes('예전 규칙, 습관, 상식수용도, 과거 성적 경험만으로 계속 벗고 있게 하지 않는다')],
+  ['dressing aftereffect evidence', source.includes('유니폼|가리|여미|단추|착의')]
+);

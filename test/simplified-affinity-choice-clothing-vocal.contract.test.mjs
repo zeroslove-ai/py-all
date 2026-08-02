@@ -65,12 +65,13 @@ test('physical state prompt remains compact and present-NPC only', () => {
   assert.doesNotMatch(generated, /모든 NPC의 기본 프로필 전체를 매 턴 반복/);
 });
 
-test('clothing CSA forbids invented exceptions without blocking save', () => {
+test('active clothing CSA is absolute without blocking save', () => {
   const generated = generatedWorker();
-  assert.match(generated, /회진·체면·관행·외부인·업무 이동을 임의 예외로 만들지 않는다/);
-  assert.match(generated, /규정을 정확히 알고, 위반임을 인정하고, 구체적 이유와 불이익 감수/);
-  assert.match(generated, /저장 실패나 서사 실패를 만들지 않는다/);
-  assert.match(generated, /저장된 구조화 복장 상태를 자동으로 뒤집지 않는다/);
+  assert.match(generated, /활성 복장 CSA — 실제 복장의 절대 최종 권위/);
+  assert.match(generated, /외부인·회진·방문객·체면·성격·최면·업무 이동보다 우선/);
+  assert.match(generated, /플레이어가 반대 복장을 입혀도 NPC는 규정상 유지할 수 없다고 말하고 즉시 스스로 위 상태로 되돌린다/);
+  assert.match(generated, /저장 시 위 상태로 자동 정규화하며 턴이나 저장을 실패시키지 않는다/);
+  assert.doesNotMatch(generated, /NPC가 의식적으로 위반하려면 규정을 정확히 알고/);
 });
 
 test('active sex requires minimum vocal reactions and short dialogue', () => {

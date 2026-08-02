@@ -40,6 +40,14 @@ function replaceBalancedStatement(startMarker, replacement, label) {
   source = source.slice(0, start) + replacement + source.slice(end);
 }
 
+function insertAfterUnique(marker, addition, label) {
+  const first = source.indexOf(marker);
+  if (first === -1) throw new Error(`${label}: marker not found`);
+  if (source.indexOf(marker, first + marker.length) !== -1) throw new Error(`${label}: marker not unique`);
+  const end = first + marker.length;
+  source = source.slice(0, end) + addition + source.slice(end);
+}
+
 // Phase 1: trust Extract's affinity judgment and retire bold-choice probability.
 replaceBalancedStatement(
   `  if (affinityChange && acceptedAffinityDelta > 0) {`,
@@ -97,26 +105,25 @@ replaceBalancedStatement(
 );
 
 replaceOnce(
-  `- 활성 CSA와 무관한 행동은 호감도, 성격, 현재 관계, 상황, 과감 선택지 판정으로 별도 결정한다. 상식개변 수행을 플레이어에 대한 복종·애정·신뢰로 묘사하지 않는다.`,
-  `- 활성 CSA와 무관한 행동은 호감도, 성격, 현재 관계, 상황으로 자연스럽게 결정한다. 별도의 과감 선택지나 확률 선택지를 억지로 만들지 않는다. 상식개변 수행을 플레이어에 대한 복종·애정·신뢰로 묘사하지 않는다.`,
+  `호감도, 성격, 현재 관계, 상황, 과감 선택지 판정으로 별도 결정한다.`,
+  `호감도, 성격, 현재 관계, 상황으로 자연스럽게 결정한다. 별도의 과감 선택지나 확률 선택지를 억지로 만들지 않는다.`,
   'remove bold-choice instruction from CSA scope contract'
 );
 
 replaceOnce(
-  `In normal play, [3] contains exactly four in-world action choices; never include an app-information choice or 상식개변의 생성·수정·삭제·강화·해제 같은 관리 조작. 해당 관리는 상식개변 앱 UI에서만 한다.\\`,
-  `In normal play, [3] contains exactly four natural in-world action choices; never force an extreme, reckless, humiliating, violent, or low-probability option merely for variety, and never display a success percentage. All four may be ordinary choices. Never include an app-information choice or 상식개변의 생성·수정·삭제·강화·해제 같은 관리 조작. 해당 관리는 상식개변 앱 UI에서만 한다.\\`,
+  `[FINAL OUTPUT CONTRACT — HIGHEST PRIORITY]`,
+  `[CHOICE SIMPLIFICATION — HIGHEST PRIORITY] [3. 선택지]는 정확히 네 개의 자연스러운 행동을 제시한다. 다양성을 채우기 위해 극단적·무모한·모욕적·폭력적·저확률 행동을 억지로 만들지 않고 성공률을 표시하지 않는다. 네 개 모두 평범한 선택지여도 정상이다.
+[FINAL OUTPUT CONTRACT — HIGHEST PRIORITY]`,
   'remove forced bold choice generation and probability display'
 );
 
 // Phase 2: compact scene-state authority and sexual vocal realism.
-replaceOnce(
-  `- 저장된 복장과 자세는 현재 물리 상태다. 실제로 입고 벗고 열고 잠그거나 자세를 바꾸는 행동이 서사에서 완료된 경우만 바꾼다.\\
-- 상식개변의 생성·해제는 복장을 자동으로 바꾸지 않는다. 현재 인식과 현재 물리 상태를 구분한다.\`;`,
-  `- 저장된 복장과 자세는 현재 물리 상태다. 실제로 입고 벗고 열고 잠그거나 자세를 바꾸는 행동이 서사에서 완료된 경우만 바꾼다.\\
+insertAfterUnique(
+  `- 저장된 복장과 자세는 현재 물리 상태다. 실제로 입고 벗고 열고 잠그거나 자세를 바꾸는 행동이 서사에서 완료된 경우만 바꾼다.`,
+  `\\
 - 이 블록에는 현재 등장 NPC만 포함한다. 기본 프로필 전체를 반복하지 말고 이름·현재 복장·현재 자세만 짧게 사용한다.\\
 - 활성 복장 CSA가 현재 등장 NPC에게 적용되면 회진·체면·관행·외부인·업무 이동을 임의 예외로 만들지 않는다. NPC가 의식적으로 위반하려면 규정을 정확히 알고, 위반임을 인정하고, 구체적 이유와 불이익 감수를 대사나 행동으로 드러내야 한다. 그 외에는 현재 복장과 규정 상태를 그대로 유지한다.\\
-- Story가 직전 복장을 잘못 묘사했더라도 저장된 구조화 복장 상태를 자동으로 뒤집지 않는다. 다음 장면은 확정된 현재 상태에서 자연스럽게 이어가며 저장 실패나 서사 실패를 만들지 않는다.\\
-- 상식개변의 생성·해제는 복장을 자동으로 바꾸지 않는다. 현재 인식과 현재 물리 상태를 구분한다.\`;`,
+- Story가 직전 복장을 잘못 묘사했더라도 저장된 구조화 복장 상태를 자동으로 뒤집지 않는다. 다음 장면은 확정된 현재 상태에서 자연스럽게 이어가며 저장 실패나 서사 실패를 만들지 않는다.`,
   'strengthen compact present-NPC clothing continuity without save gate'
 );
 
@@ -132,7 +139,7 @@ assertions.push(
   ['bold choice metadata wrapper active', source.includes('function buildChoiceMetaLegacy') && source.includes("meta.kind !== 'bold'")],
   ['bold roll disabled', source.includes("function resolveBoldChoiceAttempt(save = {}, master = {}, playerInput = '', gameId = '', turnNumber = 0) {\n  return null;\n}")],
   ['stale bold metadata invalid', source.includes("choiceMeta.some(meta => isPlainObject(meta) && meta.kind === 'bold')")],
-  ['no forced extreme choice prompt', source.includes('never force an extreme, reckless, humiliating, violent, or low-probability option merely for variety')],
+  ['no forced extreme choice prompt', source.includes('극단적·무모한·모욕적·폭력적·저확률 행동을 억지로 만들지 않고 성공률을 표시하지 않는다')],
   ['compact present npc clothing injection', source.includes('이 블록에는 현재 등장 NPC만 포함한다')],
   ['clothing csa no invented exception', source.includes('회진·체면·관행·외부인·업무 이동을 임의 예외로 만들지 않는다')],
   ['clothing conflict never save-fails', source.includes('저장 실패나 서사 실패를 만들지 않는다')],

@@ -88,13 +88,11 @@ replaceOnce(
   'invalidate stale stored bold choice metadata'
 );
 
-replaceRegex(
-  /function resolveBoldChoiceAttempt\(save = \{\}, master = \{\}, playerInput = '', gameId = '', turnNumber = 0\) \{[\s\S]*?\n\}\n\n\/\/ csa_direct route:/,
+replaceBalancedStatement(
+  `function resolveBoldChoiceAttempt(save = {}, master = {}, playerInput = '', gameId = '', turnNumber = 0) {`,
   `function resolveBoldChoiceAttempt(save = {}, master = {}, playerInput = '', gameId = '', turnNumber = 0) {
   return null;
-}
-
-// csa_direct route:`,
+}`,
   'disable bold-choice rolls while keeping compatibility call sites'
 );
 

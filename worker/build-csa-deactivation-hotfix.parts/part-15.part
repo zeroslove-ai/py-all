@@ -31,6 +31,6 @@ replaceOnce(
 );
 
 assertions.push(
-  ['no ghost nurse inference', source.includes('이름 모를') && !source.includes("(?:미등록|일반|다른|옆|근처|새로 온)?\\\\s*(?:남자|남성|여자|여성)?\\\\s*(?:간호사|수간호사)")],
+  ['explicit generic supporting inference only', source.includes('이름 모를') && source.includes('const SUPPORTING_NURSE_RE') && source.includes('const SUPPORTING_DOCTOR_RE')],
   ['registered main participant priority', source.includes("if (mainId) return mainId;") && source.includes("return supporting?.id || null;")]
 );

@@ -40,14 +40,6 @@ function replaceBalancedStatement(startMarker, replacement, label) {
   source = source.slice(0, start) + replacement + source.slice(end);
 }
 
-function insertAfterUnique(marker, addition, label) {
-  const first = source.indexOf(marker);
-  if (first === -1) throw new Error(`${label}: marker not found`);
-  if (source.indexOf(marker, first + marker.length) !== -1) throw new Error(`${label}: marker not unique`);
-  const end = first + marker.length;
-  source = source.slice(0, end) + addition + source.slice(end);
-}
-
 // Phase 1: trust Extract's affinity judgment and retire bold-choice probability.
 replaceBalancedStatement(
   `  if (affinityChange && acceptedAffinityDelta > 0) {`,
@@ -117,21 +109,13 @@ replaceOnce(
   'remove forced bold choice generation and probability display'
 );
 
-// Phase 2: compact scene-state authority and sexual vocal realism.
-insertAfterUnique(
-  `- 저장된 복장과 자세는 현재 물리 상태다. 실제로 입고 벗고 열고 잠그거나 자세를 바꾸는 행동이 서사에서 완료된 경우만 바꾼다.`,
-  `\\
-- 이 블록에는 현재 등장 NPC만 포함한다. 기본 프로필 전체를 반복하지 말고 이름·현재 복장·현재 자세만 짧게 사용한다.\\
-- 활성 복장 CSA가 현재 등장 NPC에게 적용되면 회진·체면·관행·외부인·업무 이동을 임의 예외로 만들지 않는다. NPC가 의식적으로 위반하려면 규정을 정확히 알고, 위반임을 인정하고, 구체적 이유와 불이익 감수를 대사나 행동으로 드러내야 한다. 그 외에는 현재 복장과 규정 상태를 그대로 유지한다.\\
-- Story가 직전 복장을 잘못 묘사했더라도 저장된 구조화 복장 상태를 자동으로 뒤집지 않는다. 다음 장면은 확정된 현재 상태에서 자연스럽게 이어가며 저장 실패나 서사 실패를 만들지 않는다.`,
-  'strengthen compact present-NPC clothing continuity without save gate'
-);
-
+// Phase 2: compact present-NPC state authority and sexual vocal realism.
 replaceOnce(
   `[사용자 정정 우선] 사용자가 직전 장면의 상태·복장·위치·행동 결과를 직접 정정하면,`,
-  `[성행위 음성·대사 현실성 — 최종 권위] 삽입이나 강한 직접 자극이 실제로 진행 중이면 NPC는 평상시처럼 긴 설명문을 계속 말하지 않는다. 일반 삽입은 장면 전체에 독립적인 신음·끊어진 숨·짧은 감각 반응을 최소 2회, 빠르거나 깊은 삽입은 최소 3회, 절정 직전·절정은 최소 4회 분산한다. 같은 신음을 기계적으로 반복하지 말고 캐릭터 성향에 맞춰 낮게 참기, 끊어진 말, 비명, 호흡 붕괴, 몸 반응을 섞는다. 강한 자극 중 한 번의 직접 대사는 짧은 구절 1~2개를 기본으로 하며, 완성된 장문 설명은 최대 1회만 허용한다. 흥분도가 높을수록 말보다 신음·호흡·신체 반응의 비중을 높인다. 직접 발화 형식은 기존 화자명 계약을 그대로 따른다.
+  `[현재 등장 NPC 상태·복장 — 최종 권위] 현재 물리 상태 블록은 현재 등장 NPC만 대상으로 하며 기본 프로필 전체를 반복하지 않는다. 이름·현재 복장·현재 자세만 짧게 사용한다. 활성 복장 CSA가 현재 등장 NPC에게 적용되면 회진·체면·관행·외부인·업무 이동을 임의 예외로 만들지 않는다. NPC가 의식적으로 위반하려면 규정을 정확히 알고, 위반임을 인정하고, 구체적 이유와 불이익 감수를 대사나 행동으로 드러내야 한다. 그 외에는 현재 복장과 규정 상태를 그대로 유지한다. Story가 직전 복장을 잘못 묘사했더라도 저장된 구조화 복장 상태를 자동으로 뒤집지 않는다. 다음 장면은 확정된 현재 상태에서 자연스럽게 이어가며 저장 실패나 서사 실패를 만들지 않는다.
+[성행위 음성·대사 현실성 — 최종 권위] 삽입이나 강한 직접 자극이 실제로 진행 중이면 NPC는 평상시처럼 긴 설명문을 계속 말하지 않는다. 일반 삽입은 장면 전체에 독립적인 신음·끊어진 숨·짧은 감각 반응을 최소 2회, 빠르거나 깊은 삽입은 최소 3회, 절정 직전·절정은 최소 4회 분산한다. 같은 신음을 기계적으로 반복하지 말고 캐릭터 성향에 맞춰 낮게 참기, 끊어진 말, 비명, 호흡 붕괴, 몸 반응을 섞는다. 강한 자극 중 한 번의 직접 대사는 짧은 구절 1~2개를 기본으로 하며, 완성된 장문 설명은 최대 1회만 허용한다. 흥분도가 높을수록 말보다 신음·호흡·신체 반응의 비중을 높인다. 직접 발화 형식은 기존 화자명 계약을 그대로 따른다.
 [사용자 정정 우선] 사용자가 직전 장면의 상태·복장·위치·행동 결과를 직접 정정하면,`,
-  'add minimum vocal reactions and short-dialogue contract for active sex'
+  'add compact clothing authority and sexual vocal contract before stable user-correction marker'
 );
 
 assertions.push(
@@ -140,7 +124,7 @@ assertions.push(
   ['bold roll disabled', source.includes("function resolveBoldChoiceAttempt(save = {}, master = {}, playerInput = '', gameId = '', turnNumber = 0) {\n  return null;\n}")],
   ['stale bold metadata invalid', source.includes("choiceMeta.some(meta => isPlainObject(meta) && meta.kind === 'bold')")],
   ['no forced extreme choice prompt', source.includes('극단적·무모한·모욕적·폭력적·저확률 행동을 억지로 만들지 않고 성공률을 표시하지 않는다')],
-  ['compact present npc clothing injection', source.includes('이 블록에는 현재 등장 NPC만 포함한다')],
+  ['compact present npc clothing injection', source.includes('현재 물리 상태 블록은 현재 등장 NPC만 대상으로 하며') && source.includes('이름·현재 복장·현재 자세만 짧게 사용한다')],
   ['clothing csa no invented exception', source.includes('회진·체면·관행·외부인·업무 이동을 임의 예외로 만들지 않는다')],
   ['clothing conflict never save-fails', source.includes('저장 실패나 서사 실패를 만들지 않는다')],
   ['sexual vocal minimum contract', source.includes('일반 삽입은 장면 전체에 독립적인 신음·끊어진 숨·짧은 감각 반응을 최소 2회') && source.includes('절정 직전·절정은 최소 4회')]

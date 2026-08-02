@@ -55,7 +55,8 @@ function sanitizeStoryMetaLeakLine(line = '') {
   const value = String(line || '');
   const match = STORY_META_LEAK_SEGMENT_RE.exec(value);
   if (!match) return value;
-  return value.slice(0, match.index).trimEnd();
+  const preserved = value.slice(0, match.index).trimEnd();
+  return preserved || null;
 }
 
 function createStoryMetaLeakSanitizer() {
@@ -66,12 +67,13 @@ function createStoryMetaLeakSanitizer() {
       const lines = combined.split(/\r?\n/);
       carry = lines.pop() || '';
       if (!lines.length) return '';
-      return lines.map(sanitizeStoryMetaLeakLine).filter(line => line.trim()).join('\n') + '\n';
+      const sanitizedLines = lines.map(sanitizeStoryMetaLeakLine).filter(line => line !== null);
+      return sanitizedLines.join('\n') + '\n';
     },
     flush() {
       const leftover = sanitizeStoryMetaLeakLine(carry);
       carry = '';
-      return leftover;
+      return leftover || '';
     }
   };
 }

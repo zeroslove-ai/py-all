@@ -60,7 +60,7 @@ test('choice prompt no longer forces extreme or probability options', () => {
 
 test('physical state prompt remains compact and present-NPC only', () => {
   const generated = generatedWorker();
-  assert.match(generated, /이 블록에는 현재 등장 NPC만 포함한다/);
+  assert.match(generated, /현재 물리 상태 블록은 현재 등장 NPC만 대상으로 하며/);
   assert.match(generated, /이름·현재 복장·현재 자세만 짧게 사용한다/);
   assert.doesNotMatch(generated, /모든 NPC의 기본 프로필 전체를 매 턴 반복/);
 });

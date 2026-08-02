@@ -68,6 +68,7 @@ function createStoryMetaLeakSanitizer() {
       carry = lines.pop() || '';
       if (!lines.length) return '';
       const sanitizedLines = lines.map(sanitizeStoryMetaLeakLine).filter(line => line !== null);
+      if (!sanitizedLines.length) return '';
       return sanitizedLines.join('\n') + '\n';
     },
     flush() {

@@ -1,0 +1,8 @@
+{
+  "name": "game-proxy-company-v1",
+  "main": "src/index.js",
+  "compatibility_date": "2026-08-03",
+  "vars": {
+    "GAME_EDITION": "company-v1"
+  }
+}

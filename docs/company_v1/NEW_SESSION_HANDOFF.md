@@ -12,9 +12,12 @@
 2. `docs/company_v1/INFRASTRUCTURE_PLAN.md`
 3. `docs/company_v1/GAME_SYSTEM_DESIGN.md`
 4. `docs/company_v1/CONTENT_BLUEPRINT.md`
-5. `docs/company_v1/CODEX_IMPLEMENTATION_PLAN.md`
-6. 병원편 참고: `docs/project_v2/CURRENT_PROJECT_MEMORY.md`
-7. 병원편 참고: `docs/project_v2/CODEX_IMPLEMENTATION_HANDOFF.md`
+5. `docs/company_v1/UI_UX_REDESIGN.md`
+6. `docs/company_v1/NARRATIVE_OUTPUT_CONTRACT.md`
+7. `docs/company_v1/DESIGN_REVIEW_BACKLOG.md`
+8. `docs/company_v1/CODEX_IMPLEMENTATION_PLAN.md`
+9. 병원편 참고: `docs/project_v2/CURRENT_PROJECT_MEMORY.md`
+10. 병원편 참고: `docs/project_v2/CODEX_IMPLEMENTATION_HANDOFF.md`
 
 ## 현재 기준
 
@@ -31,6 +34,7 @@
 - 회사편 game ID도 아직 생성하지 않음
 - 회사편 Cloudflare Worker도 아직 배포하지 않음
 - 병원편 DB·Worker·게임은 절대 변경하거나 reset하지 않음
+- 회사편 설계 문서가 추가됐으므로 Phase 0 시작 전에 반드시 `feature/company-v1`을 최신 fast-forward 한다.
 
 ## 확정 인프라 결정
 
@@ -102,6 +106,81 @@ NPC가 규정을 몰라서 거부하는 서사는 금지한다.
 - 영구 관계·Mind Monitor·전용 이미지 없음
 - 이유 없이 장면에서 사라지지 않음
 
+## UI/UX 확정 방향
+
+병원편 UI의 우측 패널 누적 구조를 회사편에서 그대로 복사하지 않는다.
+
+기본 화면 우선순위:
+
+1. 서사와 캐릭터 대화
+2. 선택지 4개와 직접 입력
+3. 현재 인물·장소·시간·업무
+4. 현재 장면 적용 CSA 요약
+5. 저장·오류 상태
+
+다음 정보는 상세 drawer나 별도 화면으로 이동한다.
+
+- 전체 관계 기록
+- 세부 성적 기록
+- 전체 마인드 모니터
+- 플레이어 세부 상태
+- 전체 활성 CSA
+- 조직도·지도
+- 기록·피드백·리셋·버전 정보
+
+모바일에서는 데스크톱 우측 패널을 아래에 그대로 붙이지 않는다. `이야기 / 인물 / 앱 / 더보기` 중심의 별도 모바일 구조를 사용한다.
+
+자세한 계약은 `UI_UX_REDESIGN.md`를 따른다.
+
+## 서사 출력 계약
+
+서사와 캐릭터 대화를 시간 순서대로 유지하면서 명시적 블록으로 구분한다.
+
+```text
+[SCENE]
+서사와 행동
+
+[DIALOGUE speaker="인물명" direction="연기 지시"]
+“실제 대사”
+```
+
+본문 뒤에는 다음 섹션을 둔다.
+
+```text
+[PLAYER_STATUS]
+현재 판단에 필요한 플레이어 상황
+
+[CHOICES]
+1. ...
+2. ...
+3. ...
+4. ...
+```
+
+Frontend는 SCENE을 소설 본문으로, DIALOGUE를 화자·연기지시·대사가 분리된 speech block으로 렌더링한다. TTS는 기본적으로 DIALOGUE만 읽는다.
+
+marker가 일부 깨져도 원문을 보존하고 fallback scene block으로 표시한다. 형식 오류를 이유로 Story 재작성이나 추가 LLM repair를 하지 않는다.
+
+자세한 계약은 `NARRATIVE_OUTPUT_CONTRACT.md`를 따른다.
+
+## 추가 사전 검토
+
+운영 전 다음을 반드시 검토한다.
+
+- 턴 상태 머신과 중복 입력 방지
+- Story/Extract/Commit 각 단계 오류 복구
+- 새로고침 시 미완료 턴 복구
+- 다중 NPC focal character와 last speaker 분리
+- 복장·자세·업무 상태 freshness
+- 일반 NPC 장면 지속성
+- 이미지/TTS 실패의 비차단 처리
+- 선택지 전체 원문 보존
+- 모바일 스크롤·키보드·접근성
+- game ID와 edition 격리
+- 리셋 보호
+
+우선순위와 완료 기준은 `DESIGN_REVIEW_BACKLOG.md`를 따른다.
+
 ## 콘텐츠 초안
 
 - 회사: 루미너스 브랜드 그룹
@@ -148,11 +227,15 @@ Phase 0 허용:
 
 Phase 0 금지:
 
+- UI/UX 실제 구현
+- Story marker parser 구현
 - Supabase project 생성 또는 변경
 - Cloudflare deploy
 - 외부 모델 호출
 - 병원편 코드 수정
 - game reset
+
+UI/UX와 서사 출력 계약은 지금 문서로만 고정하며 해당 구현 Phase에서 적용한다.
 
 ## Codex 지시 방식
 
@@ -176,10 +259,11 @@ Codex에는 구현만 맡긴다. 모든 명령은 한 번에 복사 가능한 Po
 ## 새 세션 첫 행동
 
 1. `feature/company-v1` 원격 HEAD 확인
-2. 위 5개 회사편 문서 읽기
+2. 위 8개 회사편 문서 읽기
 3. 현재 브랜치와 작업 트리 확인
 4. 병원편 운영 자원 불변 확인
-5. Phase 0 구현 범위를 검토
-6. Codex용 단일 PowerShell 실행 지시 작성
+5. 현재 진행 중인 PR 유무 확인
+6. Phase 0 또는 현재 승인된 단일 Phase 범위 검토
+7. Codex용 단일 PowerShell 실행 지시 작성
 
 ---

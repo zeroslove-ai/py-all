@@ -14,6 +14,10 @@ const sidebar = {
         <div class="player-card-sub" id="player-info-status"></div>
         <div class="player-card-metrics" id="player-info-metrics"></div>
         <div class="player-card-world" id="player-info-world"></div>
+        <div class="player-ejaculation-gauge" id="player-ejaculation-gauge" aria-label="플레이어 사정 게이지">
+          <div class="player-ejaculation-gauge-head"><span class="player-ejaculation-gauge-label">💦 사정 게이지</span><span class="player-ejaculation-gauge-value" id="player-ejaculation-gauge-value">0/100 · 아직 사정 불가</span></div>
+          <div class="player-ejaculation-gauge-track"><div class="player-ejaculation-gauge-fill" id="player-ejaculation-gauge-fill"></div><div class="player-ejaculation-gauge-threshold" title="50부터 사정 가능"></div></div>
+        </div>
       </section>
       <section class="panel-section"><img class="character-img hidden" id="character-img" alt="현재 캐릭터"></section>
       <section class="panel-section"><div class="panel-title" id="character-info-title">캐릭터 기본정보</div><div class="info-list" id="character-info"></div></section>
@@ -113,6 +117,19 @@ const sidebar = {
       worldEl.textContent = worldParts.join('  ');
       worldEl.style.display = worldParts.length ? '' : 'none';
     }
+
+    const rawMeter = Number(save?.player_sexual_state?.ejaculation_meter);
+    const meter = Number.isFinite(rawMeter) ? Math.max(0, Math.min(100, Math.round(rawMeter))) : 0;
+    const ready = meter >= 50;
+    const gauge = document.getElementById('player-ejaculation-gauge');
+    const gaugeValue = document.getElementById('player-ejaculation-gauge-value');
+    const gaugeFill = document.getElementById('player-ejaculation-gauge-fill');
+    if (gauge) {
+      gauge.classList.toggle('ready', ready);
+      gauge.classList.toggle('max', meter >= 100);
+    }
+    if (gaugeValue) gaugeValue.textContent = meter + '/100 · ' + (ready ? '사정 가능' : '아직 사정 불가');
+    if (gaugeFill) gaugeFill.style.width = meter + '%';
   },
 
   updatePlayerInnerThought(text, playerName = '') {

@@ -87,7 +87,7 @@ test('affinity prompt allows modest sexual satisfaction without mechanical farmi
 
 test('clothing CSA is absolute and removes invented exception branches', () => {
   const generated = generatedWorker();
-  assert.match(generated, /활성 복장 CSA — 실제 복장의 절대 최종 권위/);
+  assert.match(generated, /FINAL ACTIVE CLOTHING CSA — DO NOT CONTRADICT/);
   assert.match(generated, /플레이어가 반대 복장을 입혀도 NPC는 규정상 유지할 수 없다고 말하고 즉시 스스로 위 상태로 되돌린다/);
   assert.match(generated, /별도의 예외, 의식적 위반, 불이익 감수, 협상 분기를 만들지 않는다/);
   assert.doesNotMatch(generated, /NPC가 의식적으로 위반하려면 규정을 정확히 알고/);

@@ -1,3 +1,5 @@
+> LEGACY DOCUMENT — main/archive/pre-csa-only 전용. feature/csa-only 구현 기준으로 사용하지 않는다.
+
 # 게임빌더 v2 프론트엔드 구조
 
 **기준일**: 2026-07-22  
@@ -142,9 +144,17 @@ const state = {
 - 선택지 버튼 클릭은 `submitChoice(text, { source, choice_index, choice_text })`를 통해 `pending.playerAction`으로 Commit까지 유지되고, `api.commitTurn`이 `player_action`으로 Worker에 전달한다. 최종 source 판정·검증은 Worker가 한다.
 - 게임 초기화(reset) 성공 시 `playHistory.onGameReset()`이 기록 캐시를 비운다.
 
+## 사이드바 플레이어 정보/속마음 + 과감 선택지 등급 (CSA-only 리밸런스)
+
+- `pages/sidebar.js`의 우측 패널 순서: 1) 플레이어 정보(compact card, `#player-info-section`: `#player-info-identity`/`#player-info-status`/`#player-info-metrics`/`#player-info-world`, `save.player`+`save.world_state.location_label`/`time_label`) 2) NPC 이미지 3) NPC 상태(스탯) 4) 마인드 모니터 5) 관계 기록 6) 플레이어 속마음(`#player-inner-thought-section`, `save.player_inner_thought`).
+- 플레이어 정보 카드: `player.job`에 `/`가 있으면 첫 `/` 기준으로 앞부분(직업, identity 줄)과 뒷부분(현재 상태, 별도 줄)으로 나눠 표시한다 — 긴 `background`는 이 카드에 채우지 않는다. 위치는 `world_state.location_label → player.location → save.player_location` 순으로 fallback한다. 각 하위 줄(현재 상태/신체 수치/위치·시간)은 값이 없으면 줄 자체를 숨긴다.
+- `save.player_inner_thought`는 새 Extract 필드(`player_inner_thought`)에서 온 JSONB 전용 값이다(DB column/migration 없음). Worker가 Story [2] 섹션의 `[플레이어 이름] 속마음: ...` 줄에서 `속마음:` 뒤 본문만 저장하고, 프론트가 표시 시점에 플레이어 이름을 붙인다(저장값에 이미 `속마음:` 접두어가 있으면 중복으로 붙이지 않는다). 값이 없거나 빈 문자열이면 `#player-inner-thought-section` 전체를 숨긴다. `/api/commit-turn`의 `state_patch` 화이트리스트에 포함되어 커밋 직후 바로 갱신된다.
+- `last_choice_meta`의 각 항목에 `severity`(`none|mild|high|extreme|blocked`)가 추가됐다. `kind:'bold'`는 `severity`가 `mild|high|extreme`일 때만 붙고, `severity:'blocked'`는 별도의 `kind:'blocked'`다(`bold`가 아니다). 프론트(`renderGameplayChoices`)는 `kind==='bold' && severity가 mild/high/extreme && Number.isFinite(success_rate)`일 때만 ⚡ 성공률 배지를 표시하고, `kind==='blocked'`면 성공률 없이 `⛔ 실행 불가` 라벨만 표시한다 — `severity`가 없는(legacy) 메타는 절대 ⚡로 표시하지 않는다.
+
 ## 선택지 표시/전달 분리 (2026-07-25 핫픽스)
 
 - Story 본문이 생성한 `[3. 선택지]` 블록은 화면에서 제거하지 않고 그대로 표시한다 (`removeTrailingChoiceBlock` 호출 삭제).
 - 하단 선택지 버튼에는 `summarizeChoiceLabel(text, 30)` 축약문만 표시한다(줄바꿈→공백, 연속 공백 정리, 30자 초과 시 앞 29자+`…`, `❗`는 글자 수 계산 전 분리).
 - 클릭 콜백·`player_action`·DB/플레이 기록/MD·TXT에는 항상 선택지 원문 전체(`fullText`)가 전달·저장된다. 버튼 `title`/`aria-label`에도 원문 전체.
 - 모바일은 `span.choice-label`(nowrap + ellipsis)로 한 줄 표시.
+> LEGACY DOCUMENT — main/archive/pre-csa-only 전용. feature/csa-only 구현 기준으로 사용하지 않는다.

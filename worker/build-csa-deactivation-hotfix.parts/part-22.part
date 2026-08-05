@@ -1,0 +1,131 @@
+function replaceBalancedStatement(startMarker, replacement, label) {
+  const start = source.indexOf(startMarker);
+  if (start === -1) throw new Error(`${label}: start marker not found`);
+  const braceStart = source.indexOf('{', start + startMarker.length - 1);
+  if (braceStart === -1) throw new Error(`${label}: opening brace not found`);
+  let depth = 0;
+  let inString = false;
+  let quote = '';
+  let escaped = false;
+  let inLineComment = false;
+  let inBlockComment = false;
+  let end = -1;
+  for (let i = braceStart; i < source.length; i++) {
+    const ch = source[i];
+    const next = source[i + 1] || '';
+    if (inLineComment) {
+      if (ch === '\n') inLineComment = false;
+      continue;
+    }
+    if (inBlockComment) {
+      if (ch === '*' && next === '/') { inBlockComment = false; i++; }
+      continue;
+    }
+    if (inString) {
+      if (escaped) escaped = false;
+      else if (ch === '\\') escaped = true;
+      else if (ch === quote) { inString = false; quote = ''; }
+      continue;
+    }
+    if (ch === '/' && next === '/') { inLineComment = true; i++; continue; }
+    if (ch === '/' && next === '*') { inBlockComment = true; i++; continue; }
+    if (ch === '"' || ch === "'" || ch === '`') { inString = true; quote = ch; continue; }
+    if (ch === '{') depth++;
+    else if (ch === '}') {
+      depth--;
+      if (depth === 0) { end = i + 1; break; }
+    }
+  }
+  if (end === -1) throw new Error(`${label}: balanced closing brace not found`);
+  source = source.slice(0, start) + replacement + source.slice(end);
+}
+
+// Phase 1: trust Extract's affinity judgment and retire bold-choice probability.
+replaceBalancedStatement(
+  `  if (affinityChange && acceptedAffinityDelta > 0) {`,
+  `  if (affinityChange) {
+    acceptedAffinityDelta = Math.max(-5, Math.min(5, Number(affinityChange.delta) || 0));
+    changes['호감도'] = {
+      delta: acceptedAffinityDelta,
+      reason: typeof affinityChange.reason === 'string' ? affinityChange.reason.slice(0, 180) : ''
+    };
+    next.npc_stat_changes = changes;
+  }`,
+  'trust LLM affinity delta within -5..+5 without keyword reclassification'
+);
+
+replaceOnce(
+  `function buildChoiceMeta(choices = [], save = {}, master = {}, turnNumber = 0, { allowBold = true, structuredMeta = [] } = {}) {`,
+  `function buildChoiceMetaLegacy(choices = [], save = {}, master = {}, turnNumber = 0, { allowBold = true, structuredMeta = [] } = {}) {`,
+  'rename legacy bold-capable choice metadata builder'
+);
+
+replaceOnce(
+  `function isCurrentChoiceMetaValid(choices, choiceMeta, turnNumber, context = null) {`,
+  `function buildChoiceMeta(choices = [], save = {}, master = {}, turnNumber = 0, { allowBold = true, structuredMeta = [] } = {}) {
+  return buildChoiceMetaLegacy(choices, save, master, turnNumber, { allowBold: false, structuredMeta }).map(meta => {
+    if (!isPlainObject(meta) || meta.kind !== 'bold') return meta;
+    return {
+      ...meta,
+      kind: 'free_action',
+      severity: 'none',
+      success_rate: null,
+      affinity: null,
+      acceptance_bonus_applied: false,
+      csa_direct_relevance: meta.csa_direct_relevance || 'none'
+    };
+  });
+}
+
+function isCurrentChoiceMetaValid(choices, choiceMeta, turnNumber, context = null) {`,
+  'add bold-free choice metadata wrapper'
+);
+
+replaceOnce(
+  `  if (!Array.isArray(choiceMeta) || choiceMeta.length !== choices.length) return false;`,
+  `  if (!Array.isArray(choiceMeta) || choiceMeta.length !== choices.length) return false;
+  if (choiceMeta.some(meta => isPlainObject(meta) && meta.kind === 'bold')) return false;`,
+  'invalidate stale stored bold choice metadata'
+);
+
+replaceBalancedStatement(
+  `function resolveBoldChoiceAttempt(save = {}, master = {}, playerInput = '', gameId = '', turnNumber = 0) {`,
+  `function resolveBoldChoiceAttempt(save = {}, master = {}, playerInput = '', gameId = '', turnNumber = 0) {
+  return null;
+}`,
+  'disable bold-choice rolls while keeping compatibility call sites'
+);
+
+replaceOnce(
+  `호감도, 성격, 현재 관계, 상황, 과감 선택지 판정으로 별도 결정한다.`,
+  `호감도, 성격, 현재 관계, 상황으로 자연스럽게 결정한다. 별도의 과감 선택지나 확률 선택지를 억지로 만들지 않는다.`,
+  'remove bold-choice instruction from CSA scope contract'
+);
+
+replaceOnce(
+  `[FINAL OUTPUT CONTRACT — HIGHEST PRIORITY]`,
+  `[CHOICE SIMPLIFICATION — HIGHEST PRIORITY] [3. 선택지]는 정확히 네 개의 자연스러운 행동을 제시한다. 다양성을 채우기 위해 극단적·무모한·모욕적·폭력적·저확률 행동을 억지로 만들지 않고 성공률을 표시하지 않는다. 네 개 모두 평범한 선택지여도 정상이다.
+[FINAL OUTPUT CONTRACT — HIGHEST PRIORITY]`,
+  'remove forced bold choice generation and probability display'
+);
+
+// Phase 2: compact present-NPC state authority and sexual vocal realism.
+replaceOnce(
+  `[사용자 정정 우선] 사용자가 직전 장면의 상태·복장·위치·행동 결과를 직접 정정하면,`,
+  `[현재 등장 NPC 상태·복장 — 최종 권위] 현재 물리 상태 블록은 현재 등장 NPC만 대상으로 하며 기본 프로필 전체를 반복하지 않는다. 이름·현재 복장·현재 자세만 짧게 사용한다. 활성 복장 CSA가 현재 등장 NPC에게 적용되면 회진·체면·관행·외부인·업무 이동을 임의 예외로 만들지 않는다. NPC가 의식적으로 위반하려면 규정을 정확히 알고, 위반임을 인정하고, 구체적 이유와 불이익 감수를 대사나 행동으로 드러내야 한다. 그 외에는 현재 복장과 규정 상태를 그대로 유지한다. Story가 직전 복장을 잘못 묘사했더라도 저장된 구조화 복장 상태를 자동으로 뒤집지 않는다. 다음 장면은 확정된 현재 상태에서 자연스럽게 이어가며 저장 실패나 서사 실패를 만들지 않는다.
+[성행위 음성·대사 현실성 — 최종 권위] 삽입이나 강한 직접 자극이 실제로 진행 중이면 NPC는 평상시처럼 긴 설명문을 계속 말하지 않는다. 일반 삽입은 장면 전체에 독립적인 신음·끊어진 숨·짧은 감각 반응을 최소 2회, 빠르거나 깊은 삽입은 최소 3회, 절정 직전·절정은 최소 4회 분산한다. 같은 신음을 기계적으로 반복하지 말고 캐릭터 성향에 맞춰 낮게 참기, 끊어진 말, 비명, 호흡 붕괴, 몸 반응을 섞는다. 강한 자극 중 한 번의 직접 대사는 짧은 구절 1~2개를 기본으로 하며, 완성된 장문 설명은 최대 1회만 허용한다. 흥분도가 높을수록 말보다 신음·호흡·신체 반응의 비중을 높인다. 직접 발화 형식은 기존 화자명 계약을 그대로 따른다.
+[사용자 정정 우선] 사용자가 직전 장면의 상태·복장·위치·행동 결과를 직접 정정하면,`,
+  'add compact clothing authority and sexual vocal contract before stable user-correction marker'
+);
+
+assertions.push(
+  ['affinity accepts llm delta minus5 plus5', source.includes("acceptedAffinityDelta = Math.max(-5, Math.min(5, Number(affinityChange.delta) || 0))")],
+  ['bold choice metadata wrapper active', source.includes('function buildChoiceMetaLegacy') && source.includes("meta.kind !== 'bold'")],
+  ['bold roll disabled', source.includes("function resolveBoldChoiceAttempt(save = {}, master = {}, playerInput = '', gameId = '', turnNumber = 0) {\n  return null;\n}")],
+  ['stale bold metadata invalid', source.includes("choiceMeta.some(meta => isPlainObject(meta) && meta.kind === 'bold')")],
+  ['no forced extreme choice prompt', source.includes('극단적·무모한·모욕적·폭력적·저확률 행동을 억지로 만들지 않고 성공률을 표시하지 않는다')],
+  ['compact present npc clothing injection', source.includes('현재 물리 상태 블록은 현재 등장 NPC만 대상으로 하며') && source.includes('이름·현재 복장·현재 자세만 짧게 사용한다')],
+  ['clothing csa no invented exception', source.includes('회진·체면·관행·외부인·업무 이동을 임의 예외로 만들지 않는다')],
+  ['clothing conflict never save-fails', source.includes('저장 실패나 서사 실패를 만들지 않는다')],
+  ['sexual vocal minimum contract', source.includes('일반 삽입은 장면 전체에 독립적인 신음·끊어진 숨·짧은 감각 반응을 최소 2회') && source.includes('절정 직전·절정은 최소 4회')]
+);

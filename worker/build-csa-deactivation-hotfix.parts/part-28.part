@@ -1,0 +1,123 @@
+replaceBalancedStatement(
+  `function normalizePlayerSexualState(value = {}) {`,
+  `function normalizePlayerSexualState(value = {}) {
+  const source = isPlainObject(value) ? value : {};
+  const meter = clampPlayerEjaculationMeter(source.ejaculation_meter);
+  return {
+    ejaculation_meter: meter,
+    can_ejaculate: meter >= 50,
+    forced_ejaculation_pending: source.forced_ejaculation_pending === true && meter >= 100,
+    reached_one_hundred_turn: Number.isInteger(source.reached_one_hundred_turn) ? source.reached_one_hundred_turn : null,
+    last_ejaculation_turn: Number.isInteger(source.last_ejaculation_turn) ? source.last_ejaculation_turn : null,
+    last_ejaculation_amount: typeof source.last_ejaculation_amount === 'string' ? source.last_ejaculation_amount : null,
+    last_ejaculation_pre_meter: clampPlayerEjaculationMeter(source.last_ejaculation_pre_meter),
+    updated_turn: Number.isInteger(source.updated_turn) ? source.updated_turn : 0
+  };
+}`,
+  'track forced ejaculation after reaching one hundred'
+);
+
+replaceBalancedStatement(
+  `function resolvePlayerSexualStateUpdate(previousSave = {}, extract = {}, narrativeText = '', turnNumber = 0) {`,
+  `function resolvePlayerSexualStateUpdate(previousSave = {}, extract = {}, narrativeText = '', turnNumber = 0) {
+  const previous = normalizePlayerSexualState(previousSave?.player_sexual_state);
+  const raw = isPlainObject(extract?.player_sexual_state_patch) ? extract.player_sexual_state_patch : {};
+  const meterDelta = Math.max(0, Math.min(35, Math.round(Number(raw.meter_delta) || 0)));
+  const projectedMeter = clampPlayerEjaculationMeter(previous.ejaculation_meter + meterDelta);
+  const evidence = typeof raw.ejaculation_evidence === 'string' ? raw.ejaculation_evidence.trim().slice(0, 300) : '';
+  const evidenceConfirmed = Boolean(evidence) && evidenceExists(evidence, narrativeText);
+  const suppressionEvidence = typeof raw.suppression_evidence === 'string' ? raw.suppression_evidence.trim().slice(0, 300) : '';
+  const suppressionConfirmed = raw.ejaculation_suppressed === true
+    && Boolean(suppressionEvidence)
+    && evidenceExists(suppressionEvidence, narrativeText);
+  const accepted = raw.ejaculation_completed === true && evidenceConfirmed
+    && (projectedMeter >= 50 || previous.forced_ejaculation_pending === true);
+  const amount = accepted ? playerEjaculationAmountForMeter(Math.max(projectedMeter, previous.ejaculation_meter)) : null;
+  const newlyReachedOneHundred = !previous.forced_ejaculation_pending && projectedMeter >= 100 && !accepted;
+  const escapedAtOneHundred = previous.forced_ejaculation_pending && suppressionConfirmed && !accepted;
+  const nextMeter = accepted ? 0 : escapedAtOneHundred ? 85 : projectedMeter;
+  return {
+    accepted,
+    projected_meter: projectedMeter,
+    amount,
+    escaped_at_one_hundred: escapedAtOneHundred,
+    state: {
+      ejaculation_meter: nextMeter,
+      can_ejaculate: nextMeter >= 50,
+      forced_ejaculation_pending: accepted || escapedAtOneHundred ? false : (previous.forced_ejaculation_pending || newlyReachedOneHundred),
+      reached_one_hundred_turn: newlyReachedOneHundred ? turnNumber : (accepted || escapedAtOneHundred ? null : previous.reached_one_hundred_turn),
+      last_ejaculation_turn: accepted ? turnNumber : previous.last_ejaculation_turn,
+      last_ejaculation_amount: accepted ? amount : previous.last_ejaculation_amount,
+      last_ejaculation_pre_meter: accepted ? Math.max(projectedMeter, previous.ejaculation_meter) : previous.last_ejaculation_pre_meter,
+      updated_turn: turnNumber
+    }
+  };
+}`,
+  'resolve next-turn forced ejaculation and immediate withdrawal escape'
+);
+
+replaceBalancedStatement(
+  `function buildPlayerEjaculationMeterSection(save = {}) {`,
+  `function buildPlayerEjaculationMeterSection(save = {}) {
+  const state = normalizePlayerSexualState(save?.player_sexual_state);
+  const meter = state.ejaculation_meter;
+  const availability = meter >= 50 ? '사정 가능' : '아직 사정 불가';
+  const amount = meter >= 100 ? '사정 시 매우 많은 양'
+    : meter >= 85 ? '사정 시 매우 많은 편'
+      : meter >= 70 ? '사정 시 많은 편'
+        : meter >= 50 ? '사정 시 적당한 양'
+          : '사정량 판정 없음';
+  const newline = String.fromCharCode(10);
+  const lines = [
+    '',
+    '',
+    '[플레이어 사정 게이지 — 0~100 절대 규칙]',
+    '- 현재 게이지: ' + meter + '/100 · ' + availability + ' · ' + amount,
+    '- 직접적인 성적 자극과 쾌감이 실제로 이어질 때만 게이지가 오른다. 단순 노출·성적 대화·NPC의 흥분만으로는 올리지 않는다.',
+    '- 0~49에서는 플레이어가 사정을 요구해도 아직 절정에 도달하지 못하며 사정 완료를 서술하지 않는다.',
+    '- 50~99에서는 플레이어가 사정을 선택하거나 명시적으로 요청하면 확률 판정 없이 사정할 수 있다. 50 부근은 적당한 양이며 게이지가 높을수록 양이 자연스럽게 많아진다.',
+    '- 100에 도달한 바로 그 턴에는 자동 사정하지 않고, 다음 턴 강제 사정 상태로 저장한다.',
+    '- 실제 사정이 완료되면 게이지는 0으로 초기화한다.',
+    '- [2. 플레이어 상황판]에 “💦 사정 게이지: ' + meter + '/100 · ' + availability + '”를 표시한다.'
+  ];
+  if (state.forced_ejaculation_pending) {
+    lines.push(
+      '',
+      '[100 도달 다음 턴 — 강제 사정 판정]',
+      '- 이번 턴은 100에 도달한 다음 턴이므로 기본 결과는 반드시 사정이다. 플레이어가 별도로 사정을 선택하지 않아도 성적 자극이 이어지면 매우 많은 정액을 강하게 사정한다.',
+      '- 사정을 피하는 유일한 방법은 이번 응답 초반에 플레이어가 즉시 성기를 빼고 삽입·손·구강 등 모든 직접 자극에서 완전히 벗어나 참는 행동을 실제로 완료하는 것이다.',
+      '- NPC가 성기를 놓아주지 않거나 붙잡거나 계속 자극하면 회피는 실패하며 강제로 사정한다. 이 상황 판단은 현재 행동과 물리 상태를 보고 Story가 자연스럽게 결정한다.',
+      '- 플레이어가 즉시 빠져나와 자극을 완전히 중단하는 데 성공한 경우에만 사정을 참을 수 있다. 단순히 참는다고 말하거나 속도를 늦추는 것만으로는 부족하다.'
+    );
+  }
+  return lines.join(newline);
+}`,
+  'inject next-turn forced ejaculation Story rule without newline escapes'
+);
+
+replaceOnce(
+  `player_sexual_state_patch는 {"meter_delta":0,"ejaculation_completed":false,"ejaculation_evidence":""} 형식이다.`,
+  `player_sexual_state_patch는 {"meter_delta":0,"ejaculation_completed":false,"ejaculation_evidence":"","ejaculation_suppressed":false,"suppression_evidence":""} 형식이다.`,
+  'extend ejaculation Extract patch with suppression evidence'
+);
+
+replaceOnce(
+  `플레이어 사정이 최종 Story에서 실제 완료된 경우에만 ejaculation_completed=true로 하고, ejaculation_evidence에는 완료를 보여주는 Story 원문 그대로의 짧은 인용을 넣는다. 플레이어 입력의 선언만으로 완료 처리하지 않는다.`,
+  `플레이어 사정이 최종 Story에서 실제 완료된 경우에만 ejaculation_completed=true로 하고, ejaculation_evidence에는 완료를 보여주는 Story 원문 그대로의 짧은 인용을 넣는다. 플레이어 입력의 선언만으로 완료 처리하지 않는다. 100 도달 다음 턴에 플레이어가 즉시 성기를 빼고 모든 직접 자극에서 완전히 벗어나 사정을 참는 데 실제 성공했을 때만 ejaculation_suppressed=true로 하고 suppression_evidence에 그 완료 원문을 넣는다. NPC가 놓아주지 않거나 자극을 계속했다면 suppressed로 처리하지 말고 Story의 강제 사정을 추출한다.`,
+  'teach Extract forced ejaculation escape evidence'
+);
+
+replaceOnce(
+  `"player_sexual_state_patch": {"meter_delta": 0, "ejaculation_completed": false, "ejaculation_evidence": "최종 Story 원문 근거 또는 빈 문자열"},`,
+  `"player_sexual_state_patch": {"meter_delta": 0, "ejaculation_completed": false, "ejaculation_evidence": "최종 Story 원문 근거 또는 빈 문자열", "ejaculation_suppressed": false, "suppression_evidence": "즉시 이탈·자극 완전 중단 성공 원문 또는 빈 문자열"},`,
+  'extend Extract JSON schema for ejaculation suppression'
+);
+
+assertions.push(
+  ['one hundred arms next-turn forced ejaculation', source.includes('forced_ejaculation_pending') && source.includes('100에 도달한 바로 그 턴에는 자동 사정하지 않고')],
+  ['forced ejaculation defaults next turn', source.includes('이번 턴은 100에 도달한 다음 턴이므로 기본 결과는 반드시 사정')],
+  ['withdrawal is only escape', source.includes('즉시 성기를 빼고 삽입·손·구강 등 모든 직접 자극에서 완전히 벗어나')],
+  ['continued npc stimulation forces ejaculation', source.includes('NPC가 성기를 놓아주지 않거나 붙잡거나 계속 자극하면')],
+  ['successful suppression lowers meter', source.includes('escapedAtOneHundred ? 85')],
+  ['ejaculation prompt has no escaped newline literals', source.includes('const newline = String.fromCharCode(10)') && source.includes('return lines.join(newline)')]
+);

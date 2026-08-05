@@ -1,20 +1,10 @@
 // ui.js — UI 렌더링 함수들
 
-// Gentle-follow scroll tuning — small per-chunk nudge, not a hard jump.
-const STREAM_SCROLL_STEP_PX = 24;
-const NEAR_BOTTOM_THRESHOLD_PX = 80;
-
 const ui = {
   // ─── DOM 참조 (캐싱) ───
   els: {},
-  // autoFollow: armed at the start of each new turn's narrative (only if the
-  // user was already near the bottom); gentle-follow only nudges the view
-  // while this is true. programmaticScroll: set right before *our own*
-  // scrollTop writes so the 'scroll' listener below can tell those apart
-  // from a real user-driven scroll (wheel/touch/scrollbar/keyboard all
-  // surface as native 'scroll' events either way).
-  scrollState: { autoFollow: true, programmaticScroll: false },
   init() {
+    const preservedDraft = this.els?.chatInput?.value || document.getElementById('chat-input')?.value || '';
     this.els = {
       storyStream: document.getElementById('story-stream'),
       characterImg: document.getElementById('character-img'),
@@ -30,40 +20,19 @@ const ui = {
       gameTitle: document.getElementById('game-title'),
       turnCount: document.getElementById('turn-count')
     };
+    if (this.els.chatInput && preservedDraft && !this.els.chatInput.value) this.els.chatInput.value = preservedDraft;
     this.arrangeMobileLayout();
-    window.addEventListener('resize', () => this.arrangeMobileLayout());
+    if (!this._resizeHandler) {
+      this._resizeHandler = () => this.arrangeMobileLayout();
+      window.addEventListener('resize', this._resizeHandler);
+    }
     // sidebar.init() calls ui.init() again on every side-panel re-render —
     // storyStream itself is never recreated, so guard against attaching a
     // second listener onto the same element.
-    if (!this._scrollListenerAttached && this.els.storyStream) {
-      this.els.storyStream.addEventListener('scroll', () => {
-        if (this.scrollState.programmaticScroll) { this.scrollState.programmaticScroll = false; return; }
-        // Any non-programmatic scroll re-evaluates auto-follow: moving away
-        // from the bottom suspends it, moving back near the bottom (or the
-        // user scrolling back down themselves) re-arms it.
-        this.scrollState.autoFollow = this.isNearBottom();
-      });
-      this._scrollListenerAttached = true;
-    }
-  },
-
-  isNearBottom(threshold = NEAR_BOTTOM_THRESHOLD_PX) {
-    const el = this.els.storyStream;
-    if (!el) return true;
-    return el.scrollHeight - el.scrollTop - el.clientHeight <= threshold;
   },
 
   // Nudges the view down by a small, fixed step — never jumps straight to
   // the bottom — and only while auto-follow is armed for this turn.
-  gentleFollowStream() {
-    if (!this.scrollState.autoFollow) return;
-    const el = this.els.storyStream;
-    if (!el) return;
-    const remaining = el.scrollHeight - el.scrollTop - el.clientHeight;
-    if (remaining <= 0) return;
-    this.scrollState.programmaticScroll = true;
-    el.scrollTop += Math.min(remaining, STREAM_SCROLL_STEP_PX);
-  },
 
   // ─── 메타 정보 ───
   updateMeta(title, turnCount) {
@@ -76,7 +45,12 @@ const ui = {
   },
 
   // ─── 로딩 ───
-  setLoading(active, label = '처리 중') {
+  // lockInput:true (default, used for the story phase) keeps the prior
+  // behavior of disabling the draft textarea itself while active. Extract
+  // and commit pass lockInput:false so the player can keep typing the next
+  // action while "상태 분석 중"/"턴 저장 중" is shown — submission (chatSend)
+  // still stays disabled via `active` regardless of lockInput.
+  setLoading(active, label = '처리 중', { lockInput = true } = {}) {
     this.els.loading.classList.toggle('active', active);
     this.els.loading.textContent = label;
     // An outer caller's own loading spinner clearing (e.g. retryStory's
@@ -84,8 +58,18 @@ const ui = {
     // silently re-enable input while a failed-turn retry/discard lock
     // (state.inputLocked) is in effect.
     const locked = typeof state !== 'undefined' && state.inputLocked;
-    this.els.chatSend.disabled = active || locked;
-    this.els.chatInput.disabled = active || locked;
+    this.els.chatSend.disabled = active || locked || !this.els.chatInput?.value.trim() || !(typeof state !== 'undefined' && state.gameId);
+    this.els.chatInput.disabled = lockInput ? (active || locked) : locked;
+  },
+
+  // Independent draft-editable / submission-enabled controls (README
+  // section 7.2) — setLoading covers the common case above, these exist for
+  // any caller that needs to set just one of the two explicitly.
+  setChatDraftEditable(enabled) {
+    this.els.chatInput.disabled = !enabled;
+  },
+  setTurnSubmissionEnabled(enabled) {
+    this.els.chatSend.disabled = !enabled;
   },
 
   // ─── 사용자 메시지 ───
@@ -96,7 +80,6 @@ const ui = {
     div.style.fontWeight = 'bold';
     div.textContent = `> ${text}`;
     this.els.storyStream.appendChild(div);
-    this.scrollToBottom();
   },
 
   // ─── 서사 스트리밍 (한 글자씩) ───
@@ -119,8 +102,6 @@ const ui = {
       // the rest of this turn is armed only if the user was already near
       // the bottom when it started (typically true right after their own
       // just-sent message).
-      this.scrollState.autoFollow = this.isNearBottom();
-      this.scrollState.programmaticScroll = true;
       // Instant, not smooth — a smooth scroll fires many 'scroll' events
       // over its animation and the guard flag above only suppresses one,
       // which would otherwise mis-detect the tail of that animation as a
@@ -132,7 +113,6 @@ const ui = {
     const textNode = document.createTextNode(chunk);
     cursor.parentNode.insertBefore(textNode, cursor);
 
-    this.gentleFollowStream();
   },
 
   // ─── 서사 스트리밍 종료 ───
@@ -145,7 +125,7 @@ const ui = {
       current.removeAttribute('id');
       // Display-time-only cleanup of any stray ** from a cached/legacy Story
       // response — names/dialogue/newlines are untouched.
-      current.textContent = this.stripBoldMarkers(current.textContent);
+      current.textContent = this.formatNarrativeForDisplay(current.textContent);
     }
 
     // 구분선 추가
@@ -167,7 +147,6 @@ const ui = {
     div.style.fontStyle = 'italic';
     div.textContent = `[시스템] ${text}`;
     this.els.storyStream.appendChild(div);
-    this.scrollToBottom();
   },
 
   restoreNarrative(text) {
@@ -176,7 +155,7 @@ const ui = {
     if (!text) return;
     const div = document.createElement('div');
     div.className = 'narrative';
-    div.textContent = this.stripBoldMarkers(text);
+    div.textContent = this.formatNarrativeForDisplay(text);
     this.els.storyStream.appendChild(div);
     const hr = document.createElement('hr'); hr.className = 'divider';
     this.els.storyStream.appendChild(hr);
@@ -198,6 +177,59 @@ const ui = {
   // so this is a defensive display-time cleanup, not a markdown renderer.
   stripBoldMarkers(text) {
     return typeof text === 'string' ? text.replace(/\*\*/g, '') : text;
+  },
+
+  // Display-only fallback: Story/Extract/Commit keep the original text.
+  // Only the rendered [1] section gains defensive paragraph breaks.
+  formatNarrativeForDisplay(text) {
+    const source = this.stripBoldMarkers(text);
+    if (typeof source !== 'string') return source;
+    const statusMatch = /^\s*\[2\. 플레이어 상황판\]\s*$/m.exec(source);
+    if (!statusMatch) return source;
+    return this.formatNarrativeSectionForDisplay(source.slice(0, statusMatch.index))
+      + source.slice(statusMatch.index);
+  },
+
+  formatNarrativeSectionForDisplay(text) {
+    const dialogueLine = /^\s*[^\n]{1,60}\s+\([^\n)]{1,100}\):\s*“[^\n”]*”\s*$/;
+    const addDialogueBreaks = paragraph => {
+      const lines = paragraph.split('\n');
+      const result = [];
+      lines.forEach((line, index) => {
+        const isDialogue = dialogueLine.test(line);
+        if (isDialogue && result.length && result[result.length - 1] !== '') result.push('');
+        result.push(line);
+        if (isDialogue && index < lines.length - 1 && lines[index + 1].trim()) result.push('');
+      });
+      return result.join('\n');
+    };
+    const splitLongLine = line => {
+      if (line.length <= 300 || dialogueLine.test(line)) return line;
+      const sentences = [];
+      let cursor = 0;
+      const ending = /[.!?…。！？]+(?:[”’"')\]]+)?/g;
+      let match;
+      while ((match = ending.exec(line))) {
+        sentences.push(line.slice(cursor, ending.lastIndex));
+        cursor = ending.lastIndex;
+      }
+      if (cursor < line.length) sentences.push(line.slice(cursor));
+      if (sentences.length < 2) return line;
+      const groups = [];
+      for (let index = 0; index < sentences.length;) {
+        const remaining = sentences.length - index;
+        const size = remaining <= 4 ? remaining : 3;
+        groups.push(sentences.slice(index, index + size).join(''));
+        index += size;
+      }
+      return groups.join('\n\n');
+    };
+
+    // Existing blank-line runs are preserved. The formatter only adds breaks.
+    return text.split(/(\n{2,})/).map(part => {
+      if (/^\n+$/.test(part)) return part;
+      return addDialogueBreaks(part).split('\n').map(splitLongLine).join('\n');
+    }).join('');
   },
 
   normalizeChoice(value) {
@@ -256,7 +288,6 @@ const ui = {
     button.addEventListener('click', onRetry, { once: true });
     div.appendChild(button);
     this.els.storyStream.appendChild(div);
-    this.scrollToBottom();
   },
 
   // A dedicated class (never .narrative) so this notice is never mistaken
@@ -306,7 +337,6 @@ const ui = {
       div.appendChild(detailsEl);
     }
     this.els.storyStream.appendChild(div);
-    this.scrollToBottom();
   },
 
   clearPendingTurnActions() {
@@ -394,14 +424,8 @@ const ui = {
     if (stats.location !== undefined) {
       document.getElementById('stat-location').textContent = stats.location || '-';
     }
-    if (stats['순응도'] !== undefined) {
-      document.getElementById('stat-순응도').textContent = stats['순응도'];
-    }
     if (stats['호감도'] !== undefined) {
       document.getElementById('stat-호감도').textContent = stats['호감도'];
-    }
-    if (stats['최면깊이'] !== undefined) {
-      document.getElementById('stat-최면깊이').textContent = stats['최면깊이'];
     }
     if (stats.csa_active !== undefined) {
       const csa = stats.csa_active;
@@ -451,21 +475,41 @@ const ui = {
   },
 
   // ─── 스크롤 ───
-  renderGameplayChoices(choices, onClick, { setup = false } = {}) {
+  renderGameplayChoices(choices, onClick, { setup = false, choiceMeta = [] } = {}) {
     this.els.choiceButtons.replaceChildren();
     const markers = ['①', '②', '③', '④', '⑤', '⑥'];
     const all = (choices || []).map(choice => this.normalizeChoice(typeof choice === 'string' ? choice : choice?.text)).filter(Boolean);
     const actions = setup ? all : all.filter(text => !/(?:어플|앱)\s*정보|📱/i.test(text)).slice(0, 4);
     actions.forEach((text, index) => {
+      const meta = Array.isArray(choiceMeta) ? choiceMeta[index] : null;
+      // Checked before bold — an exact active-CSA-covered choice is never a
+      // probability roll, so it must never fall into the bold/blocked
+      // branches below (README: csa_direct outranks bold).
+      const csaDirect = meta?.kind === 'csa_direct';
+      // A legacy/stale meta (no severity, or a stray bold with no success
+      // rate) must never show the ⚡ badge or a success-rate figure the
+      // Worker isn't actually honoring anymore.
+      const validSeverity = ['mild', 'high', 'extreme'].includes(meta?.severity);
+      const bold = !csaDirect && meta?.kind === 'bold' && validSeverity && Number.isFinite(Number(meta.success_rate));
+      const blocked = !csaDirect && meta?.kind === 'blocked';
       const explicit = text.startsWith('❗');
       // 표시문(30자 축약)과 전달 원문을 분리한다 — 콜백/기록에는 항상 원문 전체.
       const fullText = text;
       const displayText = this.summarizeChoiceLabel(explicit ? fullText.slice(1).trim() : fullText, 30);
       const button = document.createElement('button');
-      button.className = `choice-btn ${explicit ? 'explicit' : ''}`;
+      button.className = `choice-btn ${explicit ? 'explicit' : ''}${csaDirect ? ' csa-direct-choice' : ''}${bold ? ' bold-choice' : ''}${blocked ? ' blocked-choice' : ''}`;
       const marker = document.createElement('span'); marker.className = 'marker'; marker.textContent = markers[index] || `${index + 1}.`;
       const label = document.createElement('span'); label.className = 'choice-label';
-      label.textContent = explicit ? `❗ ${displayText}` : displayText;
+      // Keep the direct-execution marker compact on mobile. The button color
+      // and icon already distinguish the route; the full choice remains in
+      // title/aria-label and the click payload.
+      label.textContent = csaDirect
+        ? `🌀 ${displayText}`
+        : bold
+          ? `⚡${meta.success_rate}% · ${displayText}`
+          : blocked
+            ? `⛔ 실행 불가 · ${displayText}`
+            : (explicit ? `❗ ${displayText}` : displayText);
       button.append(marker, label);
       button.title = fullText;
       button.setAttribute('aria-label', `${index + 1}. ${fullText}`);
@@ -478,9 +522,6 @@ const ui = {
     });
   },
 
-  scrollToBottom() {
-    this.els.storyStream.scrollTop = this.els.storyStream.scrollHeight;
-  }
 };
 
 // 초기화

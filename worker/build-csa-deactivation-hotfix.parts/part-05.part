@@ -1,0 +1,52 @@
+    structuredPlan,
+    master,
+    playerInput,
+    currentTurn + 1
+  );`;
+replaceOnce(oldSaveBlock, newSaveBlock, 'materialize Story aftereffect state');
+
+replaceOnce(
+  "  const csaAftereffectSection = buildCsaAftereffectStorySection(save, save.last_character_id);",
+  "  const csaAftereffectCharacterIds = collectCsaAftereffectCandidateIds(save, master, playerInput);\n  const csaAftereffectSection = buildCsaAftereffectStorySection(save, csaAftereffectCharacterIds, master.characters || {});",
+  'inject all relevant NPC aftereffects'
+);
+
+replaceOnce(
+  '+ sexualPolicySection + csaAftereffectSection + csaWeakSynergySection',
+  '+ sexualPolicySection + csaWeakSynergySection',
+  'remove early aftereffect prompt position'
+);
+replaceOnce(
+  '+ regenerationFeedbackSection + csaPhysicalTransitionSection + buildStructuredActionStorySection',
+  '+ regenerationFeedbackSection + csaPhysicalTransitionSection + csaAftereffectSection + buildStructuredActionStorySection',
+  'move aftereffect prompt to late authority position'
+);
+
+const newPatchFunction = String.raw`function buildCsaAftereffectPatch(previousSave = {}, structuredPlan = null, npcsPresent = [], turnNumber = 0, options = {}) {
+  const characters = isPlainObject(options?.characters) ? options.characters : {};
+  const narrativeText = typeof options?.narrativeText === 'string' ? options.narrativeText : '';
+  const priorState = isPlainObject(previousSave?.csa_aftereffect_state) ? previousSave.csa_aftereffect_state : {};
+  const effective = buildCsaAftereffectEffectiveSave(
+    previousSave,
+    previousSave,
+    structuredPlan,
+    { characters },
+    '',
+    turnNumber,
+    npcsPresent
+  );
+  const next = isPlainObject(effective?.csa_aftereffect_state)
+    ? structuredClone(effective.csa_aftereffect_state)
+    : {};
+  let changed = JSON.stringify(next) !== JSON.stringify(priorState);
+  const present = new Set((Array.isArray(npcsPresent) ? npcsPresent : [])
+    .filter(id => typeof id === 'string' && id && id !== CSA_AFTEREFFECT_GLOBAL_KEY));
+
+  for (const characterId of present) {
+    const entries = next[characterId];
+    if (!isPlainObject(entries)) continue;
+    const characterName = characters?.[characterId]?.name || characters?.[characterId]?.['이름'] || '';
+    if (!storyHasCsaAftereffectReactionEvidence(narrativeText, characterName)) continue;
+    for (const [csaId, rawState] of Object.entries(entries)) {
+      if (!isPlainObject(rawState)) continue;
+      const state = normalizeCsaAftereffectEntry(rawState);

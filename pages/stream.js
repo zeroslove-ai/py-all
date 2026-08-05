@@ -4,8 +4,6 @@
 // A backed-up queue (e.g. after a backgrounded tab) never speeds up the
 // visible typing; it only means the background branch below flushes it
 // immediately while the tab isn't visible anyway.
-const STREAM_RENDER_INTERVAL_MS = 10;
-const STREAM_RENDER_CHARS_PER_TICK = 1;
 
 // Collapses any run of 3+ '.'/'…' characters down to exactly '..' — the
 // only postprocessing this does is capping the *count* of ellipsis
@@ -46,6 +44,41 @@ function createEllipsisSanitizer() {
   };
 }
 
+// Story occasionally echoes a system-style writing instruction instead of
+// producing the actual [3. 선택지] block. This deterministic line sanitizer
+// removes only that leaked instruction segment. It does not invent choices,
+// rewrite narrative meaning, or make another model call. A carry buffer is
+// required because SSE deltas may split the instruction across chunks.
+const STORY_META_LEAK_SEGMENT_RE = /(?:선택지(?:에는|는)[^\n]{0,70}(?:4가지|네\s*가지)[^\n]{0,100}(?:형식|쓰세요|작성)|아래\s*\[?\s*3\.\s*선택지\s*\]?[^\n]{0,100}(?:형식|쓰세요|작성)|(?:지시사항|출력\s*규칙)[^\n]{0,80}(?:따르세요|쓰세요|작성하세요))/i;
+
+function sanitizeStoryMetaLeakLine(line = '') {
+  const value = String(line || '');
+  const match = STORY_META_LEAK_SEGMENT_RE.exec(value);
+  if (!match) return value;
+  const preserved = value.slice(0, match.index).trimEnd();
+  return preserved || null;
+}
+
+function createStoryMetaLeakSanitizer() {
+  let carry = '';
+  return {
+    push(delta) {
+      const combined = carry + String(delta || '');
+      const lines = combined.split(/\r?\n/);
+      carry = lines.pop() || '';
+      if (!lines.length) return '';
+      const sanitizedLines = lines.map(sanitizeStoryMetaLeakLine).filter(line => line !== null);
+      if (!sanitizedLines.length) return '';
+      return sanitizedLines.join('\n') + '\n';
+    },
+    flush() {
+      const leftover = sanitizeStoryMetaLeakLine(carry);
+      carry = '';
+      return leftover || '';
+    }
+  };
+}
+
 const stream = {
   // ─── 서사 스트리밍 ───
   // Worker가 DeepSeek OpenAI 호환 SSE를 그대로 중계, 파싱은 브라우저에서 한 번만.
@@ -58,7 +91,7 @@ const stream = {
   // concurrently with the still-typing display; callers touching the DOM
   // (finalizing the narrative element, revealing choices) must await
   // renderDone so they never cut the animation short.
-  story(gameId, playerInput, turnCount, onChunk, feedback = [], regenerationFeedback = null, structuredAction = null) {
+  story(gameId, playerInput, turnCount, onChunk, feedback = [], regenerationFeedback = null, playerAction = null, structuredAction = null) {
     const overallStart = Date.now();
     let resolveNetworkDone, rejectNetworkDone;
     let resolveRenderDone, rejectRenderDone;
@@ -78,6 +111,7 @@ const stream = {
             turn_count: turnCount,
             feedback,
             regeneration_feedback: regenerationFeedback,
+            player_action: playerAction,
             structured_action: structuredAction
           })
         });
@@ -100,39 +134,24 @@ const stream = {
         const reader = res.body.getReader();
         const decoder = new TextDecoder();
         const ellipsisSanitizer = createEllipsisSanitizer();
+        const metaLeakSanitizer = createStoryMetaLeakSanitizer();
         let buffer = '';
         let fullText = '';
-        let displayQueue = '';
         let firstContentMs = null;
         const recordFirstContent = () => {
           if (firstContentMs === null) firstContentMs = Date.now() - overallStart;
         };
-        const ingestDelta = (delta) => {
-          const sanitized = ellipsisSanitizer.push(delta);
+        const appendSanitizedText = (text) => {
+          const sanitized = ellipsisSanitizer.push(text);
           if (!sanitized) return;
           fullText += sanitized;
           recordFirstContent();
-          displayQueue += sanitized;
+          onChunk(sanitized);
         };
-
-        let networkFinished = false;
-        (function drainTick() {
-          if (!displayQueue.length) {
-            if (networkFinished) { resolveRenderDone(); return; }
-            setTimeout(drainTick, STREAM_RENDER_INTERVAL_MS);
-            return;
-          }
-          if (document.hidden) {
-            // Backgrounded — no reason to animate an invisible tab; flush
-            // whatever's buffered immediately instead of pacing it out.
-            onChunk(displayQueue);
-            displayQueue = '';
-          } else {
-            onChunk(displayQueue.slice(0, STREAM_RENDER_CHARS_PER_TICK));
-            displayQueue = displayQueue.slice(STREAM_RENDER_CHARS_PER_TICK);
-          }
-          setTimeout(drainTick, STREAM_RENDER_INTERVAL_MS);
-        })();
+        const ingestDelta = (delta) => {
+          const filtered = metaLeakSanitizer.push(delta);
+          if (filtered) appendSanitizedText(filtered);
+        };
 
         while (true) {
           const { done, value } = await reader.read();
@@ -179,8 +198,10 @@ const stream = {
           }
         }
 
+        const metaFlushed = metaLeakSanitizer.flush();
+        if (metaFlushed) appendSanitizedText(metaFlushed);
         const flushed = ellipsisSanitizer.flush();
-        if (flushed) { fullText += flushed; displayQueue += flushed; }
+        if (flushed) { fullText += flushed; onChunk(flushed); }
 
         resolveNetworkDone({
           text: fullText,
@@ -189,10 +210,7 @@ const stream = {
           timing: { fetch_headers_ms: fetchHeadersMs, first_content_ms: firstContentMs, stream_total_ms: Date.now() - overallStart }
         });
 
-        networkFinished = true;
-        // drainTick's own pending setTimeout will notice networkFinished and
-        // resolve renderDone once displayQueue is empty — nothing further to
-        // do here.
+        resolveRenderDone();
       } catch (error) {
         rejectNetworkDone(error);
         rejectRenderDone(error);

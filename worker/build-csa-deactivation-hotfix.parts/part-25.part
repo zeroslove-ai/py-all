@@ -1,0 +1,181 @@
+const playerClothingContinuityHelpers = String.raw`
+const PLAYER_CLOTHING_STATE_VALUES = new Set(['worn', 'open', 'removed', 'unknown']);
+const PLAYER_CLOTHING_FIELDS = ['outer_top', 'outer_bottom', 'underwear_top', 'underwear_bottom'];
+const PLAYER_CLOTHING_LABELS = {
+  outer_top: '상의',
+  outer_bottom: '하의',
+  underwear_top: '상의 속옷',
+  underwear_bottom: '하의 속옷'
+};
+const PLAYER_CLOTHING_STATE_LABELS = { worn: '착용', open: '열림/일부 내림', removed: '벗음', unknown: '미확인' };
+
+function resolvePlayerBaseClothingState(save = {}) {
+  const style = typeof save?.player?.style === 'string' ? save.player.style : '';
+  return {
+    outer_top: /(?:셔츠|상의|재킷|가운|티셔츠|니트|블라우스|코트)/.test(style) ? 'worn' : 'unknown',
+    outer_bottom: /(?:바지|청바지|슬랙스|하의|치마|스커트)/.test(style) ? 'worn' : 'unknown',
+    underwear_top: 'unknown',
+    underwear_bottom: 'unknown'
+  };
+}
+
+function inferPlayerClothingFromPositionLabel(clothing = {}, positionLabel = '') {
+  const result = { ...clothing };
+  const text = typeof positionLabel === 'string' ? positionLabel : '';
+  if (/(?:바지|청바지|슬랙스).{0,20}(?:완전히\s*)?벗/.test(text)) result.outer_bottom = 'removed';
+  else if (/(?:바지|청바지|슬랙스).{0,24}(?:반쯤|내리|내려|지퍼|풀어)|성기.{0,16}(?:꺼내|드러내|노출)/.test(text)) result.outer_bottom = 'open';
+  if (/(?:팬티|속옷).{0,20}(?:완전히\s*)?벗/.test(text)) result.underwear_bottom = 'removed';
+  else if (/(?:팬티|속옷).{0,20}(?:내리|내려|열어|벌려)|성기.{0,16}(?:꺼내|드러내|노출)|(?:꺼낸|드러난|노출된)\s*성기/.test(text)) result.underwear_bottom = 'open';
+  if (/(?:셔츠|상의|재킷|가운).{0,20}(?:완전히\s*)?벗/.test(text)) result.outer_top = 'removed';
+  else if (/(?:셔츠|상의|재킷|가운).{0,20}(?:열어|풀어|내려|젖혀)/.test(text)) result.outer_top = 'open';
+  return result;
+}
+
+function resolveEffectivePlayerClothingState(save = {}, proposedClothing = null) {
+  const previous = isPlainObject(save?.player_scene_state?.clothing) ? save.player_scene_state.clothing : {};
+  const base = resolvePlayerBaseClothingState(save);
+  const inferred = inferPlayerClothingFromPositionLabel(
+    { ...base, ...previous },
+    save?.player_scene_state?.position_label || ''
+  );
+  return {
+    ...inferred,
+    ...(isPlainObject(proposedClothing) ? proposedClothing : {})
+  };
+}
+
+function buildCurrentPlayerPhysicalSceneStateSection(save = {}) {
+  const state = isPlainObject(save?.player_scene_state) ? save.player_scene_state : {};
+  const clothing = resolveEffectivePlayerClothingState(save);
+  const baseOutfit = typeof save?.player?.style === 'string' && save.player.style.trim()
+    ? save.player.style.trim()
+    : '저장된 기본 복장 설명 없음';
+  const lines = PLAYER_CLOTHING_FIELDS.map(key => '- ' + PLAYER_CLOTHING_LABELS[key] + ': ' + PLAYER_CLOTHING_STATE_LABELS[clothing[key] || 'unknown']);
+  if (typeof state.position_label === 'string' && state.position_label.trim()) lines.push('- 현재 자세/행동: ' + state.position_label.trim());
+  return '\n\n[CURRENT PLAYER CLOTHING AND PHYSICAL STATE — FINAL AUTHORITY]\n'
+    + '플레이어 기본 외형·복장: ' + baseOutfit + '\n'
+    + lines.join('\n') + '\n'
+    + '- 위 복장 항목과 상태를 현재 사실로 유지한다. 셔츠가 재킷이나 정장으로 바뀌거나 색상·종류가 임의로 변하지 않는다.\n'
+    + '- 플레이어 입력 또는 최종 Story에서 실제로 입기·벗기·열기·잠그기·내리기가 완료된 경우만 해당 상태를 바꾼다.\n'
+    + '- 지퍼를 열거나 바지를 반쯤 내린 상태는 open이며 완전히 벗은 removed와 구분한다.\n'
+    + '- 복장을 언급할 필요가 없는 장면에서는 새 복장 묘사를 만들지 않는다.';
+}
+`;
+
+replaceOnce(
+  `function buildCurrentNpcPhysicalSceneStateSection(save = {}, characters = {}) {`,
+  playerClothingContinuityHelpers + `\nfunction buildCurrentNpcPhysicalSceneStateSection(save = {}, characters = {}) {`,
+  'add persistent player clothing continuity helpers'
+);
+
+replaceBalancedStatement(
+  `function normalizePlayerSceneStatePatch(value) {`,
+  `function normalizePlayerSceneStatePatch(value) {
+  if (!isPlainObject(value)) return null;
+  const result = {};
+  const postures = new Set(['standing', 'sitting', 'kneeling', 'lying_supine', 'lying_prone', 'side_lying', 'straddling', 'bent_forward', 'leaning', 'walking', 'crouching', 'carrying', 'unknown']);
+  if (postures.has(value.posture)) result.posture = value.posture;
+  const positionLabel = typeof value.position_label === 'string'
+    ? value.position_label.trim().replace(/\\s+/g, ' ').slice(0, 180)
+    : '';
+  if (positionLabel) result.position_label = positionLabel;
+  if (isPlainObject(value.clothing)) {
+    const clothing = {};
+    for (const key of PLAYER_CLOTHING_FIELDS) {
+      if (PLAYER_CLOTHING_STATE_VALUES.has(value.clothing[key])) clothing[key] = value.clothing[key];
+    }
+    if (Object.keys(clothing).length) result.clothing = clothing;
+  }
+  return Object.keys(result).length ? result : null;
+}`,
+  'extend player scene state normalization with clothing'
+);
+
+replaceBalancedStatement(
+  `function buildPlayerSceneStatePatch(previousSave = {}, rawPatch = null, turnNumber = 0) {`,
+  `function buildPlayerSceneStatePatch(previousSave = {}, rawPatch = null, turnNumber = 0) {
+  const previous = isPlainObject(previousSave?.player_scene_state) ? previousSave.player_scene_state : {};
+  const next = normalizePlayerSceneStatePatch(rawPatch);
+  const hadClothing = isPlainObject(previous.clothing) && Object.keys(previous.clothing).length > 0;
+  if (!next && hadClothing) return null;
+  const clothing = resolveEffectivePlayerClothingState(previousSave, next?.clothing);
+  return {
+    ...previous,
+    ...(next || {}),
+    clothing,
+    updated_turn: turnNumber
+  };
+}`,
+  'persist and bootstrap player clothing state'
+);
+
+replaceBalancedStatement(
+  `function buildAbsoluteClothingCsaSection(save = {}, characters = {}, activeCsa = getActiveCsaEntries(save)) {`,
+  `function buildAbsoluteClothingCsaSection(save = {}, characters = {}, activeCsa = getActiveCsaEntries(save)) {
+  const allRegisteredIds = Object.keys(isPlainObject(characters) ? characters : {});
+  const forced = resolveAbsoluteClothingCsaByCharacter(save, characters, activeCsa, allRegisteredIds);
+  const stateLabel = { worn: '착용', removed: '벗음', open: '열림', unknown: '미확인' };
+  const lines = Object.entries(forced).map(([characterId, clothing]) => {
+    const name = characters?.[characterId]?.name || characters?.[characterId]?.['이름'] || characterId;
+    const details = Object.entries(clothing).map(([key, value]) => key + '=' + (stateLabel[value] || value)).join(', ');
+    const fullyNude = ['uniform_top', 'uniform_bottom', 'underwear_top', 'underwear_bottom']
+      .every(key => clothing[key] === 'removed');
+    return '- ' + name + ': ' + details + (fullyNude ? ' — 이미 완전한 전라 상태' : '');
+  });
+  if (!lines.length) return '';
+  return '\n\n[FINAL ACTIVE CLOTHING CSA — DO NOT CONTRADICT]\n'
+    + lines.join('\n') + '\n'
+    + '- 위 대상이 이번 장면에 등장하면 첫 묘사부터 위 복장 상태다. 새로 옷을 벗는 준비 장면을 만들지 않는다.\n'
+    + '- 완전 전라 대상에게 상의만 입음, 가운을 걸침, 하의만 벗음 같은 중간 복장을 절대 쓰지 않는다.\n'
+    + '- 저장된 과거 복장, 최근 요약, 외부인, 회진, 방문객, 체면, 성격, 최면, 업무 이동보다 이 상태가 우선한다.\n'
+    + '- 플레이어가 반대 복장을 입혀도 NPC는 규정상 유지할 수 없다고 말하고 즉시 스스로 위 상태로 되돌린다.\n'
+    + '- 별도의 예외, 의식적 위반, 불이익 감수, 협상 분기를 만들지 않는다.\n'
+    + '- Extract의 복장 결과가 충돌해도 저장 시 위 상태로 자동 정규화하며 턴이나 저장을 실패시키지 않는다.';
+}`,
+  'move clothing CSA authority to final all-registered-NPC prompt'
+);
+
+replaceOnce(
+  `  "player_scene_state_patch": {"posture": "standing|sitting|kneeling|lying_supine|lying_prone|side_lying|straddling|bent_forward|leaning|walking|crouching|carrying|unknown", "position_label": "최종 Story에서 실제 완료된 플레이어의 현재 자세/방향, 없으면 생략"},`,
+  `  "player_scene_state_patch": {"clothing": {"outer_top": "worn|open|removed|unknown", "outer_bottom": "worn|open|removed|unknown", "underwear_top": "worn|open|removed|unknown", "underwear_bottom": "worn|open|removed|unknown"}, "posture": "standing|sitting|kneeling|lying_supine|lying_prone|side_lying|straddling|bent_forward|leaning|walking|crouching|carrying|unknown", "position_label": "최종 Story에서 실제 완료된 플레이어의 현재 자세/방향, 없으면 생략"},`,
+  'extend Extract JSON schema with player clothing state'
+);
+
+replaceOnce(
+  `[CURRENT NPC RELATIONSHIP RECORD]`,
+  `[PLAYER CLOTHING STATE EXTRACTION]\nplayer_scene_state_patch.clothing은 플레이어의 실제 복장 상태가 이번 최종 Story에서 바뀐 필드만 반환한다. outer_top/outer_bottom은 기본 외투·상의와 하의, underwear_top/underwear_bottom은 속옷이다. 입고 있으면 worn, 지퍼를 열거나 반쯤 내리거나 젖힌 상태는 open, 완전히 벗었으면 removed다. 단순 노출 묘사나 이전 상태 반복만으로 바꾸지 않는다. 플레이어 기본 외형의 복장 종류·색상을 새로 만들지 않는다.\n\n[CURRENT NPC RELATIONSHIP RECORD]`,
+  'teach Extract player clothing delta semantics'
+);
+
+replaceOnce(
+  `  const physicalSceneStateSection = buildCurrentNpcPhysicalSceneStateSection(save, master.characters || {});\n  const absoluteClothingCsaSection = buildAbsoluteClothingCsaSection(save, master.characters || {}, activeCsa);`,
+  `  const physicalSceneStateSection = buildCurrentNpcPhysicalSceneStateSection(save, master.characters || {});\n  const playerPhysicalSceneStateSection = buildCurrentPlayerPhysicalSceneStateSection(save);\n  const absoluteClothingCsaSection = buildAbsoluteClothingCsaSection(save, master.characters || {}, activeCsa);`,
+  'build player physical Story section'
+);
+
+replaceOnce(
+  `+ mindEffectBoundarySection + physicalSceneStateSection + absoluteClothingCsaSection + narrativeLengthSection`,
+  `+ mindEffectBoundarySection + physicalSceneStateSection + narrativeLengthSection`,
+  'remove mid-prompt clothing CSA copy before final-priority reinjection'
+);
+
+replaceOnce(
+  `+ playerAttemptSection)`,
+  `+ playerAttemptSection + playerPhysicalSceneStateSection + absoluteClothingCsaSection)`,
+  'inject player and NPC clothing facts at final Story priority'
+);
+
+replaceOnce(
+  `  buildRelationshipCommitmentGuardSection,`,
+  `  buildCurrentPlayerPhysicalSceneStateSection,\n  resolveEffectivePlayerClothingState,\n  buildAbsoluteClothingCsaSection,\n  buildRelationshipCommitmentGuardSection,`,
+  'export player clothing and final clothing prompt helpers'
+);
+
+assertions.push(
+  ['player clothing state persisted', source.includes('PLAYER_CLOTHING_FIELDS') && source.includes('resolveEffectivePlayerClothingState')],
+  ['player clothing extract schema', source.includes('"outer_top": "worn|open|removed|unknown"')],
+  ['player clothing final Story authority', source.includes('CURRENT PLAYER CLOTHING AND PHYSICAL STATE — FINAL AUTHORITY')],
+  ['player half-lowered bottom remains open', source.includes('지퍼를 열거나 바지를 반쯤 내린 상태는 open')],
+  ['npc clothing final priority', source.includes('FINAL ACTIVE CLOTHING CSA — DO NOT CONTRADICT')],
+  ['fully nude NPC never stages another undress', source.includes('새로 옷을 벗는 준비 장면을 만들지 않는다') && source.includes('상의만 입음, 가운을 걸침, 하의만 벗음 같은 중간 복장을 절대 쓰지 않는다')]
+);

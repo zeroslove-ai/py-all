@@ -1,0 +1,44 @@
+const multiNpcAftereffectStory = String.raw`function buildCsaAftereffectStorySection(save = {}, characterIds = [], characters = {}) {
+  const ids = [...new Set((Array.isArray(characterIds) ? characterIds : [characterIds])
+    .filter(id => typeof id === 'string' && id && id !== 'narrator'))];
+  if (!ids.length) return '';
+  const activeIds = new Set(getActiveCsaEntries(save).map(csa => csa?.id).filter(Boolean));
+  const blocks = ids.map(characterId => {
+    const rawEntries = isPlainObject(save?.csa_aftereffect_state?.[characterId]) ? save.csa_aftereffect_state[characterId] : {};
+    const experiencedIds = collectCsaIdsFromExperience(save?.csa_experience_log?.[characterId]);
+    const entries = Object.entries(rawEntries)
+      .filter(([csaId, item]) => isPlainObject(item)
+        && !activeIds.has(csaId)
+        && experiencedIds.has(csaId)
+        && item.actual_execution_confirmed === true
+        && item.phase !== 'integrated')
+      .slice(0, 3);
+    if (!entries.length) return '';
+    const name = characters?.[characterId]?.name || characters?.[characterId]?.['이름'] || characterId;
+    const phaseCounts = entries.reduce((acc, [, item]) => {
+      const phase = ['shock', 'processing'].includes(item.phase) ? item.phase : 'processing';
+      acc[phase] = (acc[phase] || 0) + 1;
+      return acc;
+    }, {});
+    const phaseSummary = Object.entries(phaseCounts).map(([phase, count]) => phase + ' ' + count + '건').join(', ');
+    return '- ' + name + '(' + characterId + '): 실제 수행 경험이 확인된 미정리 후유증 ' + entries.length + '건(' + phaseSummary + ')';
+  }).filter(Boolean);
+  if (!blocks.length) return '';
+  return '[과거 해제 규정의 기억 — 현재 규칙 아님]\n'
+    + blocks.join('\n') + '\n'
+    + '- 해제된 규정의 원문·의무·권한·적용 범위를 재현하거나 현재 판단 근거로 사용하지 않는다. 현재 활성 CSA만 규범과 행동 판단의 권위다.\n'
+    + '- 기억상실·시간 공백·마법 같은 자동 복장은 금지한다. 필요한 물리적 정리는 실제 행동으로 하되, integrated 상태나 경험하지 않은 규정은 다시 언급하지 않는다.';
+}`;
+
+replaceRegex(
+  /function buildCsaAftereffectStorySection\(save = \{\}, characterId = ''\) \{[\s\S]*?\n\}\n\nfunction collectCsaRuleAwarenessProjectionText/,
+  multiNpcAftereffectStory + '\n\nfunction collectCsaRuleAwarenessProjectionText',
+  'restore multi-NPC aftereffect call contract without reinjecting canonical rule text'
+);
+
+assertions.push(
+  ['multi NPC aftereffect signature restored', source.includes('function buildCsaAftereffectStorySection(save = {}, characterIds = [], characters = {})')],
+  ['multi NPC aftereffect names preserved', multiNpcAftereffectStory.includes("characters?.[characterId]?.name")],
+  ['compact aftereffect excludes canonical text', !multiNpcAftereffectStory.includes('canonical_content')],
+  ['multi NPC aftereffect remains resource neutral', !multiNpcAftereffectStory.includes('requestDeepSeek') && !multiNpcAftereffectStory.includes('attemptDeepSeek') && !multiNpcAftereffectStory.includes('supabase') && !multiNpcAftereffectStory.includes('fetch(')]
+);

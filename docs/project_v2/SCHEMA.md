@@ -1,3 +1,5 @@
+> LEGACY DOCUMENT — main/archive/pre-csa-only 전용. feature/csa-only 구현 기준으로 사용하지 않는다.
+
 # 게임빌더 v2 Supabase 스키마
 
 **기준일**: 2026-07-22  
@@ -121,7 +123,95 @@ create table game_save (
 }
 ```
 
+CSA-only runtime additions inside `game_save.data` (no database column or migration):
+
+```json
+{
+  "npc_stats": {"heroine1": {"호감도": 0, "상식수용도": 0, "성적흥분도": 0}},
+  "npc_relationship_state": {"heroine1": {"intimacy_state": {"stage": "none", "active_boundaries": [], "recent_refusal": null, "last_explicit_consent": null, "updated_turn": 0}}},
+  "csa_aftereffect_state": {}
+}
+```
+
+`npc_stats[*].성적민감도` is legacy JSONB retained for compatibility only. New Worker logic ignores it; fixed `성적민감도초기` is read from the character master solely to scale physical arousal changes. These are JSONB payload additions only: no DB column, RPC, or migration changes are required.
+
+`last_choice_meta` may include `sexual_action`, `sexual_is_public`, `sexual_gate`, `blocking_boundaries`, `direct_csa_ids`, and `intimacy_stage` as display metadata, plus `severity` (`none|mild|high|extreme|blocked`) and `kind` (`bold` only for `mild|high|extreme`; `blocked` is its own kind, never `bold`). The actual decision is recalculated deterministically at the selected turn. A stored `last_choice_meta` that doesn't match the current turn/choices/contract (`isCurrentChoiceMetaValid`) is never trusted as-is: both the public `/api/context` view and the actual bold-choice roll recompute it in-memory from the current save instead — this never rewrites the stored JSONB. `last_explicit_consent` is this-turn-only and never grants future automatic permission. `romantic_interest` is non-sexual; `kissed` and later stages require the voluntary sexual path's current action-specific consent and completed event. `csa_aftereffect_state` can be created from a confirmed runtime execution record even while that NPC is absent; medium/strong confirmed direct sexual `required_action` executions add `needs_discussion` on deactivation. No database migration is involved.
+
+These changes only refine Worker validation and runtime interpretation of existing JSONB fields; they add no schema, RPC, or migration.
+
+Custom CSA continues to use existing `source_type` and `content` fields. `csa_experienced_ids` is supporting evidence for an active custom CSA event, never standalone authorization. No new database column, RPC, or migration is used.
+
 `turn_count`는 JSONB 안에 중복 저장하지 않는다.
+
+### `csa_active` 프리셋 필드 (2026-07 추가, 마이그레이션 없음)
+
+`csa_active`의 각 항목은 기존 필드(`id`, `active`, `content`, `strength`,
+`scope_type`, `scope_id`, `scope_label`, `created_turn`)에 선택 필드 두 개를
+추가로 가질 수 있다. 두 필드가 없는 기존 항목은 `source_type: 'custom'`으로
+취급되어 그대로 동작한다.
+
+```json
+{
+  "id": "csa_74",
+  "active": true,
+  "strength": "약함",
+  "scope_type": "world", "scope_id": "world", "scope_label": "병원 전체",
+  "content": "간호사는 환자와 대화를 시작하면 환자의 무릎 위에 앉아야 하며, 대화가 끝날 때까지 그 자세를 유지해야 한다.",
+  "source_type": "preset",
+  "preset": {
+    "version": 1,
+    "template_id": "sit_on_target_lap_while_talking",
+    "actor_group": "nurse",
+    "target_group": "patient",
+    "trigger": "conversation_start",
+    "duration": "until_conversation_ends",
+    "modifier": "",
+    "required_action": "sit_on_target_lap",
+    "public_normalization": true,
+    "persistent": true,
+    "direct_meaning_tags": ["무릎", "앉", "밀착", "자세"]
+  },
+  "created_turn": 74
+}
+```
+
+`content`는 항상 Worker가 `preset.template_id` + 선택값으로 다시 생성한
+canonical 값이다 — 클라이언트가 보낸 문자열은 신뢰하지 않는다
+(`validateCsaPresetOperation`). 프리셋 카탈로그 자체(actor/target/trigger/
+duration 옵션, `content_template`, `minimum_strength`, `required_action`
+등)의 단일 소스는 `worker/game-proxy-v2.js`의 `CSA_PRESET_CATALOG`이다.
+
+### `csa_runtime_state` (2026-07 추가, 마이그레이션 없음)
+
+프리셋 규범이 "지금 이 장면에서 실제로 실행 중인가"를 추적하는 별도 필드다.
+`csa_active[].active`(규범 자체가 병원에 적용되는가)와는 다른 축이다. 현재
+구현은 규범당 단일 인스턴스(메인 NPC 중심)이며, 여러 NPC 동시 추적이
+필요해지면 `instances` 맵으로 확장할 수 있게 설계돼 있다.
+
+```json
+{
+  "csa_runtime_state": {
+    "csa_74": {
+      "status": "active",
+      "character_id": "heroine4",
+      "target_type": "player",
+      "started_turn": 75,
+      "last_confirmed_turn": 77,
+      "action_state": "sitting_on_target_lap",
+      "position_label": "배수진이 김민호의 무릎 위에 앉아 대화 중",
+      "end_reason": null
+    }
+  }
+}
+```
+
+`status`는 `inactive|active|paused|ended`. `paused`는 규범 자체는 유효하지만 플레이어 요청 등으로 이번 턴만 물리적으로 중단된 상태이며(해제가 아니다), 대응하는 `csa_trigger_evaluations[].status`가 `temporarily_interrupted`(evidence 필수)일 때만 쓴다. Extract의 `csa_runtime_updates`로만
+갱신되며(현재 활성 프리셋 CSA + 현재 장면에 등장한 등록 NPC로 제한된
+검증, `buildCsaRuntimeStatePatch`), 프리셋이 비활성화·해제되거나
+`custom`으로 전환되면 Extract 입력과 무관하게 Worker가 즉시 `ended`로
+표시한다.
+
+`csa_runtime_updates`는 이 필드의 전체 스냅샷이 아니라 이번 턴의 delta다 — 이전 턴부터 `active`였고 이번 턴도 변화가 없으면 Extract는 중복 update를 생략할 수 있다. 그래서 `commit_turn` 저장(`buildCsaRuntimeStatePatch`)과 별개로, `/api/extract`의 정합성 감사는 저장된 `csa_runtime_state`에 이번 턴 delta를 합친 effective runtime(`buildEffectiveCsaRuntimeState`, 감사 전용 view이며 그 자체로 DB patch는 아니다)을 기준으로 판단한다. `active` 재진입 시 `started_turn`은 기존 값을 유지한다(paused를 거쳐 다시 `active`가 되어도 최초 시작 턴이 새 턴으로 덮이지 않는다).
 
 ### `game_memories`
 
@@ -213,6 +303,24 @@ Worker의 `buildSavePatch()`는 추출 결과를 DB 구조에 맞게 바꾼다.
 
 `dialogue_lines`는 렌더링 보조값이며 그대로 세이브 JSON에 넣지 않는다.
 
+## CSA-first structured authorization (JSONB only)
+
+`game_save.data`의 기존 JSONB 안에서만 다음 선택 필드를 사용한다.
+
+- `csa_active[*].semantic_contract`: custom CSA activate/update semantic validation이
+  서명해 저장하는 actor/target/direction/action/trigger/duration contract.
+- Extract transient fields `sexual_resolution`, `csa_trigger_evaluations`,
+  `relationship_events`: Worker의 CSA-first / voluntary default-deny Commit
+  검증 입력이다. 이 중 영구 관계 변화만 `npc_relationship_state[*].intimacy_state`에 병합한다.
+
+새 DB column, RPC, migration은 없다. legacy custom CSA에 contract가 없으면
+runtime sexual authorization에는 사용하지 않는다.
+
+`csa_trigger_evaluations`는 현재 적용되는 CSA ID마다 정확히 한 항목이어야 한다.
+setup 완료 상태에서 structured resolution이 unavailable하거나 final integrity가 실패하면
+turn patch/token을 만들지 않는다. 이 역시 기존 JSONB/Extract 계약의 검증 규칙이며
+새 DB column, RPC, migration은 없다.
+
 ## `reset_game_progress` 규칙
 
 - 사용자 확인은 프론트에서 먼저 받는다.
@@ -236,3 +344,4 @@ Worker의 `buildSavePatch()`는 추출 결과를 DB 구조에 맞게 바꾼다.
 ## JSONB deep merge migration
 
 `supabase/migrations/20260722095050_jsonb_deep_merge.sql` defines `public.jsonb_deep_merge(jsonb, jsonb)` before `commit_turn` is applied to a new database. When both values are JSON objects, it recursively merges their keys. Arrays, scalar values, and JSON `null` are replaced by the patch value. The migration uses `create or replace function` and `set search_path = public`, so it is idempotent.
+> LEGACY DOCUMENT — main/archive/pre-csa-only 전용. feature/csa-only 구현 기준으로 사용하지 않는다.

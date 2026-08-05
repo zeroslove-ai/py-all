@@ -1,0 +1,144 @@
+const playerEjaculationMeterHelpers = String.raw`
+function clampPlayerEjaculationMeter(value) {
+  return Math.max(0, Math.min(100, Math.round(Number(value) || 0)));
+}
+
+function normalizePlayerSexualState(value = {}) {
+  const source = isPlainObject(value) ? value : {};
+  const meter = clampPlayerEjaculationMeter(source.ejaculation_meter);
+  return {
+    ejaculation_meter: meter,
+    can_ejaculate: meter >= 50,
+    last_ejaculation_turn: Number.isInteger(source.last_ejaculation_turn) ? source.last_ejaculation_turn : null,
+    last_ejaculation_amount: typeof source.last_ejaculation_amount === 'string' ? source.last_ejaculation_amount : null,
+    last_ejaculation_pre_meter: clampPlayerEjaculationMeter(source.last_ejaculation_pre_meter),
+    updated_turn: Number.isInteger(source.updated_turn) ? source.updated_turn : 0
+  };
+}
+
+function playerEjaculationAmountForMeter(meter) {
+  const value = clampPlayerEjaculationMeter(meter);
+  if (value >= 100) return 'extreme';
+  if (value >= 85) return 'very_large';
+  if (value >= 70) return 'large';
+  return 'moderate';
+}
+
+function resolvePlayerSexualStateUpdate(previousSave = {}, extract = {}, narrativeText = '', turnNumber = 0) {
+  const previous = normalizePlayerSexualState(previousSave?.player_sexual_state);
+  const raw = isPlainObject(extract?.player_sexual_state_patch) ? extract.player_sexual_state_patch : {};
+  const meterDelta = Math.max(0, Math.min(35, Math.round(Number(raw.meter_delta) || 0)));
+  const projectedMeter = clampPlayerEjaculationMeter(previous.ejaculation_meter + meterDelta);
+  const evidence = typeof raw.ejaculation_evidence === 'string' ? raw.ejaculation_evidence.trim().slice(0, 300) : '';
+  const evidenceConfirmed = Boolean(evidence) && evidenceExists(evidence, narrativeText);
+  const accepted = raw.ejaculation_completed === true && evidenceConfirmed && projectedMeter >= 50;
+  const amount = accepted ? playerEjaculationAmountForMeter(projectedMeter) : null;
+  return {
+    accepted,
+    projected_meter: projectedMeter,
+    amount,
+    state: {
+      ejaculation_meter: accepted ? 0 : projectedMeter,
+      can_ejaculate: accepted ? false : projectedMeter >= 50,
+      last_ejaculation_turn: accepted ? turnNumber : previous.last_ejaculation_turn,
+      last_ejaculation_amount: accepted ? amount : previous.last_ejaculation_amount,
+      last_ejaculation_pre_meter: accepted ? projectedMeter : previous.last_ejaculation_pre_meter,
+      updated_turn: turnNumber
+    }
+  };
+}
+
+function stripUnauthorizedPlayerEjaculationEvents(extract = {}, resolution = {}) {
+  if (resolution?.accepted === true) return extract;
+  const isPlayerEjaculation = event => {
+    const type = String(event?.type || '');
+    const playerActor = event?.actor_type === 'player'
+      || event?.character_id === 'player'
+      || type === 'player_ejaculation'
+      || type === 'player_orgasm';
+    return playerActor && (type === 'player_ejaculation' || type === 'player_orgasm' || type.endsWith('_ejaculation'));
+  };
+  return {
+    ...extract,
+    sexual_events: (Array.isArray(extract?.sexual_events) ? extract.sexual_events : []).filter(event => !isPlayerEjaculation(event)),
+    sexual_record_events: (Array.isArray(extract?.sexual_record_events) ? extract.sexual_record_events : []).filter(event => !isPlayerEjaculation(event))
+  };
+}
+
+function buildPlayerEjaculationMeterSection(save = {}) {
+  const state = normalizePlayerSexualState(save?.player_sexual_state);
+  const meter = state.ejaculation_meter;
+  const availability = meter >= 50 ? '사정 가능' : '아직 사정 불가';
+  const amount = meter >= 100 ? '요청 시 매우 많은 양'
+    : meter >= 85 ? '요청 시 매우 많은 편'
+      : meter >= 70 ? '요청 시 많은 편'
+        : meter >= 50 ? '요청 시 적당한 양'
+          : '사정량 판정 없음';
+  return '\n\n[플레이어 사정 게이지 — 0~100 절대 규칙]\n'
+    + '- 현재 게이지: ' + meter + '/100 · ' + availability + ' · ' + amount + '\n'
+    + '- 직접적인 성적 자극과 쾌감이 실제로 이어질 때만 게이지가 오른다. 단순 노출·성적 대화·NPC의 흥분만으로는 올리지 않는다.\n'
+    + '- 0~49에서는 플레이어가 사정을 요구해도 아직 절정에 도달하지 못하며 사정 완료를 서술하지 않는다.\n'
+    + '- 50~99에서는 플레이어가 사정을 선택하거나 명시적으로 요청하면 확률 판정 없이 사정할 수 있다. 50 부근은 적당한 양이며 게이지가 높을수록 양이 자연스럽게 많아진다.\n'
+    + '- 100에서는 플레이어가 사정을 선택하거나 요청하면 반드시 사정할 수 있고, 매우 많은 정액이 강하게 분출되는 것으로 묘사한다.\n'
+    + '- 100에 도달했다고 자동 사정시키지는 않는다. 플레이어의 행동·선택이 있을 때 실행한다.\n'
+    + '- 실제 사정이 완료되면 게이지는 0으로 초기화한다.\n'
+    + '- [2. 플레이어 상황판]에 “💦 사정 게이지: ' + meter + '/100 · ' + availability + '”를 표시한다.';
+}
+`;
+
+replaceOnce(
+  `function buildCurrentNpcRelationshipMemorySection(save = {}, characters = {}) {`,
+  playerEjaculationMeterHelpers + `\nfunction buildCurrentNpcRelationshipMemorySection(save = {}, characters = {}) {`,
+  'add player ejaculation meter helpers'
+);
+
+replaceOnce(
+  `  const playerPhysicalSceneStateSection = buildCurrentPlayerPhysicalSceneStateSection(save);\n  const absoluteClothingCsaSection = buildAbsoluteClothingCsaSection(save, master.characters || {}, activeCsa);`,
+  `  const playerPhysicalSceneStateSection = buildCurrentPlayerPhysicalSceneStateSection(save);\n  const playerEjaculationMeterSection = buildPlayerEjaculationMeterSection(save);\n  const absoluteClothingCsaSection = buildAbsoluteClothingCsaSection(save, master.characters || {}, activeCsa);`,
+  'build player ejaculation meter Story section'
+);
+
+replaceOnce(
+  `+ playerPhysicalSceneStateSection + absoluteClothingCsaSection)`,
+  `+ playerPhysicalSceneStateSection + playerEjaculationMeterSection + absoluteClothingCsaSection)`,
+  'inject ejaculation meter at final Story priority'
+);
+
+replaceOnce(
+  `[PLAYER CLOTHING STATE EXTRACTION]`,
+  `[PLAYER EJACULATION METER EXTRACTION]\nplayer_sexual_state_patch는 {"meter_delta":0,"ejaculation_completed":false,"ejaculation_evidence":""} 형식이다. meter_delta는 이번 최종 Story에서 플레이어가 직접 받은 성적 자극과 쾌감만 보고 0~35로 판단한다. 단순 노출·성적 대화·NPC의 흥분만 있으면 0이다. 가벼운 직접 자극은 1~8, 지속적인 손·구강·삽입 자극은 8~20, 강한 지속 자극이나 절정 직전 반응은 20~35 범위에서 자연스럽게 판단한다. 플레이어 사정이 최종 Story에서 실제 완료된 경우에만 ejaculation_completed=true로 하고, ejaculation_evidence에는 완료를 보여주는 Story 원문 그대로의 짧은 인용을 넣는다. 플레이어 입력의 선언만으로 완료 처리하지 않는다.\n\n[PLAYER CLOTHING STATE EXTRACTION]`,
+  'teach Extract player ejaculation meter delta and completion evidence'
+);
+
+replaceOnce(
+  `  "player_scene_state_patch": {"clothing": {"outer_top": "worn|open|removed|unknown", "outer_bottom": "worn|open|removed|unknown", "underwear_top": "worn|open|removed|unknown", "underwear_bottom": "worn|open|removed|unknown"}, "posture": "standing|sitting|kneeling|lying_supine|lying_prone|side_lying|straddling|bent_forward|leaning|walking|crouching|carrying|unknown", "position_label": "최종 Story에서 실제 완료된 플레이어의 현재 자세/방향, 없으면 생략"},`,
+  `  "player_scene_state_patch": {"clothing": {"outer_top": "worn|open|removed|unknown", "outer_bottom": "worn|open|removed|unknown", "underwear_top": "worn|open|removed|unknown", "underwear_bottom": "worn|open|removed|unknown"}, "posture": "standing|sitting|kneeling|lying_supine|lying_prone|side_lying|straddling|bent_forward|leaning|walking|crouching|carrying|unknown", "position_label": "최종 Story에서 실제 완료된 플레이어의 현재 자세/방향, 없으면 생략"},\n  "player_sexual_state_patch": {"meter_delta": 0, "ejaculation_completed": false, "ejaculation_evidence": "최종 Story 원문 근거 또는 빈 문자열"},`,
+  'extend Extract JSON schema with player ejaculation meter patch'
+);
+
+replaceOnce(
+  `function buildSavePatch(extract, enginePatch = {}, summaryPlan = null, previousSave = {}, turnNumber = 0, playerInput = '', structuredPlan = null, master = {}, narrativeText = '', gameId = '', playerAction = null, recentHistoryRows = [], sexualHistoryScanSucceeded = false) {\n  const characterId = typeof extract.character_id === 'string'`,
+  `function buildSavePatch(extract, enginePatch = {}, summaryPlan = null, previousSave = {}, turnNumber = 0, playerInput = '', structuredPlan = null, master = {}, narrativeText = '', gameId = '', playerAction = null, recentHistoryRows = [], sexualHistoryScanSucceeded = false) {\n  const playerSexualStateResolution = resolvePlayerSexualStateUpdate(previousSave, extract, narrativeText, turnNumber);\n  extract = stripUnauthorizedPlayerEjaculationEvents(extract, playerSexualStateResolution);\n  const characterId = typeof extract.character_id === 'string'`,
+  'resolve player ejaculation meter before relationship ledgers'
+);
+
+replaceOnce(
+  `    const playerSceneState = buildPlayerSceneStatePatch(previousSave, extract.player_scene_state_patch, turnNumber);\n    if (playerSceneState) patch.player_scene_state = playerSceneState;`,
+  `    const playerSceneState = buildPlayerSceneStatePatch(previousSave, extract.player_scene_state_patch, turnNumber);\n    if (playerSceneState) patch.player_scene_state = playerSceneState;\n    patch.player_sexual_state = playerSexualStateResolution.state;`,
+  'commit player ejaculation meter state'
+);
+
+replaceOnce(
+  `  buildCurrentPlayerPhysicalSceneStateSection,`,
+  `  buildPlayerEjaculationMeterSection,\n  resolvePlayerSexualStateUpdate,\n  playerEjaculationAmountForMeter,\n  buildCurrentPlayerPhysicalSceneStateSection,`,
+  'export player ejaculation meter helpers'
+);
+
+assertions.push(
+  ['player ejaculation meter range', source.includes('플레이어 사정 게이지 — 0~100 절대 규칙') && source.includes('0~49에서는') && source.includes('50~99에서는')],
+  ['player ejaculation guaranteed at one hundred', source.includes('100에서는 플레이어가 사정을 선택하거나 요청하면 반드시 사정할 수 있고')],
+  ['player ejaculation amount scales', source.includes("if (value >= 100) return 'extreme'") && source.includes("return 'moderate'")],
+  ['player ejaculation resets after completion', source.includes('ejaculation_meter: accepted ? 0 : projectedMeter')],
+  ['player ejaculation requires evidence and fifty', source.includes('raw.ejaculation_completed === true && evidenceConfirmed && projectedMeter >= 50')],
+  ['player sexual state committed', source.includes('patch.player_sexual_state = playerSexualStateResolution.state')]
+);

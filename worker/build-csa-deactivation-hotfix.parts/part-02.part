@@ -1,0 +1,47 @@
+    .filter(isPlainObject).map(csa => [csa.id, csa]));
+  const previousActiveById = new Map((Array.isArray(previousSave?.csa_active) ? previousSave.csa_active : [])
+    .filter(csa => isPlainObject(csa) && csa.active === true).map(csa => [csa.id, csa]));
+
+  for (const [characterId, entries] of Object.entries(state)) {
+    if (characterId === CSA_AFTEREFFECT_GLOBAL_KEY || !isPlainObject(entries)) continue;
+    for (const [csaId, entry] of Object.entries(entries)) {
+      if (!isPlainObject(entry)) continue;
+      const csa = csaById.get(csaId) || previousActiveById.get(csaId) || null;
+      entries[csaId] = normalizeCsaAftereffectEntry(entry, csa);
+      if (!state[CSA_AFTEREFFECT_GLOBAL_KEY][csaId] && csa) {
+        state[CSA_AFTEREFFECT_GLOBAL_KEY][csaId] = buildCsaAftereffectGlobalRecord(
+          csa,
+          Number.isInteger(entry.started_turn) ? entry.started_turn : turnNumber
+        );
+      }
+    }
+  }
+
+  const deactivated = structuredPlan?.canonical_action?.type === 'app_transaction'
+    ? (structuredPlan.canonical_action.operations || []).filter(item => item?.domain === 'csa' && item?.operation === 'deactivate')
+    : [];
+  for (const operation of deactivated) {
+    const csa = previousActiveById.get(operation.id);
+    if (!csa) continue;
+    state[CSA_AFTEREFFECT_GLOBAL_KEY][csa.id] = buildCsaAftereffectGlobalRecord(csa, turnNumber);
+  }
+
+  const candidateIds = collectCsaAftereffectCandidateIds(effectiveSave, master, playerInput, extraCandidateIds);
+  for (const characterId of candidateIds) {
+    const character = characters[characterId];
+    state[characterId] = isPlainObject(state[characterId]) ? state[characterId] : {};
+    for (const [csaId, globalEntry] of Object.entries(state[CSA_AFTEREFFECT_GLOBAL_KEY])) {
+      if (!isPlainObject(globalEntry) || !csaAftereffectAppliesToCharacter(globalEntry, character)) continue;
+      const csa = csaById.get(csaId) || previousActiveById.get(csaId) || null;
+      if (!state[characterId][csaId]) {
+        state[characterId][csaId] = normalizeCsaAftereffectEntry({
+          schema_version: CSA_AFTEREFFECT_SCHEMA_VERSION,
+          phase: 'shock',
+          strength: globalEntry.strength || '약함',
+          started_turn: globalEntry.started_turn || turnNumber,
+          canonical_content: globalEntry.canonical_content || '',
+          actual_execution_confirmed: true,
+          requires_boundary_review: globalEntry.direct_sexual_action === true,
+          reaction_evidence_turns: []
+        }, csa);
+      } else {

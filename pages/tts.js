@@ -6,6 +6,10 @@ const tts = {
   playing: false,
   unlocked: false,
   lastPlayable: null,
+  // Hotfix (2026-08-01) — the last successfully generated audio URL for the
+  // last playable batch, so replay can play it immediately instead of
+  // always regenerating (README section 7.3).
+  lastAudioResult: null,
 
   // H3-A item 8: the <audio> element now lives outside .side-panel (see
   // pages/index.html), but sidebar.init() still fully replaces .side-panel's
@@ -37,6 +41,38 @@ const tts = {
     return this.ensureAudioElement();
   },
 
+  // Hotfix (2026-08-01, README section 7.2) — mobile browsers only grant
+  // audio.play() a user-activation window for the duration of the
+  // synchronous click handler (plus immediate microtasks). The old code
+  // only resumed an AudioContext and then awaited a network TTS request
+  // before ever touching the real <audio> element, so by the time
+  // audio.play() finally ran the activation window was often already gone.
+  // This primes the real element synchronously inside the click gesture,
+  // before any await, using a tiny silent WAV data URI.
+  primeAudioElement() {
+    try {
+      const audio = this.ensureAudioElement();
+      const previousSrc = audio.getAttribute('src');
+      const wasMuted = audio.muted;
+      audio.muted = true;
+      audio.src = 'data:audio/wav;base64,UklGRigAAABXQVZFZm10IBIAAAABAAEARKwAAIhYAQACABAAAABkYXRhAgAAAAEA';
+      const playPromise = audio.play();
+      const restore = () => {
+        try {
+          audio.pause();
+          audio.currentTime = 0;
+        } catch (error) { /* ignore — element may already be gone */ }
+        audio.muted = wasMuted;
+        if (previousSrc) audio.src = previousSrc; else audio.removeAttribute('src');
+      };
+      if (playPromise && typeof playPromise.then === 'function') {
+        playPromise.then(restore).catch(() => { audio.muted = wasMuted; });
+      }
+    } catch (error) {
+      console.error('TTS audio element priming failed', error);
+    }
+  },
+
   init() {
     this.ensureAudioElement();
     this.toggle = document.getElementById('tts-toggle');
@@ -58,8 +94,20 @@ const tts = {
       this.setEnabled(!state.autoTts);
     });
     this.replay.addEventListener('click', async () => {
+      // Must run synchronously, before any await, to stay inside the
+      // click's user-activation window (README section 7.2).
+      this.primeAudioElement();
       await this.unlockAudio();
-      if (this.lastPlayable) this.enqueueLines(this.lastPlayable.extract, this.lastPlayable.turn, { force: true });
+      if (!this.lastPlayable) return;
+      // README section 7.1 — voice OFF means "don't autoplay future
+      // dialogue", not "disable the replay button": pressing replay must
+      // always play once, without turning auto mode on.
+      const candidateKey = this.key(this.lastPlayable.turn, this.lastPlayable.extract.dialogue_lines);
+      if (this.lastAudioResult && this.lastAudioResult.key === candidateKey) {
+        await this.playCachedAudio(this.lastAudioResult);
+        return;
+      }
+      this.enqueueLines(this.lastPlayable.extract, this.lastPlayable.turn, { force: true, manual: true });
     });
   },
 
@@ -168,11 +216,13 @@ const tts = {
     }
   },
 
-  enqueueLines(extract, turn, { force = false } = {}) {
+  enqueueLines(extract, turn, { force = false, manual = false } = {}) {
     const characterId = extract?.character_id;
     const character = state.context?.master?.characters?.[characterId];
     if (!characterId || characterId === 'narrator') {
-      this.showStatus('TTS를 재생할 메인 NPC가 없습니다.', true);
+      this.lastPlayable = null;
+      if (this.replay) this.replay.hidden = true;
+      this.showStatus('');
       return;
     }
     if (!character || typeof character.voice_id !== 'string' || !character.voice_id.trim()) {
@@ -199,7 +249,7 @@ const tts = {
       const key = this.key(turn, batch.lines);
       if (!force && (this.pendingKeys.has(key) || this.completedKeys.has(key))) continue;
       this.pendingKeys.add(key);
-      this.queue.push({ batch, voiceId: character.voice_id.trim(), key, generation: this.generation });
+      this.queue.push({ batch, voiceId: character.voice_id.trim(), key, generation: this.generation, manual });
     }
     if (this.replay) this.replay.hidden = false;
     this.drain();
@@ -211,7 +261,10 @@ const tts = {
     try {
       while (this.queue.length) {
         const job = this.queue.shift();
-        if (!state.autoTts || job.generation !== this.generation) {
+        // README section 7.1 — a manual (replay-triggered) job must still
+        // play even when auto TTS is off; voice OFF only suppresses future
+        // autoplay jobs, it never disables the replay button itself.
+        if (job.generation !== this.generation || (!state.autoTts && !job.manual)) {
           this.pendingKeys.delete(job.key);
           continue;
         }
@@ -230,26 +283,59 @@ const tts = {
       // 않는다. direction은 묶음의 대표(첫 발화) 값 하나만 전달한다.
       const result = await api.tts(job.batch.text, job.voiceId, job.batch.direction);
       if (!result.url) throw new Error('TTS 응답에 audio URL이 없습니다.');
-      if (!state.autoTts || job.generation !== this.generation) return;
+      // README section 7.1 — a manual (replay) job must still play even if
+      // auto TTS was turned off while the network request was in flight;
+      // only a superseded generation (stopAndClear/new turn) cancels it.
+      if (job.generation !== this.generation || (!state.autoTts && !job.manual)) return;
       audio.src = result.url;
+      audio.load();
       audio.classList.add('active');
       await this.waitForPlayback();
       this.completedKeys.add(job.key);
       sessionStorage.setItem('playedTtsKeys', JSON.stringify([...this.completedKeys]));
+      // README section 7.3 — cache the last successful audio result so a
+      // later replay of the same batch can play it immediately instead of
+      // always regenerating.
+      this.lastAudioResult = { key: job.key, url: result.url, text: job.batch.text, voiceId: job.voiceId, direction: job.batch.direction };
       this.showStatus('');
     } catch (error) {
       console.error('TTS playback failed', error, job);
       this.completedKeys.delete(job.key);
-      const message = error?.name === 'NotAllowedError'
-        ? '브라우저가 자동 음성 재생을 차단했습니다. 눌러서 재생하세요.'
-        : error?.name === 'MediaError' || error?.message?.includes('decode')
-          ? '음성 파일을 디코딩하거나 재생하지 못했습니다.'
-          : `TTS API 또는 오디오 URL 오류: ${error?.message || '알 수 없는 오류'}`;
-      this.showStatus(message, true);
+      this.showStatus(this.describePlaybackError(error), true);
       if (this.replay) this.replay.hidden = false;
     } finally {
       this.pendingKeys.delete(job.key);
     }
+  },
+
+  // README section 7.3 — replay path for a still-valid cached audio URL:
+  // plays immediately without a network round trip. On any failure the
+  // cache entry is dropped and the caller regenerates exactly once.
+  async playCachedAudio(cached) {
+    const audio = this.ensureAudioElement();
+    try {
+      this.showStatus(`음성 재생 중: ${cached.text ? cached.text.slice(0, 12) : ''}`);
+      audio.src = cached.url;
+      audio.load();
+      audio.classList.add('active');
+      await this.waitForPlayback();
+      this.completedKeys.add(cached.key);
+      sessionStorage.setItem('playedTtsKeys', JSON.stringify([...this.completedKeys]));
+      this.showStatus('');
+    } catch (error) {
+      console.error('Cached TTS playback failed, regenerating once', error);
+      this.lastAudioResult = null;
+      this.showStatus(this.describePlaybackError(error), true);
+      if (this.lastPlayable) this.enqueueLines(this.lastPlayable.extract, this.lastPlayable.turn, { force: true, manual: true });
+    }
+  },
+
+  describePlaybackError(error) {
+    if (error?.name === 'NotAllowedError') return '브라우저가 자동 음성 재생을 차단했습니다. 눌러서 재생하세요.';
+    if (error?.name === 'AudioStalledError') return '음성 로딩이 지연되고 있습니다. 다시 시도해주세요.';
+    if (error?.name === 'AudioAbortError') return '음성 재생이 중단되었습니다.';
+    if (error?.name === 'MediaError' || error?.message?.includes('decode')) return '음성 파일을 디코딩하거나 재생하지 못했습니다.';
+    return `TTS API 또는 오디오 URL 오류: ${error?.message || '알 수 없는 오류'}`;
   },
 
   waitForPlayback() {
@@ -258,9 +344,13 @@ const tts = {
       const cleanup = () => {
         audio.onended = null;
         audio.onerror = null;
+        audio.onstalled = null;
+        audio.onabort = null;
       };
       audio.onended = () => { cleanup(); resolve(); };
       audio.onerror = () => { cleanup(); reject(new DOMException('Audio decoding or playback failed', 'MediaError')); };
+      audio.onstalled = () => { cleanup(); reject(new DOMException('Audio stalled while loading', 'AudioStalledError')); };
+      audio.onabort = () => { cleanup(); reject(new DOMException('Audio playback aborted', 'AudioAbortError')); };
       audio.play().catch(error => { cleanup(); reject(error); });
     });
   },

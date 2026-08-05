@@ -1,3 +1,5 @@
+> LEGACY DOCUMENT — main/archive/pre-csa-only 전용. feature/csa-only 구현 기준으로 사용하지 않는다.
+
 # 게임빌더 v2 — 프로젝트 현황
 
 **기준일**: 2026-07-22  
@@ -130,3 +132,18 @@
 | 2026-07-22 | v2 초기 설계 및 스키마 재구성 |
 | 2026-07-22 | PR #1: `/api/commit-turn`, 충돌 감지, 재시도 안전성 반영 |
 | 2026-07-22 | `game-proxy-v2` 배포 완료 상태와 7개 운영 API 기준으로 문서 정합성 갱신 |
+
+## Streaming-first engineering priority
+
+게임빌더 v2는 규칙 엔진이 중심인 전통 게임이 아니라 LLM Story 스트리밍 게임이다.
+
+우선순위:
+1. `/api/story` SSE 스트리밍과 사용자가 본 서사 보존
+2. 게임 진행 연속성
+3. Extract 기반 상태 저장
+4. 형식 검증
+
+LLM이 자연스럽게 처리할 수 있는 서사 형식, 플레이어 설정 추천, 선택지 문구, 카드 표현을 Worker의 hard gate로 검증하지 않는다. 이들 품질 문제는 warning 또는 best-effort fallback으로 처리하며 이미 스트리밍된 Story를 폐기하거나 Commit을 차단하지 않는다.
+
+Hard failure는 중복 Commit, turn mismatch, 잘못된 structured transaction, DB 저장 실패, 권한 없는 성적 완료 상태 저장처럼 실제 무결성·권한 문제가 있는 경우에만 사용한다.
+> LEGACY DOCUMENT — main/archive/pre-csa-only 전용. feature/csa-only 구현 기준으로 사용하지 않는다.

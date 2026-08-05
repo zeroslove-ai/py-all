@@ -1,0 +1,64 @@
+const csaSavedRuleAwarenessViewHelpers = String.raw`function sanitizeSavedRuleDenialText(value = '') {
+  if (typeof value !== 'string' || !CSA_RULE_DENIAL_RE.test(value)) return value;
+  let next = value;
+  const correction = '[정정: 활성 규정은 실제로 존재하고 현재 적용된다. NPC는 수행·협상·불이익을 감수한 의식적 위반 중 하나를 선택해야 한다.]';
+  for (let i = 0; i < 4 && CSA_RULE_DENIAL_RE.test(next); i += 1) next = next.replace(CSA_RULE_DENIAL_RE, correction);
+  return next;
+}
+
+function sanitizeSavedCsaRuleAwarenessView(view = {}) {
+  if (!isPlainObject(view) || !getApplicableRefusalCostCsa(view).length) return view;
+  const next = { ...view };
+  for (const key of ['recent_summary', 'story_summary_recent100', 'story_summary']) {
+    if (typeof next[key] === 'string') next[key] = sanitizeSavedRuleDenialText(next[key]);
+  }
+
+  if (isPlainObject(next.npc_emotion)) {
+    next.npc_emotion = Object.fromEntries(Object.entries(next.npc_emotion).map(([characterId, rawEmotion]) => {
+      if (!isPlainObject(rawEmotion)) return [characterId, rawEmotion];
+      return [characterId, {
+        ...rawEmotion,
+        surface: sanitizeSavedRuleDenialText(rawEmotion.surface),
+        inner: sanitizeSavedRuleDenialText(rawEmotion.inner)
+      }];
+    }));
+  }
+
+  if (isPlainObject(next.csa_runtime_state)) {
+    const refusalRuleIds = new Set(getApplicableRefusalCostCsa(next).map(csa => csa.id));
+    next.csa_runtime_state = Object.fromEntries(Object.entries(next.csa_runtime_state).map(([csaId, rawRuntime]) => {
+      if (!refusalRuleIds.has(csaId) || !isPlainObject(rawRuntime)) return [csaId, rawRuntime];
+      const runtimeText = [rawRuntime.action_state, rawRuntime.end_reason].filter(value => typeof value === 'string').join('\n');
+      if (!CSA_RULE_DENIAL_RE.test(runtimeText)) return [csaId, rawRuntime];
+      return [csaId, {
+        ...rawRuntime,
+        status: 'paused',
+        action_state: '저장된 규정 부정 판단은 무효이며 활성 규정 인식 후 재판단 필요',
+        end_reason: '공개·프롬프트 뷰에서 과거 규정 부정 오염을 차단함'
+      }];
+    }));
+  }
+
+  return next;
+}`;
+
+replaceOnce(
+  `function buildCsaOfficialNoticeSection(structuredPlan = null, previousSave = {}, effectiveSave = {}) {`,
+  csaSavedRuleAwarenessViewHelpers + '\n\nfunction buildCsaOfficialNoticeSection(structuredPlan = null, previousSave = {}, effectiveSave = {}) {',
+  'add view-only cleanup for already-saved active rule denial'
+);
+
+replaceOnce(
+  `  return sanitizeSavedCsaRuntimeSceneView(sanitizeSavedCsaAffinityView(view));`,
+  `  return sanitizeSavedCsaRuleAwarenessView(
+    sanitizeSavedCsaRuntimeSceneView(sanitizeSavedCsaAffinityView(view))
+  );`,
+  'remove saved rule-denial contamination before context and Story prompt use'
+);
+
+assertions.push(
+  ['saved rule denial view sanitizer', source.includes('function sanitizeSavedCsaRuleAwarenessView') && source.includes('function sanitizeSavedRuleDenialText')],
+  ['saved summaries corrected without DB mutation', source.includes("['recent_summary', 'story_summary_recent100', 'story_summary']") && source.includes('정정: 활성 규정은 실제로 존재하고 현재 적용된다')],
+  ['saved denial runtime cannot remain compliant active', source.includes('저장된 규정 부정 판단은 무효이며 활성 규정 인식 후 재판단 필요') && source.includes("status: 'paused'")],
+  ['saved awareness sanitizer chained in public view', source.includes('return sanitizeSavedCsaRuleAwarenessView(')]
+);

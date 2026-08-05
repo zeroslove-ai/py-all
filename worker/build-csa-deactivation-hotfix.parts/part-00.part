@@ -1,0 +1,63 @@
+import fs from 'node:fs';
+import { spawnSync } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
+
+const sourcePath = new URL('./game-proxy-v2.js', import.meta.url);
+const outputPath = new URL('./game-proxy-v2.generated.js', import.meta.url);
+let source = fs.readFileSync(sourcePath, 'utf8');
+
+function replaceOnce(oldText, newText, label) {
+  const index = source.indexOf(oldText);
+  if (index < 0) throw new Error(`${label}: source marker missing`);
+  source = source.slice(0, index) + newText + source.slice(index + oldText.length);
+}
+
+function replaceRegex(pattern, replacement, label) {
+  let count = 0;
+  source = source.replace(pattern, () => {
+    count += 1;
+    return replacement;
+  });
+  if (count !== 1) throw new Error(`${label}: expected one match, got ${count}`);
+}
+
+replaceOnce(
+  "const effectiveCtx = { ...ctx, save: effectiveSave, __structured_effective_save: true };",
+  "const effectiveCtx = { ...ctx, save: effectiveSave, __structured_effective_save: true, __structured_previous_save: ctx?.save || {} };",
+  'preserve pre-transaction save for Story'
+);
+
+const aftereffectHelpers = String.raw`const CSA_AFTEREFFECT_SCHEMA_VERSION = 2;
+const CSA_AFTEREFFECT_GLOBAL_KEY = '__global';
+
+function csaAftereffectRequiredEncounters(strength = '약함') {
+  if (strength === '강함') return 3;
+  if (strength === '중간') return 2;
+  return 1;
+}
+
+function collectCsaAftereffectCandidateIds(save = {}, master = {}, playerInput = '', extraIds = []) {
+  const characters = isPlainObject(master?.characters) ? master.characters : {};
+  const detected = detectRegisteredCharacterIds('', playerInput, characters, save?.last_character_id);
+  return [...new Set([
+    save?.last_character_id,
+    ...(Array.isArray(save?.last_npcs_present) ? save.last_npcs_present : []),
+    ...(Array.isArray(detected) ? detected : []),
+    ...(Array.isArray(extraIds) ? extraIds : [])
+  ])].filter(id => typeof id === 'string' && id && id !== 'narrator' && isPlainObject(characters?.[id]));
+}
+
+function buildCsaAftereffectGlobalRecord(csa = {}, turnNumber = 0) {
+  const contract = buildCsaSemanticContract(csa);
+  return {
+    schema_version: CSA_AFTEREFFECT_SCHEMA_VERSION,
+    csa_id: csa.id,
+    strength: CSA_STRENGTH_TIERS.includes(csa.strength) ? csa.strength : '약함',
+    started_turn: Number.isInteger(turnNumber) ? turnNumber : 0,
+    canonical_content: typeof csa.content === 'string' ? csa.content : '',
+    actor_group: contract.actor_group || csa?.preset?.actor_group || 'unknown',
+    source_type: csa.source_type || null,
+    direct_sexual_action: csaHasDirectSexualRequiredAction(csa),
+    active: true
+  };
+}

@@ -1,0 +1,384 @@
+const supportingNpcAndAffinityHelpers = String.raw`const RECURRING_SUPPORTING_NPC_CATALOG = Object.freeze([
+  Object.freeze({
+    id: 'supporting_npc:shin_doyoon',
+    name: '신도윤',
+    aliases: Object.freeze(['신도윤']),
+    gender: 'male',
+    role_groups: Object.freeze(['hospital_staff', 'male_staff']),
+    role_label: '남성 병원 직원',
+    note: '일반 직원 단역. 호감도·관계·마인드 모니터·이미지 같은 영구 히로인 상태를 만들지 않는다.'
+  }),
+  Object.freeze({
+    id: 'supporting_npc:jung_taehoon',
+    name: '정태훈',
+    aliases: Object.freeze(['정태훈', '김지은 남편', '김지은의 남편', '지은의 남편']),
+    gender: 'male',
+    role_groups: Object.freeze(['visitor']),
+    role_label: '김지은의 남편·병원 방문객',
+    note: '김지은과 오래된 섹스리스 부부다. 평소 성욕은 낮지만 김지은이 다른 남자와 관계하는 장면을 목격하면 관전 상황 자체에 강하게 흥분해 자리를 지키고 집중한다. 이 반응은 플레이어 호감·충성·복종이 아니며, 언급·호출·현재 장면 근거 없이 자동 등장하지 않는다.'
+  })
+]);
+
+const SUPPORTING_MALE_STAFF_RE = /(?:남자|남성)\\s*(?:직원|간호사|의사|의료진|원무|행정|접수)|(?:직원|간호사|의사|의료진|원무|행정|접수)\\s*(?:남자|남성)/;
+const SUPPORTING_FEMALE_STAFF_RE = /(?:여자|여성)\\s*(?:직원|간호사|의사|의료진|원무|행정|접수)|(?:직원|간호사|의사|의료진|원무|행정|접수)\\s*(?:여자|여성)/;
+const SUPPORTING_NURSE_RE = /(?:미등록|일반|다른|옆|근처|새로 온)?\\s*(?:남자|남성|여자|여성)?\\s*(?:간호사|수간호사)/;
+const SUPPORTING_DOCTOR_RE = /(?:미등록|일반|다른|옆|근처|새로 온)?\\s*(?:남자|남성|여자|여성)?\\s*(?:의사|전문의|전공의)/;
+const SUPPORTING_HOSPITAL_STAFF_RE = /(?:미등록|일반|다른|옆|근처|새로 온)?\\s*(?:남자|남성|여자|여성)?\\s*(?:병원\\s*직원|직원|원무|행정|접수\\s*직원)/;
+
+function compactSupportingNpcSceneSource(save = {}) {
+  const tail = value => typeof value === 'string' ? value.slice(-2200) : '';
+  return [
+    tail(save?.__current_player_input),
+    tail(save?.recent_summary),
+    tail(save?.story_summary_recent100),
+    Array.isArray(save?.last_choices) ? save.last_choices.join(' ') : ''
+  ].filter(Boolean).join('\\n');
+}
+
+function supportingNpcProfileMentioned(profile = {}, source = '') {
+  return (Array.isArray(profile.aliases) ? profile.aliases : []).some(alias => typeof alias === 'string' && alias && source.includes(alias));
+}
+
+function supportingNpcMatchesActorGroup(profile = {}, actorGroup = '') {
+  if (!profile || !actorGroup) return false;
+  if (actorGroup === 'everyone_in_hospital') return true;
+  const groups = new Set(Array.isArray(profile.role_groups) ? profile.role_groups : []);
+  if (groups.has(actorGroup)) return true;
+  if (actorGroup === 'hospital_staff') return groups.has('hospital_staff') || groups.has('medical_staff') || groups.has('nurse') || groups.has('doctor');
+  if (actorGroup === 'medical_staff') return groups.has('medical_staff') || groups.has('nurse') || groups.has('doctor');
+  if (actorGroup === 'female_staff') return profile.gender === 'female' && supportingNpcMatchesActorGroup(profile, 'hospital_staff');
+  if (actorGroup === 'male_staff') return profile.gender === 'male' && supportingNpcMatchesActorGroup(profile, 'hospital_staff');
+  return false;
+}
+
+function makeAnonymousSupportingNpc(id, name, gender, roleGroups, roleLabel) {
+  return { id, name, aliases: [], gender, role_groups: roleGroups, role_label: roleLabel, note: '이번 장면에서만 존재하는 일반 NPC 역할이다. 영구 관계·수치·이미지를 만들지 않는다.' };
+}
+
+function collectPresentSupportingNpcProfiles(save = {}) {
+  const source = compactSupportingNpcSceneSource(save);
+  const profiles = RECURRING_SUPPORTING_NPC_CATALOG
+    .filter(profile => supportingNpcProfileMentioned(profile, source))
+    .map(profile => ({ ...profile }));
+  const hasGroup = group => profiles.some(profile => supportingNpcMatchesActorGroup(profile, group));
+
+  if (SUPPORTING_MALE_STAFF_RE.test(source) && !hasGroup('male_staff')) {
+    profiles.push(makeAnonymousSupportingNpc('supporting_npc:scene_male_staff', '현재 장면의 남성 직원', 'male', ['hospital_staff', 'male_staff'], '남성 병원 직원'));
+  }
+  if (SUPPORTING_FEMALE_STAFF_RE.test(source) && !hasGroup('female_staff')) {
+    profiles.push(makeAnonymousSupportingNpc('supporting_npc:scene_female_staff', '현재 장면의 여성 직원', 'female', ['hospital_staff', 'female_staff'], '여성 병원 직원'));
+  }
+  if (SUPPORTING_NURSE_RE.test(source) && !hasGroup('nurse')) {
+    const gender = SUPPORTING_MALE_STAFF_RE.test(source) ? 'male' : (SUPPORTING_FEMALE_STAFF_RE.test(source) ? 'female' : 'unknown');
+    const groups = ['nurse', 'medical_staff', 'hospital_staff'];
+    if (gender === 'male') groups.push('male_staff');
+    if (gender === 'female') groups.push('female_staff');
+    profiles.push(makeAnonymousSupportingNpc('supporting_npc:scene_nurse', '현재 장면의 일반 간호사', gender, groups, '일반 간호사'));
+  }
+  if (SUPPORTING_DOCTOR_RE.test(source) && !hasGroup('doctor')) {
+    const gender = SUPPORTING_MALE_STAFF_RE.test(source) ? 'male' : (SUPPORTING_FEMALE_STAFF_RE.test(source) ? 'female' : 'unknown');
+    const groups = ['doctor', 'medical_staff', 'hospital_staff'];
+    if (gender === 'male') groups.push('male_staff');
+    if (gender === 'female') groups.push('female_staff');
+    profiles.push(makeAnonymousSupportingNpc('supporting_npc:scene_doctor', '현재 장면의 일반 의사', gender, groups, '일반 의사'));
+  }
+  if (SUPPORTING_HOSPITAL_STAFF_RE.test(source) && !hasGroup('hospital_staff')) {
+    profiles.push(makeAnonymousSupportingNpc('supporting_npc:scene_hospital_staff', '현재 장면의 일반 직원', 'unknown', ['hospital_staff'], '일반 병원 직원'));
+  }
+
+  return [...new Map(profiles.map(profile => [profile.id, profile])).values()];
+}
+
+function resolvePresentSupportingNpc(actorGroup = '', save = {}, excludeId = null) {
+  return collectPresentSupportingNpcProfiles(save).find(profile => profile.id !== excludeId && supportingNpcMatchesActorGroup(profile, actorGroup)) || null;
+}
+
+function findPresentSupportingNpcByToken(id = '', save = {}) {
+  return collectPresentSupportingNpcProfiles(save).find(profile => profile.id === id) || null;
+}
+
+function buildSupportingNpcCsaSection(save = {}) {
+  const present = collectPresentSupportingNpcProfiles(save);
+  const catalogLines = RECURRING_SUPPORTING_NPC_CATALOG.map(profile =>
+    '- ' + profile.id + ' | ' + profile.name + ' | ' + profile.role_label + ' | ' + profile.note
+  );
+  const presentLines = present.length
+    ? present.map(profile => '- 현재 장면 판정: ' + profile.id + ' | ' + profile.name + ' | gender=' + profile.gender + ' | groups=' + profile.role_groups.join(','))
+    : ['- 현재 입력·최근 장면 근거로 확정된 일반 NPC 없음'];
+
+  return '[일반 NPC 성별·역할 및 CSA 적용 — 최종]\n'
+    + '등록 히로인이 아닌 일반 NPC도 현재 장면에서 성별과 역할이 명시되면 CSA 집단 판정에서 제외하지 않는다. “모든 직원”은 일반 직원도 포함하고, “남성 직원”·“여성 직원”은 명시된 성별과 병원 직원 역할이 함께 맞을 때 적용한다.\n\n'
+    + '[반복 등장 일반 NPC 카탈로그 — 자동 소환 금지]\n'
+    + catalogLines.join('\n') + '\n\n'
+    + '[이번 장면에서 확인된 일반 NPC]\n'
+    + presentLines.join('\n') + '\n\n'
+    + '규칙:\n'
+    + '- 일반 NPC는 이름·성별·역할·현재 등장 여부만 장면 판정에 사용한다. npc_stats, npc_emotion, npc_relationship_state, 이미지, TTS 기준 character_id, 영구 히로인 ID를 만들지 않는다.\n'
+    + '- 현재 입력이나 직전 장면에서 이름·성별·역할이 드러난 일반 NPC는 등록 여부와 상관없이 everyone_in_hospital, hospital_staff, medical_staff, nurse, doctor, female_staff, male_staff의 직접 범위에 맞게 반응한다.\n'
+    + '- 성별이 불명확한 일반 NPC를 남성 직원이나 여성 직원으로 임의 추정하지 않는다. 병원 직원 여부가 불명확하면 staff 범위로 임의 확장하지 않는다.\n'
+    + '- Extract의 성적 행동 actor_id/target_id에서 현재 장면의 일반 NPC를 특정해야 하면 위 supporting_npc: 토큰을 그대로 쓴다. 이 토큰은 장면 판정용이며 npcs_present나 영구 관계 저장 대상이 아니다.\n'
+    + '- 정태훈은 김지은의 남편으로 언급·호출되거나 실제 장면에 있을 때만 등장한다. 아내와 다른 남자의 관계를 보며 생기는 흥분은 관전 취향이며 플레이어 개인에 대한 애정·충성·복종으로 바꾸지 않는다.';
+}
+
+const CSA_FALSE_AFFINITY_EVIDENCE_RE = /(?:상식|규칙|지침|법령|업무|명령|요구|거절|지연|수용|따르|수행|협조|복종|홍조|흥분|신음|몸이\\s*반응|성행위|성적\\s*행동|전용|소유|실장님\\s*뜻|시키는\\s*대로|말을\\s*들)/;
+const INDEPENDENT_AFFINITY_EVIDENCE_RE = /(?:의사를?\\s*존중|경계를?\\s*존중|약속을?\\s*지(?:키|켰)|위험에서\\s*(?:구|보호)|업무\\s*문제를?\\s*해결|진지하게\\s*(?:들|이해)|고민을?\\s*(?:들|이해)|사과를?\\s*(?:받|하)|위로|배려|상호\\s*합의|자발적\\s*호의|개인적\\s*대화)/;
+const LOW_AFFINITY_ROMANCE_RE = /(?:플레이어|실장님|감사관님|주인님)[^.!?。\\n]{0,35}(?:특별|사랑|좋아|눈에\\s*들|전용|내\\s*사람|내\\s*것|당신\\s*것|실장님\\s*거)|(?:질투|독점|다른\\s*사람에게[^.!?。\\n]{0,20}서운|넘겨[^.!?。\\n]{0,20}서운|곁에만\\s*있|버림받)/;
+
+function buildCsaAffinitySeparationSection(save = {}, characters = {}) {
+  const hasApplicableCsa = getApplicableCsaEntries(save).length > 0;
+  if (!hasApplicableCsa) return '';
+  const ids = [...new Set([save?.last_character_id, ...(Array.isArray(save?.last_npcs_present) ? save.last_npcs_present : [])])]
+    .filter(id => typeof id === 'string' && id && id !== 'narrator' && isPlainObject(characters?.[id]));
+  const lines = ids.map(id => {
+    const name = characters[id]?.name || characters[id]?.['이름'] || id;
+    const affinity = Math.max(0, Math.min(100, Number(save?.npc_stats?.[id]?.['호감도']) || 0));
+    return '- ' + name + ': 현재 호감도 ' + affinity;
+  });
+
+  return '[CSA 수행과 플레이어 호감 완전 분리 — 이번 턴 최종 권위]\n'
+    + (lines.length ? lines.join('\n') + '\n\n' : '')
+    + '- 활성 규정 때문에 시킨 행동을 하는 것은 “해야 하니 한다”는 규범 수행이다. 플레이어가 특별해서, 좋아해서, 눈에 들고 싶어서, 플레이어의 것이 되고 싶어서 하는 행동으로 바꾸지 않는다.\n'
+    + '- 상식수용도는 규정 수행의 자연스러움·속도·적극성만 조절한다. 플레이어에 대한 호감·신뢰·애정·소유욕·질투·독점욕을 만들지 않는다.\n'
+    + '- 성적 흥분, 홍조, 신음, 절정, 반복 성행위는 신체 반응과 사건 기록일 뿐 플레이어 사랑의 증거가 아니다.\n'
+    + '- 호감도 0~19는 업무적 응대·경계·규정 수행만 허용한다. “플레이어가 특별하다”, “눈에 들고 싶다”, “플레이어 전용이다”, “다른 사람에게 넘겨져 서운하다” 같은 애정·소유 표현을 금지한다.\n'
+    + '- 호감도 20~39도 가벼운 친근감까지만 허용하며 연애 고백·독점욕·전용 선언·질투를 금지한다.\n'
+    + '- 최근 요약·기억·직전 npc_emotion에 현재 호감도와 충돌하는 전용·특별함·질투·소유 표현이 있어도 CSA 수행에서 잘못 파생된 오염으로 보고 계승하지 않는다. 숫자와 독립적인 관계 사건을 우선한다.\n'
+    + '- 호감 상승은 의사·경계 존중, 약속 이행, 위험이나 업무 문제 해결, 진지한 감정 이해처럼 CSA와 별개의 관계 사건이 이번 턴에 실제로 있어야 한다. 규칙 수행·업무 협조·성행위·신체 반응만 있으면 호감 delta는 0이다.\n'
+    + '- 일반 NPC 역시 CSA를 수행한다는 이유로 플레이어를 좋아하거나 충성하지 않는다. 정태훈의 관전 흥분처럼 개인 취향이 있다면 그 취향의 대상과 플레이어 호감을 명확히 분리한다.';
+}
+
+function sanitizeLowAffinityCsaText(value = '', fallback = '') {
+  if (typeof value !== 'string' || !LOW_AFFINITY_ROMANCE_RE.test(value)) return value;
+  return fallback;
+}
+
+function sanitizeCsaAffinityProjection(extract = {}, save = {}) {
+  if (!isPlainObject(extract)) return extract;
+  const characterId = typeof extract.character_id === 'string' ? extract.character_id : '';
+  if (!characterId || characterId === 'narrator') return extract;
+  const hasApplicableCsa = getApplicableCsaEntries(save).length > 0;
+  if (!hasApplicableCsa) return extract;
+
+  const next = { ...extract };
+  const changes = isPlainObject(next.npc_stat_changes) ? { ...next.npc_stat_changes } : {};
+  const affinityChange = isPlainObject(changes['호감도']) ? { ...changes['호감도'] } : null;
+  const priorAffinity = Math.max(0, Math.min(100, Number(save?.npc_stats?.[characterId]?.['호감도']) || 0));
+  let acceptedAffinityDelta = affinityChange ? Math.trunc(Number(affinityChange.delta) || 0) : 0;
+
+  if (affinityChange && acceptedAffinityDelta > 0) {
+    const reason = typeof affinityChange.reason === 'string' ? affinityChange.reason : '';
+    if (CSA_FALSE_AFFINITY_EVIDENCE_RE.test(reason) && !INDEPENDENT_AFFINITY_EVIDENCE_RE.test(reason)) {
+      acceptedAffinityDelta = 0;
+      changes['호감도'] = { delta: 0, reason: '상식개변·업무 수행·성적 반응은 플레이어 호감 상승의 독립 근거가 아님' };
+      next.npc_stat_changes = changes;
+    }
+  }
+
+  const effectiveAffinity = Math.max(0, Math.min(100, priorAffinity + acceptedAffinityDelta));
+  if (effectiveAffinity < 40 && isPlainObject(next.npc_emotion)) {
+    const emotion = { ...next.npc_emotion };
+    emotion.surface = sanitizeLowAffinityCsaText(
+      emotion.surface,
+      '“규정에 따라 필요한 행동은 수행하겠지만, 그건 개인적인 호감이나 연애 감정과는 별개예요. 업무 범위와 제 감정은 구분하고 있어요.”'
+    );
+    emotion.inner = sanitizeLowAffinityCsaText(
+      emotion.inner,
+      '“지금 행동은 병원 규정과 상황 때문에 하는 것이다. 몸이 반응하거나 당황해도 플레이어가 특별해서 그런 것은 아니고, 개인적인 호감은 별개의 문제다.”'
+    );
+    if (emotion.state === 'dependent') emotion.state = 'accepting';
+    next.npc_emotion = emotion;
+  }
+  if (effectiveAffinity < 40 && typeof next.turn_summary === 'string' && LOW_AFFINITY_ROMANCE_RE.test(next.turn_summary)) {
+    next.turn_summary = next.turn_summary
+      .replace(/(?:플레이어|실장님|감사관님|주인님)\\s*전용/g, '규정상 우선 수행')
+      .replace(/(?:플레이어|실장님|감사관님|주인님)(?:이|가)?\\s*특별[^.!?。\\n]*/g, '플레이어의 요구를 규정 범위에서 수행했다')
+      .replace(/(?:다른\\s*사람에게|신도윤에게)[^.!?。\\n]{0,30}서운[^.!?。\\n]*/g, '다른 대상이 개입하는 상황에 개인적 불편함을 보였다');
+  }
+  return next;
+}`;
+
+replaceOnce(
+  `function buildCsaOfficialNoticeSection(structuredPlan = null, previousSave = {}, effectiveSave = {}) {`,
+  supportingNpcAndAffinityHelpers + '\n\nfunction buildCsaOfficialNoticeSection(structuredPlan = null, previousSave = {}, effectiveSave = {}) {',
+  'add supporting NPC role resolution and CSA-affinity separation helpers'
+);
+
+replaceOnce(
+  `  const effectiveSave = buildStructuredEffectiveSave(ctx?.save, structuredPlan);`,
+  `  const effectiveSave = { ...buildStructuredEffectiveSave(ctx?.save, structuredPlan), __current_player_input: resolvedPlayerInput };`,
+  'carry current Story input only in ephemeral effective save for supporting NPC role resolution'
+);
+
+replaceOnce(
+  `  const effectiveSave = buildStructuredEffectiveSave(compatCtx?.save, structuredPlan);`,
+  `  const effectiveSave = { ...buildStructuredEffectiveSave(compatCtx?.save, structuredPlan), __current_player_input: player_input };`,
+  'carry current Extract input only in ephemeral effective save for supporting NPC role resolution'
+);
+
+replaceOnce(
+  `  if (['patient', 'guardian', 'visitor'].includes(group)) {`,
+  `  if (['patient', 'guardian', 'visitor'].includes(group)) {
+    const namedSupporting = resolvePresentSupportingNpc(group, save, excludeCharacterId);
+    if (namedSupporting) return { resolved: true, type: 'supporting_npc', supportingNpcId: namedSupporting.id, name: namedSupporting.name };`,
+  'prefer a named present supporting NPC over an anonymous minor role'
+);
+
+replaceOnce(
+  `  const roleMatch = presentIds.find(id => characterMatchesCsaRoleGroup(id, group));
+  if (roleMatch) return { resolved: true, type: 'npc', characterId: roleMatch };`,
+  `  const roleMatch = presentIds.find(id => characterMatchesCsaRoleGroup(id, group));
+  if (roleMatch) return { resolved: true, type: 'npc', characterId: roleMatch };
+  const supportingMatch = resolvePresentSupportingNpc(group, save, excludeCharacterId);
+  if (supportingMatch) return { resolved: true, type: 'supporting_npc', supportingNpcId: supportingMatch.id, name: supportingMatch.name };`,
+  'resolve unregistered supporting staff by explicit scene gender and role'
+);
+
+replaceOnce(
+  `  const excludeId = actor.type === 'npc' ? actor.characterId : (actor.type === 'player' ? 'player' : null);`,
+  `  const excludeId = actor.type === 'npc' ? actor.characterId : (actor.type === 'supporting_npc' ? actor.supportingNpcId : (actor.type === 'player' ? 'player' : null));`,
+  'exclude a supporting actor from target resolution'
+);
+
+replaceOnce(
+  `  if (actor.type === 'npc' && target.type === 'npc' && actor.characterId === target.characterId) {
+    return { resolved: false, actor, target };
+  }`,
+  `  if (actor.type === 'npc' && target.type === 'npc' && actor.characterId === target.characterId) {
+    return { resolved: false, actor, target };
+  }
+  if (actor.type === 'supporting_npc' && target.type === 'supporting_npc' && actor.supportingNpcId === target.supportingNpcId) {
+    return { resolved: false, actor, target };
+  }`,
+  'keep supporting actor and target distinct'
+);
+
+replaceOnce(
+  `    if (participant?.type === 'npc' || participant?.type === 'group') return 'npc';`,
+  `    if (participant?.type === 'npc' || participant?.type === 'supporting_npc' || participant?.type === 'group') return 'npc';`,
+  'treat supporting NPC as the NPC side of a CSA direction'
+);
+
+replaceOnce(
+  `  if (participant?.type === 'npc') return participant.characterId;
+  if (participant?.type === 'group') return typeof save?.last_character_id === 'string' ? save.last_character_id : null;`,
+  `  if (participant?.type === 'npc') return participant.characterId;
+  if (participant?.type === 'supporting_npc') return participant.supportingNpcId;
+  if (participant?.type === 'group') {
+    const supporting = collectPresentSupportingNpcProfiles(save)[0];
+    return supporting?.id || (typeof save?.last_character_id === 'string' ? save.last_character_id : null);
+  }`,
+  'expose a scene-only supporting NPC token as concrete physical participant'
+);
+
+replaceOnce(
+  `function structuredParticipantMatches(participant, id, presentIds) {`,
+  `function structuredParticipantMatches(participant, id, presentIds, save = {}) {`,
+  'pass save context into structured supporting participant matching'
+);
+
+replaceOnce(
+  `  if (participant.type === 'npc') return id === participant.characterId;`,
+  `  if (participant.type === 'npc') return id === participant.characterId;
+  if (participant.type === 'supporting_npc') return id === participant.supportingNpcId && Boolean(findPresentSupportingNpcByToken(id, save));`,
+  'match a structured supporting NPC token against current scene evidence'
+);
+
+replaceOnce(
+  `  if (participant.type === 'group') return id !== 'player' && presentIds.has(id);`,
+  `  if (participant.type === 'group') return id !== 'player' && (presentIds.has(id) || Boolean(findPresentSupportingNpcByToken(id, save)));`,
+  'allow a present supporting NPC to satisfy an everyone-in-hospital group'
+);
+
+replaceOnce(
+  `function resolvePlayerInitiatedAuthorityMatch({ csa, contract, master, targetId, presentIds }) {`,
+  `function resolvePlayerInitiatedAuthorityMatch({ csa, contract, master, save, targetId, presentIds }) {`,
+  'pass save into player-initiated authority supporting target check'
+);
+
+replaceOnce(
+  `  if (!targetId || targetId === 'player' || !presentIds.has(targetId)) return false;
+  const characters = isPlainObject(master?.characters) ? master.characters : {};
+  const targetCharacter = characters[targetId];
+  if (!isPlainObject(targetCharacter)) return false;
+  return characterMatchesCsaActorGroup(targetCharacter, contract.actor_group);`,
+  `  if (!targetId || targetId === 'player') return false;
+  const supportingTarget = findPresentSupportingNpcByToken(targetId, save);
+  if (supportingTarget) return supportingNpcMatchesActorGroup(supportingTarget, contract.actor_group);
+  if (!presentIds.has(targetId)) return false;
+  const characters = isPlainObject(master?.characters) ? master.characters : {};
+  const targetCharacter = characters[targetId];
+  if (!isPlainObject(targetCharacter)) return false;
+  return characterMatchesCsaActorGroup(targetCharacter, contract.actor_group);`,
+  'authorize player-initiated CSA requests toward a matching supporting NPC'
+);
+
+replaceOnce(
+  `    const forwardMatch = structuredParticipantMatches(participants.actor, actorId, presentIds)
+      && structuredParticipantMatches(participants.target, targetId, presentIds);`,
+  `    const forwardMatch = structuredParticipantMatches(participants.actor, actorId, presentIds, save)
+      && structuredParticipantMatches(participants.target, targetId, presentIds, save);`,
+  'cross-check structured supporting actor and target against scene evidence'
+);
+
+replaceOnce(
+  `      && resolvePlayerInitiatedAuthorityMatch({ csa, contract, master, targetId, presentIds });`,
+  `      && resolvePlayerInitiatedAuthorityMatch({ csa, contract, master, save, targetId, presentIds });`,
+  'pass save into reverse authority supporting match'
+);
+
+replaceOnce(
+  `  const csaOfficialNoticeSection = buildCsaOfficialNoticeSection(
+    structuredPlan,
+    ctx?.__structured_previous_save || save,
+    save
+  );
+
+  return {`,
+  `  const csaOfficialNoticeSection = buildCsaOfficialNoticeSection(
+    structuredPlan,
+    ctx?.__structured_previous_save || save,
+    save
+  );
+  const supportingNpcCsaSection = buildSupportingNpcCsaSection(save);
+  const csaAffinitySeparationSection = buildCsaAffinitySeparationSection(save, master.characters || {});
+
+  return {`,
+  'build supporting NPC and affinity separation Story guidance'
+);
+
+replaceOnce(
+  `      ...(csaOfficialNoticeSection ? [{ role: 'system', content: csaOfficialNoticeSection }] : [])`,
+  `      ...(csaOfficialNoticeSection ? [{ role: 'system', content: csaOfficialNoticeSection }] : []),
+      ...(supportingNpcCsaSection ? [{ role: 'system', content: supportingNpcCsaSection }] : []),
+      ...(csaAffinitySeparationSection ? [{ role: 'system', content: csaAffinitySeparationSection }] : [])`,
+  'inject supporting NPC and affinity separation as latest Story authority'
+);
+
+replaceOnce(
+  `  let extract = normalizeExtract(result.parsed);`,
+  `  let extract = sanitizeCsaAffinityProjection(normalizeExtract(result.parsed), compatCtx?.save || {});`,
+  'deterministically reject CSA-derived affinity and low-affinity romance in Extract'
+);
+
+replaceOnce(
+  `"actor_id": "그 행동을 실제로 수행할 사람. \\"player\\" 또는 npcs_present 안의 heroine ID. 불명확하면 null",`,
+  `"actor_id": "그 행동을 실제로 수행할 사람. \\"player\\", npcs_present 안의 heroine ID, 또는 [일반 NPC 성별·역할]에 제시된 supporting_npc: 토큰. 불명확하면 null",`,
+  'allow a scene-only supporting NPC actor token in structured choice metadata'
+);
+
+replaceOnce(
+  `"target_id": "그 행동을 받을 사람. \\"player\\" 또는 npcs_present 안의 heroine ID. 불명확하면 null",`,
+  `"target_id": "그 행동을 받을 사람. \\"player\\", npcs_present 안의 heroine ID, 또는 [일반 NPC 성별·역할]에 제시된 supporting_npc: 토큰. 불명확하면 null",`,
+  'allow a scene-only supporting NPC target token in structured choice metadata'
+);
+
+assertions.push(
+  ['recurring supporting NPC catalog', source.includes('supporting_npc:shin_doyoon') && source.includes('supporting_npc:jung_taehoon')],
+  ['jung taehoon minimal setting', source.includes('김지은과 오래된 섹스리스 부부') && source.includes('관전 상황 자체에 강하게 흥분')],
+  ['supporting staff gender role resolution', source.includes('function collectPresentSupportingNpcProfiles') && source.includes('SUPPORTING_MALE_STAFF_RE') && source.includes('SUPPORTING_FEMALE_STAFF_RE')],
+  ['supporting participant direct coverage', source.includes("type: 'supporting_npc'") && source.includes('structuredParticipantMatches(participants.actor, actorId, presentIds, save)')],
+  ['supporting NPC no heroine state', source.includes('npc_stats, npc_emotion, npc_relationship_state, 이미지, TTS 기준 character_id, 영구 히로인 ID를 만들지 않는다')],
+  ['CSA affinity final Story separation', source.includes('CSA 수행과 플레이어 호감 완전 분리') && source.includes('최근 요약·기억·직전 npc_emotion')],
+  ['deterministic affinity sanitizer', source.includes('function sanitizeCsaAffinityProjection') && source.includes('상식개변·업무 수행·성적 반응은 플레이어 호감 상승의 독립 근거가 아님')],
+  ['supporting and affinity final injection', source.includes('content: supportingNpcCsaSection') && source.includes('content: csaAffinitySeparationSection')]
+);

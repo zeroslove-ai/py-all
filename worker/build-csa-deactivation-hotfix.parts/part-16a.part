@@ -1,0 +1,11 @@
+replaceOnce(
+  `function buildCsaAftereffectStorySection(save = {}, characterIds = [], characters = {}) {`,
+  `function buildCsaAftereffectStorySection(save = {}, characterId = '') {
+  const characterIds = Array.isArray(characterId) ? characterId : [characterId];
+  const characters = {};`,
+  'bridge expanded aftereffect signature for the rule-awareness replacement step'
+);
+
+assertions.push(
+  ['aftereffect replacement bridge', source.includes("function buildCsaAftereffectStorySection(save = {}, characterId = '')")]
+);

@@ -1,0 +1,34 @@
+        state[characterId][csaId] = normalizeCsaAftereffectEntry(state[characterId][csaId], csa);
+      }
+    }
+    if (!Object.keys(state[characterId]).length) delete state[characterId];
+  }
+
+  return { ...effectiveSave, csa_aftereffect_state: state };
+}
+
+const CSA_AFTEREFFECT_STRONG_REACTION_RE = /(?:정상\s*업무가\s*아니|당연(?:한|하지)\s*않|왜\s*(?:그런|그렇게|이런)\s*(?:행동|말|판단)|이해(?:가\s*)?되지\s*않|관행이\s*아니|다시\s*(?:생각|판단)|재평가|선을\s*긋|거리를\s*두|물러서|행동을\s*(?:멈추|중단)|옷을\s*(?:챙겨\s*)?입|상의(?:를|가)?\s*(?:챙겨\s*)?입)/;
+const CSA_AFTEREFFECT_EMOTION_RE = /(?:당황|충격|혼란|수치|후회|이상하|낯설|경계)/;
+const CSA_AFTEREFFECT_ACTION_RE = /(?:멈추|중단|정리|거리|물러|옷|상의|질문|거절|경계|다시)/;
+
+function storyHasCsaAftereffectReactionEvidence(narrativeText = '', characterName = '') {
+  if (!characterName) return false;
+  const blocks = extractNarrativeActionSection(narrativeText)
+    .split(/\n{2,}|(?<=[.!?。！？])\s+/)
+    .filter(block => block.includes(characterName));
+  return blocks.some(block => CSA_AFTEREFFECT_STRONG_REACTION_RE.test(block)
+    || (CSA_AFTEREFFECT_EMOTION_RE.test(block) && CSA_AFTEREFFECT_ACTION_RE.test(block)));
+}
+
+function buildCsaAftereffectStorySection(save = {}, characterIds = [], characters = {}) {
+  const ids = Array.isArray(characterIds) ? characterIds : [characterIds];
+  const blocks = ids.map(characterId => {
+    const entries = Object.values(save?.csa_aftereffect_state?.[characterId] || {}).filter(isPlainObject);
+    if (!entries.length) return '';
+    const name = characters?.[characterId]?.name || characters?.[characterId]?.['이름'] || characterId;
+    const phases = entries
+      .map(item => '  - ' + item.phase + ': ' + (item.canonical_content || '해제된 규범'))
+      .join('\n');
+    return '- ' + name + '(' + characterId + ')\n' + phases;
+  }).filter(Boolean);
+  if (!blocks.length) return '';

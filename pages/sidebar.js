@@ -1,20 +1,28 @@
 const sidebar = {
   stats: [
     { key: '호감도', label: '호감' },
-    { key: '신뢰도', label: '신뢰' },
-    { key: '최면깊이', label: '최면' },
-    { key: '순응도', label: '순응' },
-    { key: '최면저항력', label: '저항' }
+    { key: '상식수용도', label: '수용' },
+    { key: '성적흥분도', label: '흥분' }
   ],
   previousStats: {},
 
   init() {
     const panel = document.querySelector('.side-panel');
     panel.innerHTML = `
+      <section class="panel-section player-card" id="player-info-section">
+        <div class="player-card-name" id="player-info-identity">-</div>
+        <div class="player-card-sub" id="player-info-status"></div>
+        <div class="player-card-metrics" id="player-info-metrics"></div>
+        <div class="player-card-world" id="player-info-world"></div>
+        <div class="player-ejaculation-gauge" id="player-ejaculation-gauge" aria-label="플레이어 사정 게이지">
+          <div class="player-ejaculation-gauge-head"><span class="player-ejaculation-gauge-label">💦 사정 게이지</span><span class="player-ejaculation-gauge-value" id="player-ejaculation-gauge-value">0/100 · 아직 사정 불가</span></div>
+          <div class="player-ejaculation-gauge-track"><div class="player-ejaculation-gauge-fill" id="player-ejaculation-gauge-fill"></div><div class="player-ejaculation-gauge-threshold" title="50부터 사정 가능"></div></div>
+        </div>
+      </section>
       <section class="panel-section"><img class="character-img hidden" id="character-img" alt="현재 캐릭터"></section>
       <section class="panel-section"><div class="panel-title" id="character-info-title">캐릭터 기본정보</div><div class="info-list" id="character-info"></div></section>
-      <section class="panel-section"><div class="panel-title">마인드 모니터</div><div class="mind-monitor" id="mind-monitor"><div class="mind-item"><b>표면의식</b><blockquote id="mind-surface">-</blockquote></div><div class="mind-item"><b>잠재의식</b><blockquote id="mind-inner">-</blockquote></div><div class="mind-item"><b>신체적·행동적 반응</b><p id="mind-physical">-</p></div></div></section>
-      <section class="panel-section"><div class="panel-title" id="npc-status-title">NPC 상태</div><div class="npc-status" id="npc-status"></div></section>`;
+      <section class="panel-section"><div class="panel-title" id="npc-status-title">NPC 상태</div><div class="npc-status" id="npc-status"></div></section>
+      <section class="panel-section"><div class="panel-title">마인드 모니터</div><div class="mind-monitor" id="mind-monitor"><div class="mind-item"><b>표면의식</b><blockquote id="mind-surface">-</blockquote></div><div class="mind-item"><b>잠재의식</b><blockquote id="mind-inner">-</blockquote></div><div class="mind-item"><b>신체적·행동적 반응</b><p id="mind-physical">-</p></div></div></section>`;
     ui.init();
     // H3-A item 8: the audio element lives outside .side-panel now, but
     // re-resolve/re-bind it here anyway after every panel re-render so
@@ -24,11 +32,16 @@ const sidebar = {
     relationship.className = 'panel-section';
     relationship.innerHTML = '<div class="panel-title" id="npc-relationship-title">관계 기록</div><div id="npc-relationship" class="relationship-inline"></div>';
     panel.appendChild(relationship);
+    const innerThought = document.createElement('section');
+    innerThought.className = 'panel-section';
+    innerThought.id = 'player-inner-thought-section';
+    innerThought.innerHTML = '<div class="panel-title">플레이어 속마음</div><div id="player-inner-thought" class="player-inner-thought">-</div>';
+    panel.appendChild(innerThought);
     const actions = document.createElement('section');
     actions.className = 'side-panel-footer';
-    actions.innerHTML = '<div class="side-action-row"><button id="app-info-side-button" class="side-action-btn" type="button">📱 최면 어플</button><button id="resume-game-button" class="side-action-btn" type="button">▶ 플레이 재개</button></div>'
+    actions.innerHTML = '<div class="side-action-row"><button id="app-info-side-button" class="side-action-btn" type="button">📱 상식개변 앱</button><button id="resume-game-button" class="side-action-btn" type="button">▶ 플레이 재개</button></div>'
       + '<div class="side-action-row"><button id="reset-side-button" class="side-action-btn" type="button">🔄 리셋</button><button id="feedback-side-button" class="side-action-btn" type="button">✏️ 피드백</button></div>';
-    actions.querySelector('#app-info-side-button').addEventListener('click', () => window.hypnosisApp?.open('home'));
+    actions.querySelector('#app-info-side-button').addEventListener('click', () => window.csaApp?.open('home'));
     actions.querySelector('#resume-game-button').addEventListener('click', () => window.resumeGame?.());
     actions.querySelector('#reset-side-button').addEventListener('click', () => window.showResetModal?.());
     actions.querySelector('#feedback-side-button').addEventListener('click', () => window.showFeedbackModal?.());
@@ -36,30 +49,176 @@ const sidebar = {
     this.renderStats({});
   },
 
+  // Panel sections (player card, NPC image, NPC info/status, mind monitor,
+  // relationship record) stay visible through setup — only their inner
+  // content is empty/placeholder until a character is met. Hiding the whole
+  // section previously took the mind monitor, image, and status areas away
+  // with it even after setup completed and a character existed.
   updateContext(context) {
     const save = context?.save || {};
     const characterId = save.last_character_id;
-    if (characterId) this.updateCharacter(characterId, context);
+    if (characterId) {
+      this.updateCharacter(characterId, context);
+    } else {
+      this.activeCharacter = null;
+      this.activeCharacterId = null;
+      document.getElementById('character-img')?.classList.add('hidden');
+      document.getElementById('character-info')?.replaceChildren();
+      document.getElementById('npc-status')?.replaceChildren();
+      document.getElementById('npc-relationship')?.replaceChildren();
+      this.updateMind({});
+    }
+    this.updatePlayerInfo(save);
+    this.updatePlayerInnerThought(save.player_inner_thought, save?.player?.name);
+  },
+
+  // Compact player card: name/age/profession line, a separate current-status
+  // line (job's text after the first "/", e.g. "건축설계사 / 오른쪽 발목 인대
+  // 파열로 3병동 입원 4일차" — the long background text never fills this
+  // card), body metrics, then location/time. Each sub-line hides itself when
+  // empty instead of leaving a blank row.
+  updatePlayerInfo(save = {}) {
+    const player = save?.player || {};
+    const worldState = save?.world_state || {};
+
+    const jobText = typeof player.job === 'string' ? player.job : '';
+    const slashIndex = jobText.indexOf('/');
+    const profession = (slashIndex >= 0 ? jobText.slice(0, slashIndex) : jobText).trim();
+    const currentStatus = slashIndex >= 0 ? jobText.slice(slashIndex + 1).trim() : '';
+
+    const identity = [player.name, this.withUnit(player.age, '세'), profession || player.background]
+      .filter(value => typeof value === 'string' && value.trim())
+      .join(' · ');
+    const identityEl = document.getElementById('player-info-identity');
+    if (identityEl) identityEl.textContent = identity || '-';
+
+    const statusEl = document.getElementById('player-info-status');
+    if (statusEl) {
+      statusEl.textContent = currentStatus;
+      statusEl.style.display = currentStatus ? '' : 'none';
+    }
+
+    const metrics = [
+      this.withUnit(player.height_cm, 'cm'),
+      this.withUnit(player.weight_kg, 'kg'),
+      this.withUnit(player.penis_length_cm, 'cm')
+    ].filter(Boolean).join(' · ');
+    const metricsEl = document.getElementById('player-info-metrics');
+    if (metricsEl) {
+      metricsEl.textContent = metrics;
+      metricsEl.style.display = metrics ? '' : 'none';
+    }
+
+    const location = worldState.location_label || player.location || save.player_location || '';
+    const time = worldState.time_label || '';
+    const worldParts = [location ? `📍 ${location}` : '', time ? `🕒 ${time}` : ''].filter(Boolean);
+    const worldEl = document.getElementById('player-info-world');
+    if (worldEl) {
+      worldEl.textContent = worldParts.join('  ');
+      worldEl.style.display = worldParts.length ? '' : 'none';
+    }
+
+    const rawMeter = Number(save?.player_sexual_state?.ejaculation_meter);
+    const meter = Number.isFinite(rawMeter) ? Math.max(0, Math.min(100, Math.round(rawMeter))) : 0;
+    const ready = meter >= 50;
+    const gauge = document.getElementById('player-ejaculation-gauge');
+    const gaugeValue = document.getElementById('player-ejaculation-gauge-value');
+    const gaugeFill = document.getElementById('player-ejaculation-gauge-fill');
+    if (gauge) {
+      gauge.classList.toggle('ready', ready);
+      gauge.classList.toggle('max', meter >= 100);
+    }
+    if (gaugeValue) gaugeValue.textContent = meter + '/100 · ' + (ready ? '사정 가능' : '아직 사정 불가');
+    if (gaugeFill) gaugeFill.style.width = meter + '%';
+  },
+
+  updatePlayerInnerThought(text, playerName = '') {
+    const section = document.getElementById('player-inner-thought-section');
+    const root = document.getElementById('player-inner-thought');
+    if (!root) return;
+    const value = typeof text === 'string' ? text.trim() : '';
+    if (!value) {
+      if (section) section.style.display = 'none';
+      root.textContent = '-';
+      return;
+    }
+    if (section) section.style.display = '';
+    // Stored values are just the body after "속마음:" — the UI prefixes the
+    // player's name unless the value already carries a "속마음:" prefix
+    // (defends against a saved value that already includes it).
+    const name = typeof playerName === 'string' ? playerName.trim() : '';
+    const alreadyPrefixed = /속마음\s*:/.test(value.slice(0, 40));
+    root.textContent = alreadyPrefixed || !name ? value : `${name} 속마음: ${value}`;
   },
 
   updateCharacter(characterId, context = state.context) {
     if (!characterId || characterId === 'narrator') return;
     const character = context?.master?.characters?.[characterId] || {};
+    this.activeCharacter = character;
     this.activeCharacterId = characterId;
     document.getElementById('character-info-title').textContent = `${character.name || characterId} 기본정보`;
     document.getElementById('npc-status-title').textContent = `${character.name || characterId} 상태`;
     this.renderCharacterInfo(character);
     const relationship = context?.save?.npc_relationship_state?.[characterId] || {};
-    const playerEjaculationCount = Number.isInteger(relationship.player_ejaculation_count)
-      ? Math.max(0, relationship.player_ejaculation_count)
-      : 0;
-    const npcOrgasmCount = Number.isInteger(relationship.npc_orgasm_count)
-      ? Math.max(0, relationship.npc_orgasm_count)
-      : 0;
+    const history = relationship?.sexual_history || {};
+    const number = (key, fallback = 0) => Number.isFinite(Number(history[key])) ? Math.max(0, Number(history[key])) : fallback;
+    const playerEjaculationCount = number('player_ejaculation_count', Math.max(0, Number(relationship.player_ejaculation_count) || 0));
+    const npcOrgasmCount = number('npc_orgasm_count', Math.max(0, Number(relationship.npc_orgasm_count) || 0));
     document.getElementById('npc-relationship-title').textContent = `${character.name || characterId} 관계 기록`;
     const relationshipRoot = document.getElementById('npc-relationship');
     relationshipRoot.replaceChildren();
-    relationshipRoot.append('💦 플레이어 사정 ', this.emphasis(`${playerEjaculationCount}회`), ` · ✨ ${character.name || characterId} 오르가즘 `, this.emphasis(`${npcOrgasmCount}회`));
+    const summaryRoot = document.createElement('div');
+    summaryRoot.className = 'relationship-summary';
+    const createItem = (label, value) => {
+      const item = document.createElement('span');
+      item.className = 'relationship-item';
+      item.append(`${label} `);
+      item.append(value > 0 ? this.emphasis(String(value)) : document.createTextNode(String(value)));
+      return item;
+    };
+    const createTextItem = (label, value) => {
+      const item = document.createElement('span');
+      item.className = 'relationship-item';
+      item.textContent = `${label} ${value}`;
+      return item;
+    };
+    const createRow = (...items) => {
+      const row = document.createElement('div');
+      row.className = 'relationship-row';
+      row.append(...items);
+      return row;
+    };
+    summaryRoot.append(
+      createRow(createItem('✨ 절정', npcOrgasmCount), createItem('💦 사정', playerEjaculationCount)),
+      createRow(
+        createItem('🌸 질', number('vaginal_sex_count')),
+        createItem('🍑 애널', number('anal_sex_count')),
+        createItem('👄 구강', number('oral_sex_count'))
+      )
+    );
+    relationshipRoot.appendChild(summaryRoot);
+    const details = document.createElement('details');
+    details.className = 'relationship-details';
+    const summary = document.createElement('summary'); summary.textContent = '상세 기록'; details.appendChild(summary);
+    const vaginal = Number.isInteger(history.first_vaginal_turn) ? `${history.first_vaginal_turn}턴` : '미완';
+    const anal = Number.isInteger(history.first_anal_turn) ? `${history.first_anal_turn}턴` : '미완';
+    details.append(
+      createRow(createTextItem('🌸 질 개통', vaginal)),
+      createRow(createTextItem('🍑 애널 개통', anal)),
+      createRow(
+        createItem('💦 질내', number('vaginal_ejaculation_count')),
+        createItem('🍑 애널내', number('anal_ejaculation_count'))
+      ),
+      createRow(
+        createItem('👄 입안', number('oral_ejaculation_count')),
+        createItem('😳 얼굴', number('facial_ejaculation_count'))
+      ),
+      createRow(
+        createItem('🫧 몸', number('body_ejaculation_count')),
+        createItem('❔ 미정', number('unspecified_ejaculation_count'))
+      )
+    );
+    relationshipRoot.appendChild(details);
     this.renderStats(context?.save?.npc_stats?.[characterId] || {}, characterId, context?.save?.npc_stat_changes?.[characterId]);
   },
 
@@ -73,11 +232,16 @@ const sidebar = {
     const root = document.getElementById('npc-status');
     const previous = this.previousStats[characterId] || {};
     const next = {};
+    const directResistance = Number(this.activeCharacter?.['상식저항력']);
+    const legacyResistance = Number(this.activeCharacter?.['최면저항력초기']);
+    const resistance = Number.isFinite(directResistance) ? directResistance : (Number.isFinite(legacyResistance) ? legacyResistance : 50);
     root.className = 'npc-status npc-status-inline';
     root.replaceChildren();
     this.stats.forEach((stat, index) => {
       if (index) root.append(document.createTextNode(' · '));
-      const value = Number(stats[stat.key]);
+      let value = Number(stats[stat.key]);
+      if (stat.key === '상식수용도' && !Number.isFinite(value)) value = Math.max(0, Math.min(100, 100 - resistance));
+      if (stat.key === '성적흥분도' && !Number.isFinite(value)) value = 0;
       const valueNode = document.createElement('span');
       valueNode.className = 'stat-value';
       valueNode.textContent = `${stat.label} ${Number.isFinite(value) ? value : '-'}`;
@@ -96,6 +260,11 @@ const sidebar = {
       }
       root.append(valueNode);
     });
+    root.append(document.createTextNode(' · '));
+    const resistanceNode = document.createElement('span');
+    resistanceNode.className = 'stat-value';
+    resistanceNode.textContent = `저항 ${Math.max(0, Math.min(100, resistance))}`;
+    root.append(resistanceNode);
     if (characterId) this.previousStats[characterId] = next;
   },
 
@@ -156,7 +325,9 @@ const sidebar = {
 
   withUnit(value, unit) {
     if (value === null || value === undefined || String(value).trim() === '') return '';
+    if (typeof value === 'number' && value <= 0) return '';
     const text = String(value).trim();
+    if (/^0(?:\.0+)?$/.test(text)) return '';
     return new RegExp(`${unit}$`, 'i').test(text) ? text : `${text}${unit}`;
   },
 

@@ -1,3 +1,5 @@
+> LEGACY DOCUMENT — main/archive/pre-csa-only 전용. feature/csa-only 구현 기준으로 사용하지 않는다.
+
 # 게임빌더 v2 Worker API 명세
 
 **기준일**: 2026-07-22  
@@ -265,3 +267,4 @@ data: [DONE]
 - `POST /api/version` returns the active Cloudflare Worker `version_id` and optional `tag`. `version_id` identifies the deployed Worker version in Cloudflare. When deployment uses `npm run deploy:worker`, its `tag` is the Git commit SHA and can be compared with `git rev-parse HEAD` or `origin/main`.
 - `/api/save-turn` and `/api/set-save` are retired. Both now return `410 Gone` JSON; clients must use `/api/commit-turn`.
 - `/api/commit-turn` accepts `extract` only when it is a non-null JSON object. `null`, arrays, and scalar values return `400` before any save patch is built.
+> LEGACY DOCUMENT — main/archive/pre-csa-only 전용. feature/csa-only 구현 기준으로 사용하지 않는다.

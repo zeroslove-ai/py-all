@@ -1,3 +1,5 @@
+> LEGACY DOCUMENT — main/archive/pre-csa-only 전용. feature/csa-only 구현 기준으로 사용하지 않는다.
+
 # `/api/extract` 프롬프트 계약 v2
 
 **기준일**: 2026-07-22  
@@ -23,6 +25,28 @@ Worker는 다음 값을 프롬프트에 직접 삽입한다.
 따라서 문서용 `{{NARRATIVE_TEXT}}` 같은 치환 문자열을 런타임에서 별도로 관리하지 않는다.
 
 ## 추출 규칙
+
+### CSA runtime delta (feature/csa-only, 이 문서 범위 밖 — 실제 계약은 `worker/game-proxy-v2.js`의 `buildExtractPrompt`/`buildEffectiveCsaRuntimeState` 참고)
+
+`csa_runtime_updates`는 `csa_runtime_state`의 전체 스냅샷이 아니라 이번 턴의 delta다. `status`는 `active|paused|ended`이며(설명문과 최종 JSON 스키마가 항상 동일해야 한다), 이전 턴부터 이미 `active`였고 이번 턴도 변화가 없으면 중복 update를 생략할 수 있다. Worker의 정합성 감사는 이 delta만 보지 않고 저장된 runtime에 delta를 적용한 effective runtime을 기준으로 판단한다. CSA 정합성 repair는 실제로 수정한 필드만 담은 `changed_fields`를 함께 반환하고, `csa_trigger_evaluations`/`csa_runtime_updates`는 전체 교체가 아니라 ID 기준 병합이다.
+
+### CSA-first sexual resolution
+
+Extract는 자연어 의미를 `sexual_resolution`으로 구조화한다. `csa_direct`는
+실제 활성 CSA ID, exact action/direction, trigger evidence, completion evidence를
+가져야 하며 consent는 `not_required`다. CSA 밖 completion은 `voluntary`와 현재
+NPC의 직접 대사 consent가 모두 있을 때만 반환한다. 애매한 설명·질문·상담은
+`discussion`/`none`으로 둔다.
+
+모든 현재 적용 CSA는 `csa_trigger_evaluations`에 정확히 하나씩 기록한다. status는 `satisfied|continuing|temporarily_interrupted|not_satisfied|ended` 중 하나이며, `temporarily_interrupted`는 규범은 유효하지만 플레이어 요청 등으로 이번 턴만 중단된 경우에만 evidence와 함께 쓴다(`csa_runtime_updates`의 대응 항목은 `status="paused"`). 규범을 단순히 잊었거나 언급하지 않은 경우에는 쓸 수 없다.
+관계 변화는 `relationship_events`의 `romantic_interest_declared`,
+`boundary_added`, `boundary_removed`, `refusal`만 사용한다. Worker는 이 구조와
+Story evidence를 검증하며 한국어 긍정 정규식으로 consent나 intent를 재해석하지 않는다.
+
+Integrity repair가 요청되면 수정된 narrative와 함께 `sexual_resolution`,
+`csa_trigger_evaluations`, `csa_runtime_updates`, `sexual_events`,
+`relationship_events`도 모두 반환한다. 수정되지 않은 구조화 필드는 기존 값을 그대로
+반환하며, 모든 applicable CSA evaluation을 빠뜨리지 않는다.
 
 ### 플레이어 정보
 
@@ -147,3 +171,4 @@ Worker는 다음 값을 프롬프트에 직접 삽입한다.
 - JSON 파싱 실패: `502`와 제한된 `raw` 미리보기 반환
 - 프론트는 저장을 진행하지 않고 오류를 표시한다.
 - 같은 입력의 커밋 재시도는 `commit_turn`의 replay 처리로 안전하게 응답한다.
+> LEGACY DOCUMENT — main/archive/pre-csa-only 전용. feature/csa-only 구현 기준으로 사용하지 않는다.

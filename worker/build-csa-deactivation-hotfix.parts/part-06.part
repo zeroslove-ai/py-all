@@ -1,0 +1,54 @@
+      const evidenceTurns = [...new Set([...(state.reaction_evidence_turns || []), turnNumber])]
+        .filter(Number.isInteger).sort((a, b) => a - b);
+      if (evidenceTurns.length === state.reaction_evidence_turns.length) continue;
+      const required = csaAftereffectRequiredEncounters(state.strength);
+      const processed = Math.min(required, evidenceTurns.length);
+      entries[csaId] = {
+        ...state,
+        schema_version: CSA_AFTEREFFECT_SCHEMA_VERSION,
+        phase: processed >= required ? 'integrated' : 'processing',
+        processed_encounters: processed,
+        required_processing_encounters: required,
+        reaction_evidence_turns: evidenceTurns,
+        last_processed_turn: turnNumber
+      };
+      changed = true;
+    }
+  }
+
+  return changed ? next : null;
+}`;
+replaceRegex(
+  /function buildCsaAftereffectPatch\(previousSave = \{\}, structuredPlan = null, npcsPresent = \[\], turnNumber = 0\) \{.*?\n\}\n\n\/\/ Legacy compatibility helper\./s,
+  `${newPatchFunction}\n\n// Legacy compatibility helper.`,
+  'replace Commit aftereffect progression'
+);
+
+replaceOnce(
+  'const aftereffectPatch = buildCsaAftereffectPatch(previousSave, structuredPlan, npcsPresentForRuntime, turnNumber);',
+  `const aftereffectPatch = buildCsaAftereffectPatch(previousSave, structuredPlan, npcsPresentForRuntime, turnNumber, {
+      characters: master?.characters || {},
+      narrativeText
+    });`,
+  'pass Story evidence into aftereffect progression'
+);
+
+replaceOnce(
+  `      for (const [aftereffectCharacterId, entries] of Object.entries(aftereffectPatch)) {
+        const needsDiscussion`,
+  `      for (const [aftereffectCharacterId, entries] of Object.entries(aftereffectPatch)) {
+        if (aftereffectCharacterId === CSA_AFTEREFFECT_GLOBAL_KEY) continue;
+        const needsDiscussion`,
+  'exclude global registry from relationship boundary patch'
+);
+
+const assertions = [
+  ['stream body forwarding', source.includes('new Response(deepseekRes.body')],
+  ['stream:true', source.includes('stream: true')],
+  ['schema v2', source.includes('CSA_AFTEREFFECT_SCHEMA_VERSION = 2')],
+  ['global registry', source.includes("CSA_AFTEREFFECT_GLOBAL_KEY = '__global'")],
+  ['reaction evidence', source.includes('storyHasCsaAftereffectReactionEvidence')],
+  ['late prompt placement', source.includes('csaPhysicalTransitionSection + csaAftereffectSection')],
+  ['legacy auto progression removed', !source.includes("state.phase === 'shock') entries[csaId]")],
+  ['strength off-by-one removed', !source.includes('csaStrengthRank(csa.strength) >= 3 ? 3')]
+];

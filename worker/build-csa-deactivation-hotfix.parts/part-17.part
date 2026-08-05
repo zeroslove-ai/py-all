@@ -1,0 +1,265 @@
+const csaRuleAwarenessHelpers = String.raw`const CSA_RULE_DENIAL_RE = /(?:그런|해당)\s*(?:국가\s*)?(?:법령|규정|지침)[^.!?。\n]{0,35}(?:없|모르|적용된\s*적\s*없)|(?:법령|규정|지침)[^.!?。\n]{0,35}(?:우리\s*병원에\s*)?적용되지\s*않|(?:규정|지침)\s*범위[^.!?。\n]{0,45}(?:업무\s*태만|징계|감점)[^.!?。\n]{0,25}(?:적용되지\s*않|예외|거절\s*가능)|내규[^.!?。\n]{0,35}(?:우선|명시된\s*범위만)|업무\s*태만[^.!?。\n]{0,35}(?:범위\s*밖|적용\s*제외)/;
+const CSA_CONSCIOUS_REFUSAL_RE = /(?:(?:업무\s*태만|감점|징계|불이익|평가\s*하락)[^.!?。\n]{0,55}(?:감수|각오|받더라도|받아도|기록되어도|어쩔\s*수\s*없)[^.!?。\n]{0,55}(?:거부|수행할\s*수\s*없|하지\s*않겠|못하겠))|(?:(?:거부|수행할\s*수\s*없|하지\s*않겠|못하겠)[^.!?。\n]{0,55}(?:업무\s*태만|감점|징계|불이익)[^.!?。\n]{0,55}(?:감수|각오|받더라도|받아도|기록되어도))/;
+const CSA_GENERIC_REFUSAL_RE = /(?:거부하|거절하|수행할\s*수\s*없|할\s*수\s*없|하지\s*않겠|못하겠|따를\s*수\s*없)/;
+const CSA_RULE_AWARENESS_RE = /(?:규정|법령|지침)[^.!?。\n]{0,45}(?:알|인식|적용|업무\s*태만|감점|징계|불이익)|(?:업무\s*태만|감점|징계|불이익)[^.!?。\n]{0,35}(?:알|인식|적용|기록)/;
+const CSA_ALTERNATIVE_ACTION_RE = /(?:대신|가능한\s*범위|대체|다른\s*방법|절차를?\s*확인|즉시\s*확인|상급자|재협상|강도를?\s*낮|먼저\s*수행|할\s*수\s*있는)/;
+
+function compactCsaRuleAwarenessText(value, limit = 260) {
+  return typeof value === 'string' ? value.replace(/\s+/g, ' ').trim().slice(0, limit) : '';
+}
+
+function isRefusalCostCsa(csa = {}) {
+  const requiredAction = String(csa?.preset?.required_action || csa?.semantic_contract?.required_action || csa?.required_action || '');
+  if (requiredAction === 'treat_refusal_as_dereliction') return true;
+  const content = compactCsaRuleAwarenessText(csa?.content || csa?.canonical_content, 800);
+  return /(?:거절|지연)/.test(content) && /(?:업무\s*태만|감점|징계|불이익)/.test(content);
+}
+
+function getApplicableRefusalCostCsa(save = {}) {
+  return getApplicableCsaEntries(save).filter(isRefusalCostCsa);
+}
+
+function buildCsaRuleAwarenessSection(save = {}, characters = {}) {
+  const rules = getApplicableRefusalCostCsa(save);
+  if (!rules.length) return '';
+  const characterId = typeof save?.last_character_id === 'string' ? save.last_character_id : '';
+  const characterName = characters?.[characterId]?.name || characters?.[characterId]?.['이름'] || characterId || '현재 NPC';
+  const ruleLines = rules.slice(0, 3).map(csa => '- ' + csa.id + ': ' + compactCsaRuleAwarenessText(csa.content || csa.canonical_content, 240));
+
+  return '[활성 CSA 규정 인식·의식적 위반 계약 — 현재 규칙 최종 권위]\n'
+    + ruleLines.join('\n') + '\n'
+    + '- ' + characterName + '은 위 규정이 실제로 존재하고 현재 자신에게 적용된다는 사실을 반드시 안다. “그런 규정은 없다”, “우리 병원에는 적용되지 않는다”, “내규가 우선한다”처럼 규정 자체를 부정하거나 존재하지 않는 예외를 만들지 않는다.\n'
+    + '- 규정을 아는 것과 모든 요구를 무조건 수행하는 것은 별개다. NPC는 성격·상식수용도·저항·공포·수치심·행동 강도에 따라 수행, 부분 수행, 즉시 협상, 또는 의식적 위반을 선택할 수 있다.\n'
+    + '- 가벼운 요구는 강한 규정의 압박에 따라 기본적으로 수행한다. 높은 강도나 도저히 수용하기 어려운 요구를 거부할 때는 반드시 “거절·지연이 업무 태만이며 감점·징계 가능성이 있음을 알고도 그 비용을 감수한다”는 인식과 선택을 대사·행동에 드러낸다.\n'
+    + '- 의식적으로 위반하면 장면을 단순한 “안 됩니다”로 닫지 않는다. 가능한 대체 수행, 요구 강도 조정, 즉각적인 절차 확인, 감점·징계 적용 여부 등 플레이어가 다음 행동을 선택할 공간을 남긴다.\n'
+    + '- 이 의무·평가 규정만으로 구강·삽입 등 별도의 정확한 성적 행동 권한이 자동 생성되지는 않는다. 정확한 행동 CSA가 없으면 허용된 대체 행동을 즉시 수행하거나, 해결 절차를 찾거나, 불이익을 감수한 의식적 위반을 선택한다. “정확한 행동 권한이 없으므로 업무 태만 규정도 적용되지 않는다”는 가짜 예외는 금지한다.\n'
+    + '- 과거 해제 규정, 최근 요약, 오래된 감정이 위 현재 활성 규정과 충돌하면 현재 활성 규정을 따른다. 이 블록이 현재 규정 인식에 대한 최종 권위다.';
+}
+
+function collectCsaIdsFromExperience(value, result = new Set(), depth = 0) {
+  if (depth > 6 || value == null) return result;
+  if (Array.isArray(value)) {
+    for (const item of value) collectCsaIdsFromExperience(item, result, depth + 1);
+    return result;
+  }
+  if (!isPlainObject(value)) return result;
+  for (const [key, item] of Object.entries(value)) {
+    if (/^csa_[A-Za-z0-9_-]+$/.test(key)) result.add(key);
+    if ((key === 'csa_id' || key === 'id') && typeof item === 'string' && /^csa_[A-Za-z0-9_-]+$/.test(item)) result.add(item);
+    collectCsaIdsFromExperience(item, result, depth + 1);
+  }
+  return result;
+}
+
+function buildCsaAftereffectStorySection(save = {}, characterId = '') {
+  const rawEntries = isPlainObject(save?.csa_aftereffect_state?.[characterId]) ? save.csa_aftereffect_state[characterId] : {};
+  const experiencedIds = collectCsaIdsFromExperience(save?.csa_experience_log?.[characterId]);
+  const activeIds = new Set(getActiveCsaEntries(save).map(csa => csa?.id).filter(Boolean));
+  const entries = Object.entries(rawEntries)
+    .filter(([csaId, item]) => isPlainObject(item)
+      && !activeIds.has(csaId)
+      && experiencedIds.has(csaId)
+      && item.actual_execution_confirmed === true
+      && item.phase !== 'integrated')
+    .slice(0, 3);
+  if (!entries.length) return '';
+  const phaseCounts = entries.reduce((acc, [, item]) => {
+    const phase = ['shock', 'processing'].includes(item.phase) ? item.phase : 'processing';
+    acc[phase] = (acc[phase] || 0) + 1;
+    return acc;
+  }, {});
+  const phaseSummary = Object.entries(phaseCounts).map(([phase, count]) => phase + ' ' + count + '건').join(', ');
+  return '[과거 해제 규정의 기억 — 현재 규칙 아님]\n'
+    + '- 실제 수행 경험이 확인된 미정리 후유증 ' + entries.length + '건(' + phaseSummary + ')만 감정·기억의 배경으로 남아 있다.\n'
+    + '- 해제된 규정의 원문·의무·권한·적용 범위를 재현하거나 현재 판단 근거로 사용하지 않는다. 현재 활성 CSA만 규범과 행동 판단의 권위다.\n'
+    + '- 기억상실·시간 공백·마법 같은 자동 복장은 금지한다. 필요한 물리적 정리는 실제 행동으로 하되, integrated 상태나 경험하지 않은 규정은 다시 언급하지 않는다.';
+}
+
+function collectCsaRuleAwarenessProjectionText(extract = {}) {
+  const parts = [extract?.turn_summary];
+  if (isPlainObject(extract?.npc_emotion)) parts.push(extract.npc_emotion.surface, extract.npc_emotion.inner);
+  for (const line of Array.isArray(extract?.dialogue_lines) ? extract.dialogue_lines : []) {
+    if (typeof line === 'string') parts.push(line);
+    else if (isPlainObject(line)) parts.push(line.text, line.dialogue, line.content);
+  }
+  for (const update of Array.isArray(extract?.csa_runtime_updates) ? extract.csa_runtime_updates : []) {
+    if (isPlainObject(update)) parts.push(update.action_state, update.reason);
+  }
+  return parts.filter(value => typeof value === 'string' && value).join('\n').slice(-6000);
+}
+
+function replaceInvalidRuleDenialText(value, fallback) {
+  return typeof value === 'string' && CSA_RULE_DENIAL_RE.test(value) ? fallback : value;
+}
+
+function upsertCsaAwarenessRuntimeUpdate(updates = [], csa = {}, characterId = '', mode = 'incomplete') {
+  if (!csa?.id || !characterId) return updates;
+  const next = Array.isArray(updates) ? updates.map(item => isPlainObject(item) ? { ...item } : item) : [];
+  const index = next.findIndex(item => item?.csa_id === csa.id && item?.character_id === characterId);
+  const previous = index >= 0 ? next[index] : { csa_id: csa.id, character_id: characterId, target_type: 'player' };
+  const patch = mode === 'denied'
+    ? {
+        status: 'paused',
+        action_state: '활성 규정을 부정한 판단은 무효이며 규정 인식 후 재판단 필요',
+        reason: '규정 부정·가짜 예외 감지: 존재와 적용을 인정한 뒤 수행·협상·의식적 위반으로 재판단'
+      }
+    : mode === 'conscious_refusal'
+      ? {
+          status: 'paused',
+          action_state: '규정을 인식한 채 불이익을 감수하고 의식적으로 위반',
+          reason: '업무 태만·감점·징계 가능성을 알고 감수한 명시적 거부'
+        }
+      : mode === 'negotiate'
+        ? {
+            status: 'active',
+            action_state: '규정을 인식하고 가능한 대체 수행 또는 즉시 협상 중',
+            reason: '규정 적용을 인정한 상태에서 해결 행동과 플레이어 후속 선택을 유지'
+          }
+        : {
+            status: 'paused',
+            action_state: '거부 의사는 있으나 규정 인식과 불이익 감수 근거가 불완전함',
+            reason: '다음 턴에 규정 존재·적용·위반 비용을 명시하고 수행 또는 의식적 위반으로 확정 필요'
+          };
+  const merged = { ...previous, ...patch };
+  if (index >= 0) next[index] = merged;
+  else next.push(merged);
+  return next.slice(0, 6);
+}
+
+function sanitizeCsaRuleAwarenessProjection(extract = {}, save = {}) {
+  if (!isPlainObject(extract)) return extract;
+  const rules = getApplicableRefusalCostCsa(save);
+  if (!rules.length) return extract;
+  const text = collectCsaRuleAwarenessProjectionText(extract);
+  const denied = CSA_RULE_DENIAL_RE.test(text);
+  const consciousRefusal = !denied && CSA_CONSCIOUS_REFUSAL_RE.test(text);
+  const genericRefusal = !denied && !consciousRefusal && CSA_GENERIC_REFUSAL_RE.test(text);
+  const aware = CSA_RULE_AWARENESS_RE.test(text);
+  const alternative = CSA_ALTERNATIVE_ACTION_RE.test(text);
+  if (!denied && !consciousRefusal && !genericRefusal) return extract;
+
+  const next = { ...extract };
+  const characterId = typeof next.character_id === 'string' && next.character_id !== 'narrator' ? next.character_id : '';
+  let mode = 'incomplete';
+  if (denied) mode = 'denied';
+  else if (consciousRefusal) mode = 'conscious_refusal';
+  else if (aware && alternative) mode = 'negotiate';
+
+  let runtimeUpdates = Array.isArray(next.csa_runtime_updates) ? next.csa_runtime_updates : [];
+  for (const csa of rules) runtimeUpdates = upsertCsaAwarenessRuntimeUpdate(runtimeUpdates, csa, characterId, mode);
+  next.csa_runtime_updates = runtimeUpdates;
+
+  if (denied) {
+    next.turn_summary = replaceInvalidRuleDenialText(
+      next.turn_summary,
+      'NPC는 활성 규정의 존재와 적용을 잘못 부정했다. 이 판단은 유효한 규정 해석이 아니며 다음 턴에 규정을 인정한 뒤 수행·협상·의식적 위반으로 재판단해야 한다.'
+    );
+    if (isPlainObject(next.npc_emotion)) {
+      const emotion = { ...next.npc_emotion };
+      emotion.surface = replaceInvalidRuleDenialText(emotion.surface, '“그 규정이 존재하고 저에게 적용된다는 점은 알고 있습니다. 수행 여부와 위반에 따른 불이익을 다시 판단하겠습니다.”');
+      emotion.inner = replaceInvalidRuleDenialText(emotion.inner, '“규정 자체를 부정할 수는 없다. 따를지, 대안을 제시할지, 불이익을 감수하고 위반할지를 선택해야 한다.”');
+      next.npc_emotion = emotion;
+    }
+  }
+  return next;
+}
+
+function latestCsaRuntimeForCharacter(save = {}, characterId = '') {
+  const runtime = normalizeCsaRuntimeState(save?.csa_runtime_state);
+  return Object.entries(runtime)
+    .filter(([, entry]) => entry?.character_id === characterId)
+    .sort((left, right) => (Number(right[1]?.last_confirmed_turn) || 0) - (Number(left[1]?.last_confirmed_turn) || 0))[0] || null;
+}
+
+function buildCsaRuntimeSceneReconciliationSection(save = {}) {
+  const characterId = typeof save?.last_character_id === 'string' ? save.last_character_id : '';
+  const scene = isPlainObject(save?.npc_scene_state?.[characterId]) ? save.npc_scene_state[characterId] : null;
+  const latest = latestCsaRuntimeForCharacter(save, characterId);
+  if (!scene || !latest) return '';
+  const [, runtime] = latest;
+  const sceneTurn = Number(scene.updated_turn) || 0;
+  const runtimeTurn = Number(runtime.last_confirmed_turn) || 0;
+  if (!['paused', 'ended'].includes(runtime.status) || runtimeTurn <= sceneTurn) return '';
+  return '[CSA runtime·현재 행동 동기화 — 최신 사실]\n'
+    + '- 최신 runtime은 ' + runtime.status + '이며 ' + runtimeTurn + '턴에 확인되었다. npc_scene_state의 ' + sceneTurn + '턴 current_action은 이전 진행 상태이므로 현재 계속 중인 행동으로 사용하지 않는다.\n'
+    + '- 접촉·행동은 중단된 상태에서 시작한다. 복장·자세는 마법처럼 바꾸지 말고 현재 확인 가능한 상태에서 가리기·옷 입기·거리 두기 등 실제 정리 행동으로 갱신한다.';
+}
+
+function sanitizeSavedCsaRuntimeSceneView(view = {}) {
+  if (!isPlainObject(view) || !isPlainObject(view.npc_scene_state)) return view;
+  const next = { ...view, npc_scene_state: { ...view.npc_scene_state } };
+  for (const [characterId, rawScene] of Object.entries(next.npc_scene_state)) {
+    if (!isPlainObject(rawScene)) continue;
+    const latest = latestCsaRuntimeForCharacter(view, characterId);
+    if (!latest) continue;
+    const [, runtime] = latest;
+    const sceneTurn = Number(rawScene.updated_turn) || 0;
+    const runtimeTurn = Number(runtime.last_confirmed_turn) || 0;
+    if (!['paused', 'ended'].includes(runtime.status) || runtimeTurn <= sceneTurn) continue;
+    next.npc_scene_state[characterId] = {
+      ...rawScene,
+      current_action: '이전 CSA 행동은 중단되었으며 현재 실제 자세·복장은 장면에서 확인하고 필요한 정리 행동을 수행해야 함'
+    };
+  }
+  return next;
+}`;
+
+replaceOnce(
+  `function buildCsaAftereffectStorySection(save = {}, characterId = '') {`,
+  `function buildLegacyCsaAftereffectStorySection(save = {}, characterId = '') {`,
+  'retire legacy aftereffect prompt that reinjected deactivated canonical rule text'
+);
+
+replaceOnce(
+  `function buildCsaOfficialNoticeSection(structuredPlan = null, previousSave = {}, effectiveSave = {}) {`,
+  csaRuleAwarenessHelpers + '\n\nfunction buildCsaOfficialNoticeSection(structuredPlan = null, previousSave = {}, effectiveSave = {}) {',
+  'add active rule awareness conscious refusal and compact aftereffect helpers'
+);
+
+replaceOnce(
+  `  const csaAffinitySeparationSection = buildCsaAffinitySeparationSection(save, master.characters || {});
+
+  return {`,
+  `  const csaAffinitySeparationSection = buildCsaAffinitySeparationSection(save, master.characters || {});
+  const csaRuntimeSceneReconciliationSection = buildCsaRuntimeSceneReconciliationSection(save);
+  const csaRuleAwarenessSection = buildCsaRuleAwarenessSection(save, master.characters || {});
+
+  return {`,
+  'build runtime reconciliation and final active rule awareness sections'
+);
+
+replaceOnce(
+  `      ...(csaAffinitySeparationSection ? [{ role: 'system', content: csaAffinitySeparationSection }] : [])`,
+  `      ...(csaAffinitySeparationSection ? [{ role: 'system', content: csaAffinitySeparationSection }] : []),
+      ...(csaRuntimeSceneReconciliationSection ? [{ role: 'system', content: csaRuntimeSceneReconciliationSection }] : []),
+      ...(csaRuleAwarenessSection ? [{ role: 'system', content: csaRuleAwarenessSection }] : [])`,
+  'make current active rule awareness the final Story authority'
+);
+
+replaceOnce(
+  `  let extract = sanitizeCsaAffinityProjection(normalizeExtract(result.parsed), compatCtx?.save || {});`,
+  `  let extract = sanitizeCsaRuleAwarenessProjection(
+    sanitizeCsaAffinityProjection(normalizeExtract(result.parsed), compatCtx?.save || {}),
+    compatCtx?.save || {}
+  );`,
+  'normalize invalid rule denial and conscious refusal without another model call'
+);
+
+replaceOnce(
+  `  return sanitizeSavedCsaAffinityView(view);`,
+  `  return sanitizeSavedCsaRuntimeSceneView(sanitizeSavedCsaAffinityView(view));`,
+  'hide stale ongoing scene action when a newer CSA runtime paused or ended'
+);
+
+assertions.push(
+  ['legacy aftereffect original retired', source.includes('function buildLegacyCsaAftereffectStorySection') && source.includes('function buildCsaAftereffectStorySection')],
+  ['aftereffect canonical text excluded', source.includes('과거 해제 규정의 기억 — 현재 규칙 아님') && source.includes('해제된 규정의 원문·의무·권한·적용 범위를 재현하지 않는다')],
+  ['actual experience gates aftereffect', source.includes('experiencedIds.has(csaId)') && source.includes("item.phase !== 'integrated'")],
+  ['rule awareness final authority', source.includes('활성 CSA 규정 인식·의식적 위반 계약 — 현재 규칙 최종 권위') && source.includes('content: csaRuleAwarenessSection')],
+  ['conscious refusal preserved', source.includes('업무 태만·감점·징계 가능성을 알고 감수한 명시적 거부')],
+  ['fabricated exception forbidden', source.includes('가짜 예외는 금지한다') && source.includes('CSA_RULE_DENIAL_RE')],
+  ['exact sexual action authority preserved', source.includes('별도의 정확한 성적 행동 권한이 자동 생성되지는 않는다')],
+  ['rule denial extract sanitizer', source.includes('function sanitizeCsaRuleAwarenessProjection') && source.includes("mode = 'denied'")],
+  ['stale runtime scene reconciled', source.includes('function sanitizeSavedCsaRuntimeSceneView') && source.includes('content: csaRuntimeSceneReconciliationSection')],
+  ['no additional model recovery call', !csaRuleAwarenessHelpers.includes('requestDeepSeek') && !csaRuleAwarenessHelpers.includes('attemptDeepSeek')]
+);

@@ -142,6 +142,23 @@
       margin-bottom: 12px;
     }
 
+    /* Player compact card */
+    .player-card { display: grid; gap: 5px; padding-top: 12px; padding-bottom: 12px; }
+    .player-card-name { color: var(--text-primary); font-weight: 750; line-height: 1.45; }
+    .player-card-sub { color: var(--text-secondary); font-size: .8rem; line-height: 1.4; }
+    .player-card-metrics, .player-card-world { color: var(--text-primary); font-size: .82rem; line-height: 1.45; }
+    .player-inner-thought { color: var(--text-primary); font-size: .85rem; line-height: 1.55; white-space: pre-wrap; }
+    .player-ejaculation-gauge { display: grid; gap: 6px; margin-top: 7px; }
+    .player-ejaculation-gauge-head { display: flex; justify-content: space-between; align-items: center; gap: 8px; font-size: .78rem; }
+    .player-ejaculation-gauge-label { color: var(--text-secondary); font-weight: 700; }
+    .player-ejaculation-gauge-value { color: var(--text-primary); font-variant-numeric: tabular-nums; font-weight: 800; }
+    .player-ejaculation-gauge-track { position: relative; height: 10px; overflow: hidden; border-radius: 999px; background: rgba(255,255,255,.08); border: 1px solid var(--border); box-shadow: inset 0 1px 3px rgba(0,0,0,.45); }
+    .player-ejaculation-gauge-fill { height: 100%; width: 0%; border-radius: inherit; background: linear-gradient(90deg, #60a5fa 0%, #a78bfa 50%, #f472b6 78%, #fff 100%); box-shadow: 0 0 10px rgba(244,114,182,.45); transition: width .35s ease; }
+    .player-ejaculation-gauge-threshold { position: absolute; top: -2px; bottom: -2px; left: 50%; width: 2px; background: rgba(255,255,255,.65); box-shadow: 0 0 5px rgba(255,255,255,.4); }
+    .player-ejaculation-gauge.ready .player-ejaculation-gauge-value { color: #f9a8d4; }
+    .player-ejaculation-gauge.max .player-ejaculation-gauge-fill { animation: ejaculationGaugePulse 1.1s ease-in-out infinite alternate; }
+    @keyframes ejaculationGaugePulse { from { filter: brightness(1); } to { filter: brightness(1.45); box-shadow: 0 0 16px rgba(255,255,255,.75); } }
+
     /* Character Image */
     .character-img {
       width: 100%;
@@ -188,8 +205,8 @@
     .character-info-compact { display: grid; gap: 6px; line-height: 1.45; }
     .character-affiliation { color: var(--text-primary); font-weight: 700; }
     .relationship-inline {
-      display: block;
-      white-space: nowrap;
+      display: grid;
+      gap: 8px;
       font-size: 0.85rem;
       color: var(--text-primary);
       background: var(--bg-tertiary);
@@ -197,6 +214,11 @@
       border-radius: var(--radius);
     }
     .relationship-inline strong { color: var(--accent); font-weight: 800; }
+    .relationship-summary,
+    .relationship-details { display: grid; gap: 6px; }
+    .relationship-details summary { cursor: pointer; }
+    .relationship-row { display: flex; flex-wrap: wrap; gap: 4px 10px; line-height: 1.5; }
+    .relationship-item { white-space: nowrap; }
     .stat-value.signal-green { color: #4ade80; }
     .stat-value.signal-yellow { color: #facc15; }
     .stat-value.signal-red { color: #fb7185; }
@@ -223,6 +245,7 @@
     .side-action-row { display: flex; gap: 8px; }
     .side-action-btn {
       width: calc(50% - 4px);
+      white-space: nowrap;
       padding: 12px 16px;
       border: 1px solid var(--accent);
       border-radius: var(--radius);
@@ -265,6 +288,9 @@
       overflow-y: auto;
     }
     .choice-btn {
+      display: flex;
+      align-items: center;
+      min-width: 0;
       background: var(--bg-tertiary);
       border: 1px solid var(--border);
       color: var(--text-primary);
@@ -277,13 +303,10 @@
       transition: all 0.2s;
       text-align: left;
       line-height: 1.45;
-      white-space: normal;
-      overflow: visible;
-      text-overflow: clip;
-      word-break: keep-all;
-      overflow-wrap: anywhere;
     }
     .choice-btn .choice-label {
+      display: block;
+      flex: 1 1 auto;
       min-width: 0;
       overflow: hidden;
       white-space: nowrap;
@@ -294,6 +317,7 @@
       background: var(--bg-primary);
     }
     .choice-btn .marker {
+      flex: 0 0 auto;
       color: var(--accent);
       font-weight: bold;
       margin-right: 6px;
@@ -301,6 +325,9 @@
     .choice-btn.explicit {
       border-color: var(--warning);
     }
+    .choice-btn.bold-choice { border-color: var(--warning); }
+    .choice-btn.blocked-choice { opacity: .7; }
+    .choice-btn.csa-direct-choice { border-color: var(--success); }
     .choice-btn.selected { border-color: var(--accent); background: rgba(233, 69, 96, .18); }
     .choice-btn:disabled { cursor: not-allowed; opacity: .7; }
 
@@ -389,10 +416,11 @@
     .app-manual-progress { height: 7px; margin-top: 7px; border-radius: 999px; overflow: hidden; background: var(--bg-primary); }
     .app-manual-progress-fill { height: 100%; background: var(--accent); }
     .app-manual-diagnostic.success { border-color: var(--success); } .app-manual-diagnostic.warning { border-color: var(--warning); } .app-manual-diagnostic.info { border-color: var(--accent); }
-    .hypnosis-app-overlay { position: fixed; inset: 0; z-index: 60; display: grid; place-items: center; padding: 16px; background: rgba(0,0,0,.65); }
-    .hypnosis-app-modal { width: min(1050px, calc(100vw - 32px)); max-height: min(92vh, 960px); display: flex; flex-direction: column; overflow: hidden; background: var(--bg-secondary); border: 1px solid var(--border); border-radius: var(--radius); }
-    .hypnosis-app-header, .hypnosis-app-tabs, .hypnosis-app-draft-bar { display: flex; gap: 8px; align-items: center; padding: 12px 16px; border-bottom: 1px solid var(--border); background: var(--bg-secondary); } .hypnosis-app-header h2 { margin: 0; font-size: 1.1rem; } .hypnosis-app-tabs { overflow-x: auto; } .hypnosis-app-tab { white-space: nowrap; } .hypnosis-app-body { overflow-y: auto; padding: 16px; display: grid; gap: 10px; } .hypnosis-app-draft-bar { border-top: 1px solid var(--border); border-bottom: 0; justify-content: flex-end; } .hypnosis-app-draft-bar span { margin-right:auto; } .hypnosis-app-status-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 10px; } .hypnosis-app-card, .hypnosis-app-npc-card, .hypnosis-app-effect-card, .hypnosis-app-diagnostic { padding: 12px; border: 1px solid var(--border); border-radius: var(--radius); background: var(--bg-tertiary); } .hypnosis-app-effect-card { display:grid; gap:8px; } .hypnosis-app-effect-card textarea { min-height:90px; width:100%; box-sizing:border-box; } .hypnosis-app-card small { display: block; color: var(--text-secondary); } .hypnosis-app-card strong { display:block; margin-top:4px; } .hypnosis-app-npc-card h3 { margin:0; } .hypnosis-app-npc-card p, .hypnosis-app-effect-card p { margin: 7px 0; } .hypnosis-app-diagnostic.success { border-color: var(--success); } .hypnosis-app-diagnostic.warning { border-color: var(--warning); } .hypnosis-app-diagnostic.info { border-color: var(--accent); }
-    .hypnosis-app-card-link { appearance:none; width:100%; text-align:left; cursor:pointer; color:inherit; font:inherit; } .hypnosis-app-card-link:hover, .hypnosis-app-card-link:focus-visible { transform:translateY(-1px); outline:2px solid var(--accent); outline-offset:2px; } .hypnosis-app-card-link-label { display:block; margin-top:8px; color:var(--accent); font-size:.85rem; } .hypnosis-app-npc-details { margin-top:10px; border:1px solid var(--border); border-radius:var(--radius); background:var(--bg-secondary); } .hypnosis-app-npc-details summary { cursor:pointer; padding:10px; font-weight:700; } .hypnosis-app-detail-section { padding:10px; border-top:1px solid var(--border); overflow-wrap:anywhere; } .hypnosis-app-detail-section h4 { margin:0 0 6px; } .hypnosis-app-detail-section p { margin:4px 0; } .hypnosis-app-private-locked { border-left:3px solid var(--warning); } .hypnosis-app-private-unlocked { border-left:3px solid var(--success); } .hypnosis-app-effect-list { border-left:3px solid var(--accent); }
+    .csa-app-overlay { position: fixed; inset: 0; z-index: 60; display: grid; place-items: center; padding: 16px; background: rgba(0,0,0,.65); }
+    .csa-app-modal { width: min(900px, calc(100vw - 32px)); max-height: min(92vh, 960px); display: flex; flex-direction: column; overflow: hidden; background: var(--bg-secondary); border: 1px solid var(--border); border-radius: var(--radius); }
+    .csa-app-header, .csa-app-tabs, .csa-app-draft-bar { display:flex; gap:8px; align-items:center; padding:12px 16px; border-bottom:1px solid var(--border); background:var(--bg-secondary); } .csa-app-header h2{margin:0;font-size:1.1rem}.csa-app-tabs{overflow-x:auto}.csa-app-tab{white-space:nowrap}.csa-app-body{overflow-y:auto;padding:16px;display:grid;gap:10px}.csa-app-draft-bar{border-top:1px solid var(--border);border-bottom:0;justify-content:flex-end}.csa-app-draft-bar span{margin-right:auto}.csa-app-status-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:10px}.csa-app-card,.csa-app-npc-card,.csa-app-effect-card,.csa-app-diagnostic{padding:12px;border:1px solid var(--border);border-radius:var(--radius);background:var(--bg-tertiary)}.csa-app-effect-card{display:grid;gap:8px}.csa-app-textarea{min-height:90px;width:100%;box-sizing:border-box}.csa-app-card small{display:block;color:var(--text-secondary)}.csa-app-card strong{display:block;margin-top:4px}.csa-app-card-link{appearance:none;width:100%;text-align:left;cursor:pointer;color:inherit;font:inherit}.csa-app-card-link:hover,.csa-app-card-link:focus-visible{transform:translateY(-1px);outline:2px solid var(--accent);outline-offset:2px}.csa-app-card-link-label{display:block;margin-top:8px;color:var(--accent);font-size:.85rem}.csa-app-diagnostic.success{border-color:var(--success)}.csa-app-diagnostic.warning{border-color:var(--warning)}.csa-app-diagnostic.info{border-color:var(--accent)}
+    .csa-app-mode-tabs{display:flex;gap:8px;flex-wrap:wrap}.csa-app-preset-form,.csa-app-custom-form{display:grid;gap:10px}.csa-app-field{display:grid;gap:4px}.csa-app-field-label{font-size:.85rem;color:var(--text-secondary)}.csa-app-select,.csa-app-field select,.csa-app-field input{width:100%;min-height:44px;box-sizing:border-box;background:var(--bg-secondary);border:1px solid var(--border);border-radius:var(--radius);color:var(--text-primary);font:inherit;padding:8px 10px}.csa-app-select:disabled,.csa-app-field select:disabled,.csa-app-field input:disabled{opacity:.55;cursor:not-allowed}.csa-app-preview{padding:10px;border:1px dashed var(--border);border-radius:var(--radius);background:var(--bg-secondary)}.csa-app-preview small{display:block;color:var(--text-secondary);margin-bottom:4px}.csa-app-preview p{margin:0;white-space:pre-wrap}.csa-app-synergy{padding:8px 10px;border:1px solid var(--border);border-radius:var(--radius)}.csa-app-synergy small{display:block;color:var(--text-secondary);margin-bottom:4px}
+    .csa-app-npc-details{margin-top:8px;border:1px solid var(--border);border-radius:var(--radius);background:var(--bg-primary)}.csa-app-npc-details summary{cursor:pointer;padding:10px 12px;font-weight:700}.csa-app-npc-details>section:first-of-type{margin-top:0}.csa-app-detail-section{margin:0 12px 12px;padding:10px;border:1px solid var(--border);border-radius:var(--radius);background:var(--bg-secondary)}.csa-app-detail-section h4{margin:0 0 6px;font-size:.85rem;color:var(--text-secondary)}.csa-app-record-row{margin:3px 0;font-size:.85rem;overflow-wrap:anywhere}.csa-app-private-locked .csa-app-record-row{color:var(--text-secondary)}
     .app-manual-section { border: 1px solid var(--border); border-radius: var(--radius); background: var(--bg-primary); } .app-manual-section summary, .app-manual-tier summary { cursor: pointer; padding: 12px; font-weight: 700; }
     .app-manual-section > div { padding: 0 12px 12px; } .app-manual-tier { margin: 8px 0; border: 1px solid var(--border); border-radius: var(--radius); background: var(--bg-secondary); }
     .app-manual-list { margin: 0; padding-left: 20px; } .app-manual-list li { margin: 5px 0; } .app-manual-active-item { margin: 8px 0; white-space: pre-wrap; }
@@ -406,8 +434,7 @@
     .app-manual-failure { margin: 8px 0; border: 1px solid var(--border); border-radius: var(--radius); } .app-manual-failure summary { cursor: pointer; padding: 9px; font-weight: 600; } .app-manual-failure > div { padding: 0 10px 10px; }
     .app-manual-error { padding: 20px; text-align: center; color: var(--warning); } .app-manual-error-actions { display: flex; justify-content: center; gap: 8px; margin-top: 12px; }
 
-    .hypnosis-app-dialog-overlay { position:absolute; inset:0; z-index:70; display:grid; place-items:center; padding:16px; background:rgba(0,0,0,.6); } .hypnosis-app-dialog { width:min(92vw,440px); display:grid; gap:10px; padding:18px; border:1px solid var(--border); border-radius:var(--radius); background:var(--bg-secondary); } .pending-delete { opacity:.65; } .pending-badge { font-size:.85em; font-weight:700; } .hypnosis-app-bulk-actions { display:flex; gap:8px; }
-    .hypnosis-app-suggestion-target { display:grid; gap:6px; padding:10px; border:1px solid var(--border); border-radius:var(--radius); background:var(--bg-secondary); } .hypnosis-app-suggestion-target-label { font-size:.9rem; font-weight:700; } .hypnosis-app-suggestion-target-select { width:100%; min-width:0; } .hypnosis-app-suggestion-add { width:fit-content; }
+    .csa-app-dialog-overlay { position:absolute; inset:0; z-index:70; display:grid; place-items:center; padding:16px; background:rgba(0,0,0,.6); } .csa-app-dialog { width:min(92vw,440px); display:grid; gap:10px; padding:18px; border:1px solid var(--border); border-radius:var(--radius); background:var(--bg-secondary); } .pending-delete { opacity:.65; }
     /* Responsive */
     @media (max-width: 768px) {
       body { height: auto; min-height: 100vh; overflow-y: auto; }
@@ -433,7 +460,8 @@
       .app-manual-header { padding-top: max(14px, env(safe-area-inset-top)); } .app-manual-body { padding-bottom: max(20px, env(safe-area-inset-bottom)); }
       .app-manual-status-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
       .app-manual-map { grid-template-columns: 1fr; } .app-manual-floor, .app-manual-location { min-width: 0; }
-      .hypnosis-app-overlay { padding:0; } .hypnosis-app-modal { width:100%; height:100dvh; max-height:none; border-radius:0; } .hypnosis-app-header { padding-top:max(14px, env(safe-area-inset-top)); } .hypnosis-app-draft-bar { padding-bottom:max(12px, env(safe-area-inset-bottom)); flex-wrap:wrap; } .hypnosis-app-draft-bar .choice-btn { width:auto; flex:1 1 auto; text-align:center; }
+      .csa-app-overlay { padding:0; } .csa-app-modal { width:100%; height:100dvh; max-height:none; border-radius:0; } .csa-app-header { padding-top:max(14px, env(safe-area-inset-top)); } .csa-app-draft-bar { padding-bottom:max(12px, env(safe-area-inset-bottom)); flex-wrap:wrap; } .csa-app-draft-bar .choice-btn { width:auto; flex:1 1 auto; text-align:center; }
+      .csa-app-mode-tabs .choice-btn { width:auto; flex:1 1 auto; text-align:center; }
       .choice-buttons { grid-template-columns: 1fr; gap: 9px; max-height: 46vh; }
       .choice-btn { width: 100%; min-width: 0; padding: 8px 10px; text-align: left; }
     }
@@ -489,9 +517,8 @@
         <div class="panel-title">플레이어 상황</div>
         <div class="player-status" id="player-status">
           <div class="stat-row"><span class="stat-label">위치</span><span class="stat-value" id="stat-location">-</span></div>
-          <div class="stat-row"><span class="stat-label">순응도</span><span class="stat-value" id="stat-순응도">-</span></div>
           <div class="stat-row"><span class="stat-label">호감도</span><span class="stat-value" id="stat-호감도">-</span></div>
-          <div class="stat-row"><span class="stat-label">최면깊이</span><span class="stat-value" id="stat-최면깊이">-</span></div>
+          <div class="stat-row"><span class="stat-label">상식수용도</span><span class="stat-value" id="stat-상식수용도">-</span></div>
           <div class="stat-row"><span class="stat-label">상식개변</span><span class="stat-value" id="stat-csa">없음</span></div>
         </div>
       </div>
@@ -516,7 +543,7 @@
   <script src="stream.js"></script>
   <script src="ui.js"></script>
   <script src="sidebar.js"></script>
-  <script src="hypnosis-app.js"></script>
+  <script src="csa-app.js"></script>
   <script src="tts.js"></script>
   <script src="history.js"></script>
   <script>
@@ -561,6 +588,7 @@
     }
 
     async function loadGameContext() {
+      const preservedDraft = document.getElementById('chat-input')?.value || '';
       ui.setLoading(true);
       try {
         const ctx = await api.context(state.gameId);
@@ -569,6 +597,7 @@
         state.context = ctx.context || null;
         ui.updateMeta(ctx.context?.master?.title || ctx.context?.title || '게임 제목', state.turnCount);
         sidebar.updateContext(state.context);
+        if (preservedDraft && !document.getElementById('chat-input')?.value) document.getElementById('chat-input').value = preservedDraft;
         const activeCharacterId = state.context?.save?.last_character_id;
         if (activeCharacterId && activeCharacterId !== 'narrator') {
           sidebar.updateMind(state.context?.save?.npc_emotion?.[activeCharacterId]);
@@ -644,7 +673,10 @@
     // ─── Event Listeners ───
     document.getElementById('chat-send').addEventListener('click', async () => { await tts.unlockAudio(); handleTurnInput(); });
     document.getElementById('chat-input').addEventListener('keydown', (e) => {
-      if (e.key === 'Enter') { tts.unlockAudio(); handleTurnInput(); }
+      if (e.key === 'Enter') { e.preventDefault(); if (!state.isStreaming) { tts.unlockAudio(); handleTurnInput(); } }
+    });
+    document.getElementById('chat-input').addEventListener('input', event => {
+      if (!state.isStreaming && !state.inputLocked) ui.setTurnSubmissionEnabled(Boolean(event.target.value.trim() && state.gameId));
     });
     tts.init();
     document.getElementById('command-toggle').addEventListener('click', () => handleCommand('/안내'));
@@ -662,7 +694,7 @@
     }
 
     // Mirrors the Worker's own JSONB patch semantics: object keys deep-merge
-    // one level (so e.g. active_suggestions for an NPC this turn never
+    // one level so newly planned state is available to every prompt builder.
     // touched survives a patch that only carries another NPC's list),
     // arrays and primitives overwrite wholesale — matches how commit_turn's
     // own Supabase merge behaves, so the frontend never has to guess.
@@ -834,10 +866,10 @@
       structuredAction = null
     } = {}) {
       if (!structuredAction && !regenerationFeedback && !systemStart) {
-        const route = window.hypnosisApp?.resolveInputRoute?.(playerInput, state.context?.master?.characters || {});
+        const route = window.csaApp?.resolveInputRoute?.(playerInput, state.context?.master?.characters || {});
         if (route) {
           document.getElementById('chat-input').value = '';
-          await window.hypnosisApp.open(route.tab, { characterId: route.character_id, notice: route.notice });
+          await window.csaApp.open(route.tab, { characterId: route.character_id, notice: route.notice });
           return { redirected: true };
         }
       }
@@ -859,8 +891,8 @@
       const source = meta.source === 'choice_button'
         ? 'choice_button'
         : (DIRECT_MARKER_INPUT_RE.test(input) ? 'direct_marker' : 'direct_text');
-      const route = window.hypnosisApp?.resolveInputRoute?.(input, state.context?.master?.characters || {});
-      if (route) { await window.hypnosisApp.open(route.tab, { characterId: route.character_id, notice: route.notice }); return; }
+      const route = window.csaApp?.resolveInputRoute?.(input, state.context?.master?.characters || {});
+      if (route) { await window.csaApp.open(route.tab, { characterId: route.character_id, notice: route.notice }); return; }
       ui.addUserMessage(input);
       await runTurn({
         playerInput: input, source,
@@ -902,15 +934,16 @@
       await pending.renderDone;
       pending.narrativeElement = ui.finalizeNarrative();
       if (pending.narrativeElement && pending.narrativeReplacement) {
-        pending.narrativeElement.textContent = ui.stripBoldMarkers(pending.narrativeReplacement);
+        pending.narrativeElement.textContent = ui.formatNarrativeForDisplay(pending.narrativeReplacement);
       } else if (pending.narrativeElement && pending.contentAddition) {
-        pending.narrativeElement.textContent += `\n\n${ui.stripBoldMarkers(pending.contentAddition)}`;
+        pending.narrativeElement.textContent = ui.formatNarrativeForDisplay(pending.narrative);
       }
       return pending.narrativeElement;
     }
 
     async function retryStory(pending) {
       state.isStreaming = true;
+      state.turnPhase = 'story';
       ui.setLoading(true, pending.regenerationFeedback ? '마지막 턴을 다시 만드는 중...' : '서사 생성 중');
       ui.clearPendingTurnActions();
       try {
@@ -920,7 +953,7 @@
         // wait for this instead).
         const { networkDone, renderDone } = stream.story(
           state.gameId, pending.input, state.turnCount, chunk => ui.appendNarrative(chunk),
-          getFeedback(), pending.regenerationFeedback || null, pending.structuredAction || null
+          getFeedback(), pending.regenerationFeedback || null, pending.playerAction, pending.structuredAction || null
         );
         pending.renderDone = renderDone;
         const result = await networkDone;
@@ -937,16 +970,16 @@
         ui.setChoicesEnabled(true);
         if (await handleTurnFailureAsRollback(pending, '피드백 재생성에 실패하여 기존 턴을 복구했습니다.')) return;
         if (error.details?.error_code === 'APP_UI_REQUIRED' && error.details?.app_route) {
-          await window.hypnosisApp?.open(error.details.app_route.tab, { characterId: error.details.app_route.character_id, notice: error.details.app_route.notice || error.message });
+          await window.csaApp?.open(error.details.app_route.tab, { characterId: error.details.app_route.character_id, notice: error.details.app_route.notice || error.message });
           return;
         }
         if (pending.structuredAction?.type === 'app_transaction') {
           ui.failCurrentNarrative();
           const code = error.details?.error_code || error.status || 'UNKNOWN';
           ui.showPendingTurnActions(
-            `최면 어플 변경사항을 적용하지 못했습니다. 변경사항은 저장되지 않았습니다. [${code}]`,
+            `상식개변 앱 변경사항을 적용하지 못했습니다. 변경사항은 저장되지 않았습니다. [${code}]`,
             [
-              { label: '최면 어플 다시 열기', onClick: () => window.hypnosisApp?.open('suggestions') },
+              { label: '상식개변 앱 다시 열기', onClick: () => window.csaApp?.open('csa') },
               { label: '이번 시도 버리기', onClick: () => discardFailedTurn() }
             ]
           );
@@ -969,25 +1002,32 @@
         } else {
           ui.showRetryNotice(`서사 생성에 실패했습니다. [${code}]${suffix}`, '다시 생성', () => retryStory(pending));
         }
-      } finally { state.isStreaming = false; ui.setLoading(false); }
+      } finally { state.isStreaming = false; state.turnPhase = 'idle'; ui.setLoading(false); }
     }
 
     async function retryExtract(pending) {
       state.isStreaming = true;
+      state.turnPhase = 'extract';
       state.inputLocked = false;
-      ui.setLoading(true, '상태 분석 중');
+      // README section 7: extract/commit keep the draft textarea editable —
+      // only submission (chatSend) stays disabled while active.
+      ui.setLoading(true, '상태 분석 중', { lockInput: false });
       ui.clearPendingTurnActions();
       ui.clearUncommittedNarrativeBadges();
       let failed = false;
       try {
         // Started as soon as the network text is ready — runs concurrently
         // with the still-typing display queue, not after it.
-        const result = await api.extract(state.gameId, pending.narrative, pending.nextTurn, pending.input, pending.structuredAction || null);
+        const result = await api.extract(state.gameId, pending.narrative, pending.nextTurn, pending.input, pending.playerAction, pending.structuredAction || null);
         console.info('[extract-timing]', result.timing);
         pending.extract = result.extract;
         pending.extract.extract_degraded = result.extract_degraded === true;
         pending.extract.extract_degraded_reason = result.extract_degraded_reason || null;
+        pending.extract.extract_attempts = result.extract_attempts || 1;
+        pending.extract.finish_reason = result.finish_reason || null;
+        pending.extract.upstream_status = result.upstream_status || null;
         pending.extractDegraded = result.extract_degraded === true;
+        pending.extractRequestId = result.request_id || null;
         pending.timing = { ...(pending.timing || {}), extract: result.timing };
         // Story가 생성한 [3. 선택지] 블록은 본문에 그대로 표시한다 (제거 호출 삭제).
         // The actual DOM patch is deferred to finalizeRenderedNarrative() —
@@ -1010,9 +1050,9 @@
           await finalizeRenderedNarrative(pending);
           ui.markLastNarrativeUncommitted();
           ui.showPendingTurnActions(
-            `최면 어플 변경사항을 적용하지 못했습니다. 변경사항은 저장되지 않았습니다. [${code}]`,
+            `상식개변 앱 변경사항을 적용하지 못했습니다. 변경사항은 저장되지 않았습니다. [${code}]`,
             [
-              { label: '최면 어플 다시 열기', onClick: () => window.hypnosisApp?.open('suggestions') },
+              { label: '상식개변 앱 다시 열기', onClick: () => window.csaApp?.open('csa') },
               { label: '이번 시도 버리기', onClick: () => discardFailedTurn() }
             ]
           );
@@ -1037,20 +1077,22 @@
         );
       } finally {
         state.isStreaming = false;
+        state.turnPhase = failed ? 'blocked_failure' : 'idle';
         // Set before setLoading(false) — and stays set through it — so that
         // retryStory's own finally (which also calls ui.setLoading(false)
         // right after this function returns) can't silently re-enable the
         // input out from under a still-unresolved failure notice.
         if (failed) state.inputLocked = true;
-        ui.setLoading(false);
+        ui.setLoading(false, undefined, { lockInput: false });
         if (failed) ui.setChoicesEnabled(false);
       }
     }
 
     async function retryCommit(pending) {
       state.isStreaming = true;
+      state.turnPhase = 'commit';
       state.inputLocked = false;
-      ui.setLoading(true, '턴 저장 중');
+      ui.setLoading(true, '턴 저장 중', { lockInput: false });
       ui.clearPendingTurnActions();
       try {
         // Runs immediately after Extract, in parallel with the still-typing
@@ -1083,8 +1125,17 @@
           state.context = state.context || {};
           state.context.save = deepMergeStatePatch(state.context.save, saved.state_patch);
         }
+        // A successful Commit is the ownership boundary for the next draft:
+        // release chat submission before paced rendering, image work, or TTS.
+        state.isStreaming = false;
+        state.turnPhase = 'idle';
+        ui.setLoading(false, undefined, { lockInput: false });
+        ui.setChatDraftEditable(true);
+        ui.setTurnSubmissionEnabled(Boolean(document.getElementById('chat-input')?.value.trim()));
         ui.clearUncommittedNarrativeBadges();
         saveFeedback([]);
+        sidebar.updatePlayerInfo(state.context?.save);
+        sidebar.updatePlayerInnerThought(state.context?.save?.player_inner_thought, state.context?.save?.player?.name);
 
         // Screen updates (narrative text/choices/sidebar/media/scroll) wait
         // for the typing animation to actually finish — everything above
@@ -1097,14 +1148,28 @@
         // nothing new for TTS to read.
         if (pending.extractDegraded) {
           if (!pending.degradedNoticeShown) {
-            ui.showSystemMessage('상태 분석 일부를 복구하지 못해 이번 턴은 서사와 선택지만 저장했습니다. NPC 수치·이미지·암시·상식개변 상태는 변경되지 않았습니다.');
+            const code = pending.extract.extract_degraded_reason || 'UNKNOWN';
+            const requestId = pending.extractRequestId || '없음';
+            const attempts = pending.extract.extract_attempts || 1;
+            let degradedMessage = `상태 분석 실패 [${code} · 요청 ${requestId} · 시도 ${attempts}회].\n이번 턴은 서사와 선택지만 저장했으며\nNPC 수치·마인드 모니터·이미지·상식개변 상태는 유지했습니다.`;
+            const detailParts = [];
+            if (pending.extract.finish_reason) detailParts.push(`finish_reason=${pending.extract.finish_reason}`);
+            if (pending.extract.upstream_status) detailParts.push(`upstream_status=${pending.extract.upstream_status}`);
+            if (detailParts.length) degradedMessage += `\n상세정보: ${detailParts.join(', ')}`;
+            ui.showSystemMessage(degradedMessage);
             pending.degradedNoticeShown = true;
           }
         } else {
           sidebar.updateCharacter(pending.extract.character_id); sidebar.updateMind(pending.extract.npc_emotion); sidebar.renderStats(pending.extract.npc_stats, pending.extract.character_id, pending.extract.npc_stat_changes);
           prepareMedia(pending.extract);
         }
-        ui.renderGameplayChoices(pending.extract.choices, submitChoice, { setup: pending.mode === 'player_setup' });
+        const committedChoices = Array.isArray(state.context?.save?.last_choices) && state.context.save.last_choices.length
+          ? state.context.save.last_choices
+          : pending.extract.choices;
+        ui.renderGameplayChoices(committedChoices, submitChoice, {
+          setup: pending.mode === 'player_setup',
+          choiceMeta: state.context?.save?.last_choice_meta || []
+        });
         console.info('[turn-timing]', {
           turn: pending.nextTurn,
           story_first_content_ms: pending.timing?.story?.first_content_ms ?? null,
@@ -1121,16 +1186,18 @@
           await finalizeRenderedNarrative(pending);
           ui.markLastNarrativeUncommitted();
           ui.showPendingTurnActions(
-            `최면 어플 변경사항을 적용하지 못했습니다. 변경사항은 저장되지 않았습니다. [${code}]`,
+            `상식개변 앱 변경사항을 적용하지 못했습니다. 변경사항은 저장되지 않았습니다. [${code}]`,
             [
-              { label: '최면 어플 다시 열기', onClick: () => window.hypnosisApp?.open('suggestions') },
+              { label: '상식개변 앱 다시 열기', onClick: () => window.csaApp?.open('csa') },
               { label: '이번 시도 버리기', onClick: () => discardFailedTurn() }
             ]
           );
           return;
         }
         if (error.status === 409) {
-          document.getElementById('chat-input').value = pending.input;
+          const chatInput = document.getElementById('chat-input');
+          const currentDraft = chatInput?.value || '';
+          if (chatInput && !currentDraft.trim()) chatInput.value = pending.input;
           ui.showSystemMessage('다른 창에서 게임이 먼저 진행되었습니다. 최신 상태를 다시 불러왔습니다.');
           await loadGameContext();
         } else {
@@ -1144,17 +1211,17 @@
             () => retryCommit(pending)
           );
         }
-      } finally { state.isStreaming = false; ui.setLoading(false); }
+      } finally { state.isStreaming = false; if (state.turnPhase !== 'blocked_failure') state.turnPhase = 'idle'; ui.setLoading(false, undefined, { lockInput: false }); }
     }
 
     function prepareMedia(extract) {
       tts.enqueue(extract, state.turnCount);
       if (extract.character_id && extract.character_id !== 'narrator') {
-        ui.setLoading(true, '이미지 준비 중');
+        state.turnPhase = 'media';
         api.image(state.gameId, extract.character_id, extract.image_id)
           .then(res => { if (res.image_url) ui.showImage(res.image_url); })
           .catch(() => ui.showRetryNotice('이미지를 불러오지 못했습니다.', '이미지만 다시 불러오기', () => prepareMedia({ ...extract, dialogue_lines: [] }), false))
-          .finally(() => ui.setLoading(false));
+          .finally(() => { if (state.turnPhase === 'media') state.turnPhase = 'idle'; });
       }
     }
 
@@ -1187,7 +1254,7 @@
       const card = (label, value, detail = '') => { const node = createManualElement('div', 'app-manual-card'); node.append(createManualElement('small', '', label), createManualElement('strong', '', value)); if (detail) node.appendChild(createManualElement('small', '', detail)); grid.appendChild(node); return node; };
       const expCard = card('경험치', `${status.exp || 0} / ${status.next_level_exp || 0}`);
       const progress = createManualElement('div', 'app-manual-progress'); const fill = createManualElement('div', 'app-manual-progress-fill'); const percent = Number(status.exp_percent) || 0; fill.style.width = `${percent}%`; progress.setAttribute('role', 'progressbar'); progress.setAttribute('aria-valuemin', '0'); progress.setAttribute('aria-valuemax', '100'); progress.setAttribute('aria-valuenow', String(percent)); progress.appendChild(fill); expCard.appendChild(progress);
-      card('레벨', `Lv.${status.level || 1}`); card('사용 가능 암시', `${status.available_strength || '약함'}까지`); card('개인 암시', `${status.suggestion_active || 0} / ${status.suggestion_max || 0}`, `남은 슬롯 ${status.suggestion_remaining || 0}`); card('상식개변', `${status.csa_active || 0} / ${status.csa_max || 0}`, `현재 범위: ${status.csa_scope_label || '-'}`);
+      card('레벨', `Lv.${status.level || 1}`); card('사용 가능 강도', `${status.available_strength || '약함'}까지`); card('상식개변', `${status.csa_active || 0} / ${status.csa_max || 0}`, `현재 범위: ${status.csa_scope_label || '-'}`);
       return grid;
     }
 
@@ -1205,17 +1272,15 @@
     function renderAppManualModal(manual, opener) {
       const overlay = createManualElement('div', 'app-manual-overlay');
       const modal = createManualElement('div', 'app-manual-modal'); modal.setAttribute('role', 'dialog'); modal.setAttribute('aria-modal', 'true'); modal.setAttribute('aria-labelledby', 'app-manual-title');
-      const header = createManualElement('header', 'app-manual-header'); const heading = document.createElement('div'); const title = createManualElement('h2', '', manual.title || '최면 어플 사용자 매뉴얼'); title.id = 'app-manual-title'; heading.append(title, createManualElement('p', '', manual.subtitle || '')); const close = createManualElement('button', 'app-manual-close', '닫기'); close.type = 'button'; close.setAttribute('aria-label', '매뉴얼 닫기'); header.append(heading, close);
+      const header = createManualElement('header', 'app-manual-header'); const heading = document.createElement('div'); const title = createManualElement('h2', '', manual.title || '상식개변 앱 사용자 매뉴얼'); title.id = 'app-manual-title'; heading.append(title, createManualElement('p', '', manual.subtitle || '')); const close = createManualElement('button', 'app-manual-close', '닫기'); close.type = 'button'; close.setAttribute('aria-label', '매뉴얼 닫기'); header.append(heading, close);
       const body = createManualElement('div', 'app-manual-body');
-      body.appendChild(manualSection('현재 어플 상태', true, section => section.appendChild(renderManualStatus(manual))));
+      body.appendChild(manualSection('현재 앱 상태', true, section => section.appendChild(renderManualStatus(manual))));
       body.appendChild(manualSection('현재 상태 진단', true, section => (manual.diagnostics || []).forEach(item => section.appendChild(createManualElement('div', `app-manual-diagnostic ${item.type || 'info'}`, item.text)))));
       body.appendChild(manualSection('빠른 사용법', true, section => appendManualList(section, manual.quick_start, true)));
-      body.appendChild(manualSection('개인 암시', false, section => { section.append(createManualElement('p', '', manual.suggestions?.description || ''), createManualElement('h3', '', '규칙')); appendManualList(section, manual.suggestions?.rules); renderManualTiers(section, manual.suggestions?.tiers, true); }));
-      body.appendChild(manualSection('상식개변', false, section => { section.appendChild(createManualElement('p', '', manual.common_sense?.description || '')); appendManualList(section, manual.common_sense?.rules); section.appendChild(createManualElement('p', '', `현재 범위: ${manual.common_sense?.current_scope?.label || '-'}`)); appendManualList(section, (manual.common_sense?.scope_unlocks || []).map(item => `${item.level_range} · ${item.scope_label} · 활성 ${item.max_active}개${item.available ? ' · 사용 가능' : ''}`)); renderManualTiers(section, manual.common_sense?.tiers); }));
-      body.appendChild(manualSection('최면깊이', false, section => { section.appendChild(createManualElement('p', '', manual.hypnosis_depth?.description || '')); appendManualList(section, manual.hypnosis_depth?.rules); }));
+      body.appendChild(manualSection('상식개변 규칙', false, section => { section.appendChild(createManualElement('p', '', manual.common_sense?.description || '')); appendManualList(section, manual.common_sense?.rules); section.appendChild(createManualElement('p', '', `현재 범위: ${manual.common_sense?.current_scope?.label || '-'}`)); appendManualList(section, (manual.common_sense?.scope_unlocks || []).map(item => `${item.level_range} · ${item.scope_label} · 활성 ${item.max_active}개${item.available ? ' · 사용 가능' : ''}`)); renderManualTiers(section, manual.common_sense?.tiers, true); }));
       body.appendChild(manualSection('NPC 수치 설명', false, section => (manual.stats || []).forEach(stat => { const item = createManualElement('div', 'app-manual-active-item'); item.append(createManualElement('strong', '', `${stat.label} (${stat.range})`), createManualElement('div', '', stat.description), createManualElement('small', '', stat.change_rule)); section.appendChild(item); })));
       body.appendChild(manualSection('레벨·해금 기능', false, section => (manual.unlocks || []).forEach(unlock => { const title = createManualElement('p', '', `Lv.${unlock.level}`); section.appendChild(title); appendManualList(section, unlock.items); })));
-      body.appendChild(manualSection('현재 활성 효과', true, section => { const effects = manual.active_effects || {}; if (!(effects.suggestions || []).length && !(effects.common_sense || []).length) { section.appendChild(createManualElement('p', '', '현재 활성 효과가 없습니다.')); return; } const groups = new Map(); (effects.suggestions || []).forEach(item => groups.set(item.character_name, [...(groups.get(item.character_name) || []), item])); groups.forEach((items, name) => { section.appendChild(createManualElement('h3', '', name)); items.forEach(item => section.appendChild(createManualElement('div', 'app-manual-active-item', `[${item.strength}] ${item.content}`))); }); (effects.common_sense || []).forEach(item => section.appendChild(createManualElement('div', 'app-manual-active-item', `[${item.scope_label} · ${item.strength}]\n${item.content}`))); }));
+      body.appendChild(manualSection('현재 활성 상식개변', true, section => { const effects = manual.active_effects?.common_sense || []; if (!effects.length) { section.appendChild(createManualElement('p', '', '현재 활성 상식개변이 없습니다.')); return; } effects.forEach(item => section.appendChild(createManualElement('div', 'app-manual-active-item', `[${item.scope_label} · ${item.strength}]\n${item.content}`))); }));
       body.appendChild(manualSection('자주 발생하는 실패 원인', false, section => (manual.common_failures || []).forEach(item => { section.appendChild(createManualElement('h3', '', item.title)); appendManualList(section, item.reasons); })));
       const closeModal = () => { document.removeEventListener('keydown', onKey); overlay.remove(); opener?.focus(); };
       const onKey = event => { if (event.key === 'Escape') closeModal(); };
@@ -1254,7 +1319,7 @@
       const savedChoices = Array.isArray(state.context?.save?.last_choices) ? state.context.save.last_choices : [];
       const choices = savedChoices.length ? savedChoices : ui.parseChoices(state.context?.recent_memories?.at(-1)?.content || '');
       const setup = state.context?.save?.player_setup?.status !== 'complete';
-      ui.renderGameplayChoices(choices, submitChoice, { setup });
+      ui.renderGameplayChoices(choices, submitChoice, { setup, choiceMeta: state.context?.save?.last_choice_meta || [] });
       ui.showSystemMessage(message);
     }
 
@@ -1296,10 +1361,10 @@
     }
 
     window.resumeGame = resumeGame;
-    window.showAppManual = () => window.hypnosisApp?.open('manual');
-    window.showAppInfo = () => window.hypnosisApp?.open('manual');
-    window.showHypnosisApp = () => window.hypnosisApp?.open('home');
-    window.runHypnosisStructuredAction = runStructuredAction;
+    window.showAppManual = () => window.csaApp?.open('manual');
+    window.showAppInfo = () => window.csaApp?.open('manual');
+    window.showCsaApp = () => window.csaApp?.open('home');
+    window.runCsaStructuredAction = runStructuredAction;
     window.showResetModal = showResetModal;
     window.showFeedbackModal = showFeedbackModal;
 

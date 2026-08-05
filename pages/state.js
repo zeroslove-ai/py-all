@@ -10,6 +10,9 @@ const state = {
 
   // ─── UI 상태 ───
   isStreaming: false,
+  // story/extract/commit block submission. media is informational only and
+  // must never take the chat draft or send button back from the player.
+  turnPhase: 'idle',
   autoTts: true,
   pendingResetConfirm: false,
   startupRequested: false,

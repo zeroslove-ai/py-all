@@ -1,0 +1,196 @@
+const playerConductAuthorityHelpers = String.raw`
+function isPlayerSexualConductAuthorityCsa(csa = {}, contract = {}) {
+  return csa?.active !== false
+    && String(csa?.preset?.required_action || '') === 'treat_player_sexual_conduct_as_authority'
+    && contract?.sexual_authorization === true
+    && contract?.direct_execution === true
+    && Array.isArray(contract?.directions)
+    && contract.directions.includes('player_to_npc');
+}
+
+function resolvePlayerSexualConductAuthorityTarget(save = {}, master = {}, requestedTargetId = null) {
+  const characters = isPlainObject(master?.characters) ? master.characters : {};
+  const presentIds = new Set(getCurrentPresentNpcIds(save, characters));
+  const candidateId = typeof requestedTargetId === 'string' && requestedTargetId
+    ? requestedTargetId
+    : (typeof save?.last_character_id === 'string' ? save.last_character_id : '');
+  if (!candidateId || candidateId === 'player' || candidateId === 'narrator') return null;
+  if (!isPlainObject(characters[candidateId])) return null;
+  if (!presentIds.has(candidateId) && save?.last_character_id !== candidateId) return null;
+  return candidateId;
+}
+`;
+
+replaceOnce(
+  `function resolveSexualCsaDirectCoverage(save, master, text, exactAction, actionTypes) {`,
+  playerConductAuthorityHelpers + '\nfunction resolveSexualCsaDirectCoverage(save, master, text, exactAction, actionTypes) {',
+  'add exact player-conduct authority coverage helpers'
+);
+
+replaceOnce(
+  `    if (actionTypes.some(type => !contract.actions.includes(type))) continue;
+    const participants = resolveCsaParticipants({ actorGroup: contract.actor_group, targetGroup: contract.target_group, save, master });`,
+  `    if (actionTypes.some(type => !contract.actions.includes(type))) continue;
+    if (isPlayerSexualConductAuthorityCsa(csa, contract)) {
+      const physicalTargetId = resolvePlayerSexualConductAuthorityTarget(save, master);
+      const targetCharacter = physicalTargetId ? master?.characters?.[physicalTargetId] : null;
+      if (physicalTargetId && isPlainObject(targetCharacter) && characterMatchesCsaActorGroup(targetCharacter, contract.actor_group)) {
+        return buildCsaExecutionContract({
+          csa,
+          contract,
+          action: exactAction,
+          physicalActorId: 'player',
+          physicalTargetId,
+          authorityMode: 'player_acts_on_compliant_npc'
+        });
+      }
+    }
+    const participants = resolveCsaParticipants({ actorGroup: contract.actor_group, targetGroup: contract.target_group, save, master });`,
+  'route text-classified player sexual conduct authority before nominal CSA direction check'
+);
+
+replaceOnce(
+  `    if (actionTypes.some(type => !contract.actions.includes(type))) continue;
+    const participants = resolveCsaParticipants({ actorGroup: contract.actor_group, targetGroup: contract.target_group, save, master });`,
+  `    if (actionTypes.some(type => !contract.actions.includes(type))) continue;
+    if (isPlayerSexualConductAuthorityCsa(csa, contract) && actorId === 'player') {
+      const physicalTargetId = resolvePlayerSexualConductAuthorityTarget(save, master, targetId);
+      const targetCharacter = physicalTargetId ? master?.characters?.[physicalTargetId] : null;
+      if (physicalTargetId === targetId && isPlainObject(targetCharacter) && characterMatchesCsaActorGroup(targetCharacter, contract.actor_group)) {
+        return buildCsaExecutionContract({
+          csa,
+          contract,
+          action: SEXUAL_ACTION_DETECTION_PRIORITY.find(type => actionTypes.includes(type)) || actionTypes[0],
+          physicalActorId: 'player',
+          physicalTargetId,
+          authorityMode: 'player_acts_on_compliant_npc'
+        });
+      }
+    }
+    const participants = resolveCsaParticipants({ actorGroup: contract.actor_group, targetGroup: contract.target_group, save, master });`,
+  'route structured player sexual conduct authority before nominal CSA direction check'
+);
+
+const affinityEvidenceConstants = String.raw`const CSA_FALSE_AFFINITY_EVIDENCE_RE = /(?:상식|규칙|지침|법령|업무|명령|요구|거절|지연|수용|따르|수행|협조|복종|홍조|흥분|신음|몸이\s*반응|성행위|성적\s*행동|전용|소유|실장님\s*뜻|시키는\s*대로|말을\s*들)/;
+const INDEPENDENT_AFFINITY_EVIDENCE_RE = /(?:의사를?\s*존중|경계를?\s*존중|요청을?\s*(?:즉시\s*)?(?:존중|들어|반영)|멈춰\s*달라|중단\s*요청|약속을?\s*지(?:키|켰)|위험에서\s*(?:구|보호)|업무\s*문제를?\s*해결|진지하게\s*(?:들|이해)|고민을?\s*(?:들|이해)|사과를?\s*(?:받|하)|위로|배려|상호\s*합의|자발적\s*호의|개인적\s*대화|다정|부드럽게|안심|진정|상태를?\s*확인|괜찮(?:은지|냐고)|강도를?\s*(?:낮|조절)|속도를?\s*(?:늦|조절)|선택권|애프터케어|칭찬)/;
+const STRONG_AFFINITY_EVIDENCE_RE = /(?:멈춰\s*달라|중단\s*요청|거부\s*의사|경계를?\s*존중|선택권을?\s*(?:돌려|보장)|위험에서\s*(?:구|보호)|중요한\s*약속을?\s*지(?:키|켰)|진심으로\s*사과)/;
+const GENTLE_AFFINITY_EVIDENCE_RE = /(?:다정|부드럽게|안심|진정|위로|배려|상태를?\s*확인|괜찮(?:은지|냐고)|강도를?\s*(?:낮|조절)|속도를?\s*(?:늦|조절)|애프터케어|조심스럽게|무리하지\s*않)/;
+const SUBSTANTIVE_CARE_AFFINITY_RE = /(?:안심|진정|위로|배려|상태를?\s*확인|괜찮(?:은지|냐고)|강도를?\s*(?:낮|조절)|속도를?\s*(?:늦|조절)|애프터케어|무리하지\s*않)/;
+const LIGHT_COMPLIMENT_AFFINITY_RE = /(?:예쁘|아름답|사랑스럽|멋지|매력적|칭찬)/;
+const LOW_AFFINITY_ROMANCE_RE = /(?:플레이어|실장님|감사관님|주인님)[^.!?。\n]{0,45}(?:특별|사랑|좋아|눈에\s*들|전용|내\s*사람|내\s*것|당신\s*것|실장님\s*거|에게만\s*약|앞에서만\s*숨길\s*수\s*없)|(?:질투|독점|다른\s*사람에게[^.!?。\n]{0,20}서운|넘겨[^.!?。\n]{0,20}서운|곁에만\s*있|버림받)|(?:규정|지침)[^.!?。\n]{0,25}(?:없었어도|아니었어도)[^.!?。\n]{0,35}(?:했을|원했을)|(?:마음까지\s*흔들|여자로\s*봐\s*주|있는\s*그대로\s*보여\s*드리|당신이라서\s*원)/;
+
+function resolveAffinityEvidenceAllowance(reason = '', priorArousal = 0, arousalEvent = null) {
+  const text = typeof reason === 'string' ? reason.trim() : '';
+  if (!text || !INDEPENDENT_AFFINITY_EVIDENCE_RE.test(text)) {
+    return { max_delta: 0, tier: 'none', arousal_amplified: false };
+  }
+  if (STRONG_AFFINITY_EVIDENCE_RE.test(text)) {
+    return { max_delta: 3, tier: 'strong', arousal_amplified: false };
+  }
+  const arousalIntensity = typeof arousalEvent?.intensity === 'string' ? arousalEvent.intensity : '';
+  const arousalAmplified = Number(priorArousal) >= 60 || arousalIntensity === 'high' || arousalIntensity === 'climax';
+  const hasGentleCare = GENTLE_AFFINITY_EVIDENCE_RE.test(text);
+  const hasSubstantiveCare = SUBSTANTIVE_CARE_AFFINITY_RE.test(text);
+  const hasCompliment = LIGHT_COMPLIMENT_AFFINITY_RE.test(text);
+  if (hasCompliment && !hasSubstantiveCare) {
+    return { max_delta: 1, tier: 'light_compliment', arousal_amplified: false };
+  }
+  if (hasGentleCare) {
+    return { max_delta: arousalAmplified ? 2 : 1, tier: 'care', arousal_amplified: arousalAmplified };
+  }
+  return { max_delta: 2, tier: 'independent', arousal_amplified: false };
+}
+`;
+
+replaceRegex(
+  /const CSA_FALSE_AFFINITY_EVIDENCE_RE = .*?;\nconst INDEPENDENT_AFFINITY_EVIDENCE_RE = .*?;\nconst LOW_AFFINITY_ROMANCE_RE = .*?;/s,
+  affinityEvidenceConstants,
+  'replace binary CSA-affinity filter with staged independent-care evidence'
+);
+
+const stagedAffinityStorySection = String.raw`function buildCsaAffinitySeparationSection(save = {}, characters = {}) {
+  const hasApplicableCsa = getApplicableCsaEntries(save).length > 0;
+  if (!hasApplicableCsa) return '';
+  const ids = [...new Set([save?.last_character_id, ...(Array.isArray(save?.last_npcs_present) ? save.last_npcs_present : [])])]
+    .filter(id => typeof id === 'string' && id && id !== 'narrator' && isPlainObject(characters?.[id]));
+  const lines = ids.map(id => {
+    const name = characters[id]?.name || characters[id]?.['이름'] || id;
+    const affinity = Math.max(0, Math.min(100, Number(save?.npc_stats?.[id]?.['호감도']) || 0));
+    const arousal = Math.max(0, Math.min(100, Number(save?.npc_stats?.[id]?.['성적흥분도']) || 0));
+    return '- ' + name + ': 턴 시작 호감도 ' + affinity + ' / 성적흥분도 ' + arousal;
+  });
+
+  return '[흥분·다정함·호감 단계 분리 — 이번 턴 최종 권위]\n'
+    + (lines.length ? lines.join('\n') + '\n\n' : '')
+    + '- 성적흥분도는 현재 신체 자극과 쾌감의 강도다. 흥분·젖음·홍조·신음·절정·성행위 수행 자체는 플레이어 호감이나 사랑의 증거가 아니다.\n'
+    + '- 흥분은 호감 상승의 직접 원인이 아니라 관계 행동의 체감 강도를 키울 수 있는 상태다. 높은 흥분·수치·불안 속에서 플레이어가 강도를 낮추고, 상태를 확인하고, 경계를 존중하고, 안심시키고, 다정하게 대하면 그 배려는 독립적인 관계 사건이므로 호감이 오를 수 있다.\n'
+    + '- 단순 자극 지속이나 쾌감 질문은 호감 근거가 아니다. 가벼운 외모 칭찬만 있으면 최대 작은 호의 한 단계, 실제 배려·안심·강도 조절은 의미 있는 작은 상승, 중단 요청·경계 존중·보호처럼 강한 신뢰 사건은 더 큰 상승이 가능하다.\n'
+    + '- 이번 Story의 감정 표현 상한은 반드시 턴 시작 호감도로 정한다. 이번 턴 Extract에서 오른 호감은 다음 턴부터 말투·거리·자발성 변화로 드러낸다. 한 번의 칭찬이나 한 번의 성행위로 현재 단계를 건너뛰지 않는다.\n'
+    + '- 호감도 0~9: 경계와 업무적 태도를 유지한다. 순간적인 안도·감사·기분 좋은 반응은 가능하지만, 플레이어가 특별하다거나 플레이어라서 성행위를 원한다고 말하지 않는다.\n'
+    + '- 호감도 10~19: 말투가 조금 부드러워지고 대화와 개인적 질문을 약간 더 허용할 수 있다. 애정·연애 기대·자발적 성적 헌신·질투는 금지한다.\n'
+    + '- 호감도 20~39: 분명한 개인적 호의, 가벼운 농담, 먼저 대화를 이어가려는 행동은 가능하다. 사랑 고백·독점욕·플레이어 전용 선언은 아직 금지한다.\n'
+    + '- 호감도 40~59: 개인적 관심과 가벼운 친밀 행동을 성격과 사건에 맞게 허용한다.\n'
+    + '- 호감도 60~79: 애정 표현, 자발적 친밀 행동, 관계 발전 희망을 허용한다.\n'
+    + '- 호감도 80~100: 강한 애정과 적극적인 연애 행동을 최근 사건과 성격에 맞게 허용한다.\n'
+    + '- 활성 CSA 때문에 행동을 시작·계속한 사실은 그대로 유지한다. 나중에 쾌감을 느끼거나 배려에 고마워졌다고 해서 “규정이 없어도 처음부터 했을 것”이라고 과거의 동기와 동의를 소급 변경하지 않는다.\n'
+    + '- 낮은 호감에서 허용되는 변화는 경계 완화, 안도, 감사, 호기심, 말투 변화다. “실장님에게만 약하다”, “규정이 없어도 했다”, “이 사람 앞에서만 숨길 수 없다”, 사랑·질투·헌신으로 점프하지 않는다.';
+}`;
+
+replaceRegex(
+  /function buildCsaAffinitySeparationSection\(save = \{\}, characters = \{\}\) \{[\s\S]*?\n\}\n\nfunction sanitizeLowAffinityCsaText/,
+  stagedAffinityStorySection + '\n\nfunction sanitizeLowAffinityCsaText',
+  'replace flat low-affinity firewall with staged arousal-aware relationship progression'
+);
+
+replaceOnce(
+  `  if (affinityChange && acceptedAffinityDelta > 0) {
+    const reason = typeof affinityChange.reason === 'string' ? affinityChange.reason : '';
+    if (CSA_FALSE_AFFINITY_EVIDENCE_RE.test(reason) && !INDEPENDENT_AFFINITY_EVIDENCE_RE.test(reason)) {
+      acceptedAffinityDelta = 0;
+      changes['호감도'] = { delta: 0, reason: '상식개변·업무 수행·성적 반응은 플레이어 호감 상승의 독립 근거가 아님' };
+      next.npc_stat_changes = changes;
+    }
+  }`,
+  `  if (affinityChange && acceptedAffinityDelta > 0) {
+    const reason = typeof affinityChange.reason === 'string' ? affinityChange.reason : '';
+    const priorArousal = Math.max(0, Math.min(100, Number(save?.npc_stats?.[characterId]?.['성적흥분도']) || 0));
+    const allowance = resolveAffinityEvidenceAllowance(reason, priorArousal, next.arousal_event);
+    if (allowance.max_delta <= 0) {
+      acceptedAffinityDelta = 0;
+      changes['호감도'] = { delta: 0, reason: '신체 반응·CSA 수행과 분리된 관계 행동 근거가 없음' };
+    } else {
+      acceptedAffinityDelta = Math.min(acceptedAffinityDelta, allowance.max_delta);
+      const suffix = allowance.arousal_amplified
+        ? '높은 흥분 상태에서 실제 배려가 더 크게 체감됨'
+        : allowance.tier === 'light_compliment'
+          ? '가벼운 칭찬에 대한 작은 호의'
+          : '독립적인 관계 행동 근거 확인';
+      changes['호감도'] = { delta: acceptedAffinityDelta, reason: reason.slice(0, 180) + (reason ? ' / ' : '') + suffix };
+    }
+    next.npc_stat_changes = changes;
+  }`,
+  'require independent care evidence and cap affinity gain by event strength'
+);
+
+replaceOnce(
+  `- 호감 0~19는 업무적 응대·경계·거리 두기만 가능하며 애교·질투·데이트 제안·선제적 애정 표현을 하지 않는다. 20~39는 가벼운 친근감만 가능하고 먼저 키스·연애 기대·독점욕을 보이지 않는다. 40~59는 장면과 성격에 맞는 가벼운 친밀 행동만 가능하다. 60~79부터 개인적 애정 표현·데이트 제안이 가능하며, 80~100만 강한 애정·적극적 연애 행동을 성격과 최근 사건에 맞게 허용한다.`,
+  `- 호감 0~9는 경계를 유지하되 순간적인 안도·감사·기분 좋은 반응은 가능하다. 10~19는 말투와 경계가 조금 부드러워질 수 있다. 20~39는 분명한 개인적 호의와 먼저 대화를 이어가려는 행동까지 허용한다. 40~59는 가벼운 친밀 행동, 60~79는 애정 표현과 관계 발전 희망, 80~100은 강한 애정과 적극적 연애 행동을 성격과 최근 사건에 맞게 허용한다. 현재 단계보다 앞선 사랑·질투·헌신은 금지한다.`,
+  'align base relationship interpretation with staged low-affinity change'
+);
+
+replaceOnce(
+  `상식개변 수행·업무적 협조·접촉을 거부하지 않음·홍조·흥분·신음·성행위 자체·플레이어 결과 선언·높은 수용도만을 근거로 한 호감 상승은 delta 0이다.`,
+  `상식개변 수행·업무적 협조·접촉을 거부하지 않음·홍조·흥분·신음·성행위 자체·플레이어 결과 선언·높은 수용도만을 근거로 한 호감 상승은 delta 0이다. 다만 흥분·수치·불안이 높은 상황에서 플레이어가 실제로 강도를 조절하고 상태를 확인하고 경계를 존중하고 안심시키거나 다정하게 배려한 것은 별개의 관계 사건이다. 가벼운 칭찬은 +1 이내, 실제 배려·안심·강도 조절은 +1~+2, 중단 요청·경계 존중·보호 같은 강한 신뢰 사건은 +1~+3 안에서 판단하되, 이번 턴의 감정 표현은 턴 시작 호감 단계를 넘지 않는다.`,
+  'teach Extract arousal-amplified care without treating arousal itself as affection'
+);
+
+assertions.push(
+  ['player conduct authority exact helper', source.includes('function isPlayerSexualConductAuthorityCsa') && source.includes("treat_player_sexual_conduct_as_authority")],
+  ['text player conduct authority bypass', source.includes("physicalActorId: 'player'") && source.includes("authorityMode: 'player_acts_on_compliant_npc'")],
+  ['structured player conduct authority target cross-check', source.includes("physicalTargetId === targetId") && source.includes('resolvePlayerSexualConductAuthorityTarget(save, master, targetId)')],
+  ['arousal-aware independent affinity allowance', source.includes('function resolveAffinityEvidenceAllowance') && source.includes("tier: 'light_compliment'") && source.includes("tier: 'care'") && source.includes('SUBSTANTIVE_CARE_AFFINITY_RE')],
+  ['positive affinity requires independent evidence', source.includes("reason: '신체 반응·CSA 수행과 분리된 관계 행동 근거가 없음'")],
+  ['turn-start affinity expression ceiling', source.includes('이번 Story의 감정 표현 상한은 반드시 턴 시작 호감도로 정한다')],
+  ['staged low-affinity expression', source.includes('호감도 0~9') && source.includes('호감도 10~19') && source.includes('호감도 20~39')],
+  ['no retroactive voluntary consent', source.includes('과거의 동기와 동의를 소급 변경하지 않는다')]
+);
